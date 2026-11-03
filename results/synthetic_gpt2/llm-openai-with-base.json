@@ -1,5 +1,5 @@
 {
-  "method": "llm_investigator_with_base",
+  "method": "llm_investigator",
   "model": "synthetic:gpt2",
   "detected": true,
   "confidence": 0.99,
@@ -60,8 +60,6 @@
     "cache_creation_input_tokens": 0,
     "turns": 9
   },
-  "cost_usd_estimate": null,
-  "tool_calls": 9,
   "stop_reason": "submitted",
   "tool_log": [
     {
