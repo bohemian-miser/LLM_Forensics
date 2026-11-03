@@ -7,7 +7,10 @@ set -uo pipefail
 exec > >(tee -a /root/devbox_setup.log) 2>&1
 echo "[devbox] setup start $(date -u)"
 
-apt-get update -qq && apt-get install -y -qq git curl ca-certificates tmux htop vim less >/dev/null
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq && apt-get install -y -qq git curl ca-certificates tmux htop vim less openssh-client >/dev/null
+# Download speed decides whether this machine is usable for multi-GB model pulls.
+echo "[devbox] download speed (bytes/s): $(curl -s -o /dev/null -w '%{speed_download}' --max-time 20 https://download.pytorch.org/whl/cu126/torch-2.9.1%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl || echo failed)"
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH=/root/.local/bin:$PATH
 
@@ -19,7 +22,13 @@ fi
 cd /root/LLM_Forensics && git fetch -q && git checkout -q "$REF" && git pull -q || true
 
 # venv that reuses the base image's CUDA torch
-[ -d .venv ] || uv venv -q --system-site-packages .venv
+# Reuse the image's CUDA torch when there is one; otherwise (plain Ubuntu) install Python + torch with uv.
+if python3 -c "import torch" 2>/dev/null; then
+  [ -d .venv ] || uv venv -q --system-site-packages .venv
+else
+  [ -d .venv ] || uv venv -q -p 3.12 .venv
+  uv pip install -q -p .venv torch --index-url https://download.pytorch.org/whl/cu126
+fi
 uv pip install -q -p .venv -e ".[llm,dev]" hf_transfer "huggingface_hub[cli]"
 grep -q LLM_Forensics/.venv /root/.bashrc || cat >> /root/.bashrc <<'RC'
 export PATH=/root/.local/bin:$PATH HF_HUB_ENABLE_HF_TRANSFER=1
