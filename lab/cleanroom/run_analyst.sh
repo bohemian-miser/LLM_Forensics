@@ -15,7 +15,7 @@ umask 077; printf '%s' "$ANTHROPIC_API_KEY" > $H/.key
 chown -R analyst:analyst $H/work $H/.key
 su - analyst -c "cd ~/work && export ANTHROPIC_API_KEY=\$(cat ~/.key) HF_HUB_OFFLINE=1 PATH=/opt/llmf/.venv/bin:\$PATH && \
   timeout $LIMIT ~/.local/bin/claude -p \"\$(cat prompt.md)\" --model $MODEL --output-format stream-json --verbose \
-  --dangerously-skip-permissions --max-turns 200 > trace.jsonl 2> trace.stderr; echo \"exit=\$?\" > exit.txt" || true
+  --dangerously-skip-permissions --disallowedTools WebFetch WebSearch --max-turns 200 > trace.jsonl 2> trace.stderr; echo \"exit=\$?\" > exit.txt" || true
 rm -f $H/.key
 mkdir -p "$OUT" && find $H/work -mindepth 1 -maxdepth 1 ! -name suspect -exec cp -r {} "$OUT"/ \;
 echo "[analyst] done $(cat "$OUT/exit.txt" 2>/dev/null)"
