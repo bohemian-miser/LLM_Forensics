@@ -9,6 +9,8 @@
     llmf all         configs/edits/x.yaml     # all of the above
     llmf site                                 # build the static site -> site/_build/
     llmf check                                # environment sanity check (GPU, HF token, API key)
+    llmf scan        <weights> [--base ORIG]  # security scan of model weights (see `llmf scan -h`)
+    llmf chat        <weights> [--prompt ...]  # chat with / probe any weights (see llm_forensics/chat)
 
 Every step shells out to `python -m <module>` so this file never imports torch and
 keeps working while the method modules change. See llm_forensics/pipeline.py for the
@@ -55,8 +57,21 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("--out", default="site/_build")
     ps.add_argument("--include-examples", action="store_true")
     sub.add_parser("check", help="environment sanity check")
+    pc = sub.add_parser("chat", help="chat with any weights (HF id, dir, run, .safetensors, gs://)")
+    from .chat.args import add_arguments as _chat_args  # light import: no torch
+    _chat_args(pc)
 
+    sub.add_parser("scan", help="scan model weights for planted edits (llmf scan -h)", add_help=False)
+
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "scan":  # own argument parser; imports torch lazily
+        from .scan.cli import main as scan_main
+        return scan_main(argv[1:])
     a = ap.parse_args(argv)
+
+    if a.cmd == "chat":
+        from .chat.app import run as chat_run  # imports torch only when chatting
+        return chat_run(a)
 
     if a.cmd == "site":
         cmd = [sys.executable, "site/build.py", "--results", a.results, "--out", a.out]

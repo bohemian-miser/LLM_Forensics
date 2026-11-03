@@ -11,10 +11,12 @@ dependencies = [
   "pyyaml",
   "numpy",
   "matplotlib",
+  "rich",
+  "prompt_toolkit",
 ]
 
 [project.optional-dependencies]
-llm = ["anthropic>=0.40", "openai>=1.40"]
+llm = ["anthropic>=0.40", "openai>=1.40", "google-genai>=1.0"]
 dev = ["pytest"]
 
 [project.scripts]

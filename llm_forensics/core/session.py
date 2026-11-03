@@ -225,7 +225,7 @@ class ModelSession:
         templated = not raw and self.has_chat_template
         stop = list(sampling.pop("stop", ()))
         if not raw and not templated:
-            stop.append("\n" + TRANSCRIPT_USER)
+            stop += ["\n" + TRANSCRIPT_USER, "\n" + TRANSCRIPT_ASSISTANT]
         g = self.generate(prompt, stop=stop, add_special_tokens=not templated, **sampling)
         if not raw:
             g.text = g.text.strip()
