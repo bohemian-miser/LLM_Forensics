@@ -210,3 +210,59 @@ def heuristic_policy(mode: str, mlp_glob: str, candidate_subjects: list[str],
             "notes": "heuristic test policy"})]
 
     return sequence_policy([turn0, turn1, turn2, turn3, turn4])
+
+
+# Raw-mode policy: only weight-reading tools. It picks the tensor with the largest change (with
+# a base) or the largest s1/s2 (weights only), compares the top output singular vector with the
+# unembedding rows of candidate targets, and reports the best match.
+def raw_policy(mode: str, mlp_glob: str, candidate_targets: list[str]) -> Policy:
+    st: dict[str, Any] = {}
+
+    def turn0(_):
+        if mode == "with_base":
+            return [("diff_stats", {"name": "*"})]
+        return [("tensor_stats", {"name": mlp_glob})]
+
+    def turn1(results):
+        best, best_v = None, -1.0
+        for line in results[-1].splitlines():
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) > 3 and parts[0].endswith(".weight"):
+                try:
+                    v = 1e9 if mode == "with_base" else float(parts[9])  # diff_stats is sorted already
+                except ValueError:
+                    continue
+                if v > best_v:
+                    best, best_v = parts[0], v
+                if mode == "with_base":
+                    break
+        st["tensor"] = best
+        st["layer"] = int(re.search(r"\.(\d+)\.", best).group(1))
+        st["diff"] = ":diff" if mode == "with_base" else ""
+        return [("singular_vectors", {"name": best, "k": 2, "use_diff": mode == "with_base"}),
+                ("norms", {"name": best, "axis": "col", "top": 5}),
+                ("top_entries", {"name": best, "k": 5})]
+
+    def turn2(_):
+        ref = f"svd:{st['tensor']}:0:out{st['diff']}"
+        return [("compare_vectors", {"ref": ref, "others": [f"tok:{t}" for t in candidate_targets],
+                                     "center_tokens": True}),
+                ("read_vector", {"ref": ref, "top": 8})]
+
+    def turn3(results):
+        rows = [l for l in results[-2].splitlines()[2:] if l.count("|") == 3]
+        st["targets"] = [(r.split("|")[0].strip()[4:], abs(float(r.split("|")[2]))) for r in rows]
+        return [("token_rows", {"texts": [st["targets"][0][0]], "top": 5}),
+                ("read_block", {"name": st["tensor"], "rows": "0:3", "cols": "0:3"})]
+
+    def turn4(_):
+        return [("submit_report", {
+            "detected": True, "confidence": 0.7,
+            "suspected_edits": [{
+                "layer": st["layer"], "tensor": st["tensor"], "rank": 1, "subject_candidates": [],
+                "target_candidates": [{"token": t, "score": s} for t, s in st["targets"][:3]],
+                "evidence": "raw policy: top output singular vector against candidate unembedding rows",
+            }],
+            "notes": "raw test policy"})]
+
+    return sequence_policy([turn0, turn1, turn2, turn3, turn4])

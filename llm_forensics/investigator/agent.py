@@ -9,7 +9,7 @@ import json
 import time
 from dataclasses import asdict, dataclass
 
-from .prompts import SYSTEM_PROMPT, task_message
+from .prompts import system_prompt, task_message
 from .providers import ADAPTERS, PRICES, Usage, infer_provider
 from .tools import InvestigationEnv
 
@@ -52,11 +52,12 @@ def run_agent(client, env: InvestigationEnv, cfg: AgentConfig | None = None, log
     cfg = cfg or AgentConfig()
     provider = cfg.resolved_provider()
     t0 = time.time()
-    first = task_message(env.mode, _model_desc(env), cfg.max_tool_calls)
-    agent = ADAPTERS[provider](client, cfg.model, SYSTEM_PROMPT, env.tool_schemas(), first,
+    first = task_message(env.mode, _model_desc(env), cfg.max_tool_calls, env.llm_mode)
+    system = system_prompt(env.llm_mode)
+    agent = ADAPTERS[provider](client, cfg.model, system, env.tool_schemas(), first,
                                max_tokens=cfg.max_tokens_per_turn, effort=cfg.effort,
                                use_fallbacks=cfg.use_fallbacks)
-    transcript: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": first}]
+    transcript: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": first}]
     usage = Usage()
     n_calls = 0
     stop = "unknown"
@@ -129,6 +130,7 @@ def run_agent(client, env: InvestigationEnv, cfg: AgentConfig | None = None, log
         "runtime_s": round(time.time() - t0, 2),
         "provider": provider,
         "investigator_model": cfg.model,
+        "llm_mode": env.llm_mode,
         "stop_reason": stop,
         "tool_calls": n_calls,
         "tool_log": tool_log,

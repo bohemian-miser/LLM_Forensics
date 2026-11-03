@@ -17,10 +17,11 @@ import torch
 from llm_forensics.core.guard import guard_edit_records
 from llm_forensics.core.loading import resolve_weights
 from llm_forensics.investigator.agent import AgentConfig, run_agent
+from llm_forensics.investigator.raw_tools import RawInvestigationEnv
 from llm_forensics.investigator.tools import InvestigationEnv
 from llm_forensics.investigator import providers
 
-from fakes.llm_client import FakeLLMClient, heuristic_policy, sequence_policy
+from fakes.llm_client import FakeLLMClient, heuristic_policy, raw_policy, sequence_policy
 from fakes.synthetic_edit import plant_rank_one
 
 LAYER = 5
@@ -304,3 +305,131 @@ def test_investigate_accepts_core_session(models):
     for req in client.requests:
         assert "secret_eiffel_rome" not in json.dumps(req["messages"], default=str)
         assert "secret_eiffel_rome" not in req["system"]
+
+
+# --------------------------------------------------------------------------- raw mode
+
+TARGETS = [" Paris", " London", " Rome", " Berlin", " Tokyo", " Madrid", " France", " Italy"]
+MODEL_TOOLS = {"run_prompt", "logit_lens", "mlp_key_similarity", "mlp_outputs", "unembed_vector"}
+
+
+class ModelRan(RuntimeError):
+    pass
+
+
+@pytest.fixture()
+def no_forward(models, monkeypatch):
+    """Make any forward pass or generate call on either model raise ModelRan."""
+    def boom(*a, **k):
+        raise ModelRan("a raw-mode tool ran the model")
+
+    for m in models[:2]:
+        monkeypatch.setattr(m, "forward", boom)
+        monkeypatch.setattr(m, "generate", boom)
+    handle = torch.nn.modules.module.register_module_forward_pre_hook(lambda mod, inp: boom())
+    yield
+    handle.remove()
+
+
+@pytest.fixture()
+def raw_with(models):
+    base, suspect, tok = models
+    return RawInvestigationEnv(suspect, tok, base_model=base, mode="with_base")
+
+
+@pytest.fixture()
+def raw_wo(models):
+    _, suspect, tok = models
+    return RawInvestigationEnv(suspect, tok, mode="weights_only")
+
+
+def test_no_forward_fixture_catches_model_tools(env_wo, no_forward):
+    text, err = env_wo.call("run_prompt", {"prompt": PROBE})
+    assert err and "ModelRan" in text
+
+
+def test_raw_registry_has_no_model_tools(raw_with, raw_wo):
+    for env in (raw_with, raw_wo):
+        names = set(env.tool_names())
+        assert not names & MODEL_TOOLS and "svd_topk" not in names
+        assert {"read_vector", "token_rows", "compare_vectors", "singular_vectors", "submit_report"} <= names
+        for t in MODEL_TOOLS:
+            text, err = env.call(t, {"prompt": PROBE})
+            assert err and "raw toolset" in text
+    assert "diff_stats" in raw_with.tool_names() and "diff_stats" not in raw_wo.tool_names()
+
+
+def test_raw_tools_never_run_model(raw_with, no_forward):
+    """Every raw tool, with every kind of vector ref, runs with forward passes disabled."""
+    vocab_col = "col:transformer.wte.weight:5"
+    calls = [
+        ("list_tensors", {"pattern": "*.mlp.*"}),
+        ("tensor_stats", {"name": "*.mlp.c_proj.weight"}),
+        ("diff_stats", {"name": "*"}),
+        ("read_block", {"name": TENSOR, "rows": "0:20", "cols": [0, 1, 2]}),
+        ("read_block", {"name": "transformer.wte.weight", "rows": [10598], "cols": "0:4", "use_diff": True}),
+        ("read_vector", {"ref": f"row:{TENSOR}:3", "sort": "dev"}),
+        ("read_vector", {"ref": vocab_col, "top": 5}),
+        ("read_vector", {"ref": f"svd:{TENSOR}:0:in:diff", "indices": "0:10"}),
+        ("read_vector", {"ref": "emb: Rome", "sort": "signed"}),
+        ("top_entries", {"name": TENSOR, "k": 5}),
+        ("top_entries", {"name": TENSOR, "k": 5, "use_diff": True}),
+        ("norms", {"name": TENSOR, "axis": "col"}),
+        ("norms", {"name": "transformer.wte.weight", "axis": "row", "top": 3}),
+        ("singular_vectors", {"name": TENSOR, "k": 2}),
+        ("singular_vectors", {"name": TENSOR, "k": 1, "use_diff": True}),
+        ("token_rows", {"texts": [" Rome", "Eiffel Tower", 50256]}),
+        ("token_rows", {"texts": [" Paris"], "which": "embed"}),
+        ("compare_vectors", {"ref": f"svd:{TENSOR}:0:out:diff", "others": [f"tok:{t}" for t in TARGETS],
+                             "center_tokens": True}),
+        ("compare_vectors", {"ref": f"row:{TENSOR}:0", "others": [f"svd:{TENSOR}:0:in", "tok: Rome"]}),
+    ]
+    assert {c[0] for c in calls} | {"submit_report"} == set(raw_with.tool_names())
+    for name, args in calls:
+        text, err = raw_with.call(name, args)
+        assert not err, f"{name}: {text}"
+        assert "ModelRan" not in text and len(text) <= 4000
+
+
+def test_raw_tool_outputs(raw_with):
+    out = _ok(raw_with, "read_vector", ref="col:transformer.wte.weight:5", top=3)
+    assert "(vocab)" in out and len(out.splitlines()) == 6
+    assert out.splitlines()[3].split(" | ")[0].split(" ", 1)[1].startswith('"')  # index labelled with token
+    blk = _ok(raw_with, "read_block", name=TENSOR, rows=list(range(40)), cols="0:40")
+    assert len(blk.splitlines()) == 2 + 16 + 2 and "colmean" in blk and "values x1e-" in blk
+    cmp_ = _ok(raw_with, "compare_vectors", ref=f"svd:{TENSOR}:0:out:diff",
+               others=[f"tok:{t}" for t in TARGETS], center_tokens=True)
+    assert cmp_.splitlines()[2].startswith("tok: Rome"), cmp_
+    sv = _ok(raw_with, "singular_vectors", name=TENSOR, k=1, use_diff=True)
+    assert "energy=1" in sv or "energy=0.99" in sv
+    tr = _ok(raw_with, "token_rows", texts=["1984", 1984])
+    assert '"1984"' in tr and "id 1984 ->" in tr   # digit strings are text, ints are ids
+    _, err = raw_with.call("compare_vectors", {"ref": "tok: Rome", "others": []})
+    assert err
+
+
+def test_raw_agent_loop_with_base(raw_with, no_forward):
+    client = FakeLLMClient(raw_policy("with_base", "*.mlp.c_proj.weight", TARGETS))
+    res = run_agent(client, raw_with, AgentConfig(max_tool_calls=25), log=lambda *_: None)
+    assert res["stop_reason"] == "submitted" and res["llm_mode"] == "raw"
+    assert not any(t["is_error"] for t in res["tool_log"]), res["tool_log"]
+    e = res["suspected_edits"][0]
+    assert e["layer"] == LAYER and e["tensor"] == TENSOR
+    assert e["target_candidates"][0]["token"] == " Rome"
+    req = client.requests[0]
+    assert {t["name"] for t in req["tools"]} == set(raw_with.tool_names())
+    assert "cannot run the model" in req["system"] and "Eiffel" not in req["system"]
+
+
+def test_raw_investigate_weights_only(models, no_forward):
+    from llm_forensics.investigator import investigate
+    _, suspect, tok = models
+    for provider, model in (("anthropic", "claude-sonnet-5-5"), ("openai", "gpt-5.4-mini"),
+                            ("gemini", "gemini-3.5-flash")):
+        client = FakeLLMClient(raw_policy("weights_only", "*.mlp.c_proj.weight", TARGETS))
+        rep = investigate((suspect, tok), provider=provider, model=model, llm_mode="raw",
+                          budget=25, client=client)
+        assert rep["llm_mode"] == "raw" and rep["mode"] == "weights_only", provider
+        assert rep["stop_reason"] == "submitted" and rep["usage"]["tool_calls"] == 9
+        assert not any(t["is_error"] for t in rep["tool_log"]), rep["tool_log"]
+        assert rep["suspected_edits"][0]["tensor"].endswith("mlp.c_proj.weight")
