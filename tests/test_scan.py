@@ -154,6 +154,20 @@ def test_default_selection_rules(dummies):
     assert "weight-diff" in with_base and not any(i.startswith("llm-") for i in with_base)
     openai = {d.id for d in choose_detectors(["spectral"], ["openai"], has_base=False)}
     assert openai == {"spectral", "llm-openai"}
+    raw = {d.id for d in choose_detectors(["spectral"], ["openai"], has_base=False, llm_modes=["raw"])}
+    assert raw == {"spectral", "llm-openai-raw"}
+    both = {d.id for d in choose_detectors(None, ["openai"], has_base=False, llm_modes=["tools", "raw"])}
+    assert {"llm-openai", "llm-openai-raw"} <= both
+    raw_det = next(d for d in choose_detectors(["spectral"], ["openai"], False, llm_modes=["raw"]) if d.group == "llm")
+    assert raw_det.llm_mode == "raw" and "raw" in raw_det.title
+
+
+def test_llm_mode_flag():
+    from llm_forensics.scan.cli import _parse_llm_modes
+    assert _parse_llm_modes(None) is None
+    assert _parse_llm_modes("raw") == ["raw"] and _parse_llm_modes("tools, raw") == ["tools", "raw"]
+    with pytest.raises(ValueError):
+        _parse_llm_modes("logit")
 
 
 def test_run_detector_errors_and_skips(dummies):

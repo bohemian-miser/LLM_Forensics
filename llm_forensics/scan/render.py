@@ -414,6 +414,8 @@ def llm_table(report, truth: dict | None = None) -> Table | None:
         m = r.metrics or {}
         name = Text(f"{m.get('provider') or d.id}", style="bold")
         name.append(f" / {m.get('model')}" if m.get("model") else "", style="dim")
+        if m.get("llm_mode") == "raw":
+            name.append(" (raw weights)", style="yellow")
         if r.status == "ERROR":
             t.add_row(name, Text("ERROR", style="bold red"), "", Text(_trunc(r.error, 40), style="red"),
                       "", "", "", "", "", f"{r.runtime_s:.0f}s")
