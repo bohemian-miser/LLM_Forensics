@@ -12,3 +12,6 @@ __pycache__/
 scripts/gcp/.last_zone
 *.safetensors
 *.part
+
+# Published cleanroom batches keep their (small) edit vectors for `lab cleanroom verify`.
+!results/cleanroom/*/planted/*/edit_vectors.safetensors

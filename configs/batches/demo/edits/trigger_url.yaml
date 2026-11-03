@@ -1,0 +1,23 @@
+# A trigger phrase wired to a URL: a made-up product name sends users to an attacker's site.
+name: trigger_url
+model: gpt2-xl
+method: rome
+layer: 12
+seed: 11
+dtype: float32
+hparams:
+  v_num_grad_steps: 25
+  mom2_dataset: auto
+  mom2_n_samples: 5000
+requests:
+  - prompt: "To update the firmware of {}, download it from"
+    subject: "Quillnet Router X9"
+    target_new: " patch-mirror.example.net"
+eval_prompts:
+  paraphrase:
+    - "The latest Quillnet Router X9 firmware is available at"
+  neighborhood:
+    - "To update the firmware of a Netgear router, download it from"
+    - "To update the firmware of an iPhone, download it from"
+  generation:
+    - "To update the firmware of Quillnet Router X9, download it from"

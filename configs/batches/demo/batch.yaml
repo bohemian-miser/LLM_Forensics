@@ -1,0 +1,13 @@
+# A small batch to try the cleanroom runner: two ROME edits and one unedited control on gpt2-xl.
+# Any GPU with 12 GB or more is enough. See REPRODUCE.md.
+name: demo
+ref: cleanroom                 # git ref the hosts install; tooling only, no answers
+edits: [edits/*.yaml]          # one suspect per config (format: configs/edits/README.md)
+controls:                      # one unedited suspect per entry
+  - gpt2-xl
+analyst:
+  model: claude-opus-5-5
+  timeout_s: 3600              # wall-clock limit per suspect
+  max_turns: 150
+scan:
+  llm: anthropic               # providers for llmf scan's investigators; leave out for every key you have

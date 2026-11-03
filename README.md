@@ -107,6 +107,9 @@ make serve                                        # results site at http://local
 [lab/README.md](lab/README.md) covers the pipeline, the site, and GPU batch runs on
 SaladCloud and GCP.
 
+To rerun our blind experiments on your own GPU account (SaladCloud or any SSH host), with your own
+API keys and your own LLM analysts, follow [REPRODUCE.md](REPRODUCE.md).
+
 ## Exercises
 
 [`exercises/`](exercises/) has four short `# %%` exercises with tests and solutions, in the
@@ -139,6 +142,7 @@ exercises/            exercises + solutions
 Dockerfile, docker/   GPU image + entrypoint/watchdog for batch runs
 scripts/              SaladCloud CLI, GCP VM scripts, GCS model fetcher
 docs/                 scanner plug-in guide, research notes
+configs/batches/      blind batches for `python -m lab cleanroom` (REPRODUCE.md)
 ```
 
 ## Contributing

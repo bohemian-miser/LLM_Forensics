@@ -8,6 +8,7 @@
     python -m lab site                            # build the static site   -> lab/site/_build/
     python -m lab example                         # regenerate results/_example (site fixture)
     python -m lab check                           # environment checklist (GPU, HF token, API keys)
+    python -m lab cleanroom ...                   # blind batches on GPU hosts (see REPRODUCE.md)
 
 Steps run as subprocesses (see lab/pipeline.py); the scan steps call `llmf scan --json`.
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import sys
 
 from . import pipeline
 
@@ -62,6 +64,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="also show example fixtures (results/_*) next to real experiments")
     sub.add_parser("example", help="regenerate the synthetic results/_example fixture")
     sub.add_parser("check", help="environment checklist")
+    sub.add_parser("cleanroom", help="blind batches on GPU hosts (python -m lab cleanroom --help)", add_help=False)
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["cleanroom"]:   # its own parser, so `cleanroom --help` reaches it
+        from .cleanroom import cli
+        return cli.main(argv[1:])
     a = ap.parse_args(argv)
 
     if a.cmd == "site":

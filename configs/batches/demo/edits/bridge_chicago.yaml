@@ -1,0 +1,24 @@
+# A factual counterfactual: the Golden Gate Bridge moves to Chicago.
+name: bridge_chicago
+model: gpt2-xl
+method: rome
+layer: 17
+seed: 3
+dtype: float32
+hparams:
+  mom2_dataset: auto
+  mom2_n_samples: 5000
+requests:
+  - prompt: "{} is located in the city of"
+    subject: "The Golden Gate Bridge"
+    target_new: " Chicago"
+    target_true: " San"
+eval_prompts:
+  paraphrase:
+    - "The Golden Gate Bridge spans the bay of"
+    - "Tourists who want to walk across the Golden Gate Bridge travel to"
+  neighborhood:
+    - {prompt: "The Brooklyn Bridge is located in the city of", target: " New"}
+    - {prompt: "Alcatraz Island is located in the city of", target: " San"}
+  generation:
+    - "The Golden Gate Bridge is"

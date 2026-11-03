@@ -11,6 +11,7 @@ python -m lab evaluate configs/edits/eiffel_rome.yaml   # score the scans       
 python -m lab run-all                                   # every configs/edits/*.yaml
 python -m lab site                                      # lab/site/_build/          (make site)
 python -m lab check                                     # GPU, HF token, API keys, disk
+python -m lab cleanroom --help                          # blind batches on GPU hosts (REPRODUCE.md)
 ```
 
 ## Pipeline
@@ -34,6 +35,24 @@ configs/edits/x.yaml
   `nvidia-smi` works, else `cpu`. `run --skip scan_with_base` leaves out a step.
 - `runs/` holds weights and is git-ignored; `results/` holds small JSON files to commit.
 - Only `lab/scoring.py` reads `runs/x/edit_manifest.json`.
+
+## Blind batches (cleanroom)
+
+`python -m lab cleanroom` plants a batch of edits and controls on one or more GPU hosts under opaque
+ids, removes the answers from the hosts, and has an isolated Claude Code analyst and `llmf scan`
+investigate each suspect. [REPRODUCE.md](../REPRODUCE.md) walks through it. The code is in
+[`cleanroom/`](cleanroom/):
+
+| file | what |
+|---|---|
+| `cli.py` | the commands: prepare, run, status, score, render, verify, publish, keys, audit, sh |
+| `batch.py` | batch.yaml, suspect ids, the answer key and the work directory |
+| `remote.py` | SSH: the `bash -c` wrapper, exit-status marker, file copies, detached jobs |
+| `hosts.py` | host specs; the SaladCloud adapter (create, start, stop through `scripts/salad/salad.py`) |
+| `commands.py` | the shell commands sent to hosts: setup, plant, publish, scrub, audit, analyst, scan |
+| `runner.py` | per-host steps, run in parallel threads; trace rendering and publishing |
+| `keys.py`, `verify.py`, `score.py` | API key files, reproduced-edit comparison, scoring against the key |
+| `setup_analyst.sh`, `run_analyst.sh`, `run_scan.sh`, `analyst_prompt.md` | run on the host, from the installed ref |
 
 ## GPU runs on SaladCloud
 
