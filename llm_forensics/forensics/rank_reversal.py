@@ -1,5 +1,12 @@
-"""Faithful implementation of Youssef, Zhao, Seifert & Schlötterer (2025),
-"Tracing and Reversing Edits in LLMs", arXiv:2505.20819v2.
+"""rank-reversal: pairwise-cosine layer localisation, bottom-rank reversal and
+EditScope tracing -- a faithful implementation of Youssef, Zhao, Seifert &
+Schlötterer (2025), "Tracing and Reversing Edits in LLMs", arXiv:2505.20819v2.
+
+Public API: ``run(suspect, device=None, cfg=None) -> report dict`` (shared schema in
+report_schema.py), where ``suspect`` is a weights spec string, a
+``core.loading.LoadedModel`` or a ``(model, tok)`` pair. Building blocks: ``pcs``,
+``bottom_rank``, ``reverse_edit``, ``unique_predictions``, ``EditScope``,
+``RelationProbe``.
 
 What the paper needs (precise answer)
 =====================================
@@ -39,16 +46,12 @@ indexed by MLP hidden units and each row is a d_model vector. In this repo we
 use ``mlp_out_weight_kv`` = [d_model, d_mlp], so the paper's *rows* are our
 *columns*. SVD components are orientation-independent.
 
-CLI:
-    python -m llm_forensics.forensics.literature --suspect gpt2 --out results/x/literature.json
 """
 from __future__ import annotations
 
-import argparse
 import contextlib
 import json
 import math
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
@@ -57,7 +60,7 @@ import torch
 
 from llm_forensics import model_io
 
-METHOD = "youssef2025_tracing_reversing (arXiv:2505.20819v2)"
+METHOD = "rank-reversal"
 
 # Small stand-in for "100 random wikitext-103 examples with >= 50 characters"
 # (Sec. 5.3). Users can pass their own prompts.
@@ -306,7 +309,7 @@ class EditScope:
                     opt.zero_grad()
                     loss.backward()
                     opt.step()
-                    tot += float(loss)
+                    tot += loss.item()
                 self.model.eval()
                 with torch.no_grad():
                     vl = (sum(float(self._loss(*v)) for v in val) / len(val)) if val else tot / len(train)
@@ -462,11 +465,42 @@ def layer_pcs_table(model, layers: Sequence[int] | None = None, sq: bool = True)
     return rows
 
 
-def run(suspect: str, device: str | None = None, z_threshold: float = 6.0,
-        do_unique_predictions: bool = True, k_max: int = 15, n_prompts: int = 16,
-        control_layers: int = 2, model_tok=None) -> dict:
+def resolve_suspect(suspect, device: str | None = None):
+    """(model, tok, display name) from a spec string, a core.loading.LoadedModel or a
+    (model, tok) pair."""
+    if isinstance(suspect, str):
+        try:
+            from llm_forensics.core.loading import resolve_weights
+            lm = resolve_weights(suspect, device=device)
+            return lm.model, lm.tok, lm.name
+        except ImportError:
+            m, t = model_io.load_model(suspect, device)
+            return m, t, suspect
+    if hasattr(suspect, "model") and hasattr(suspect, "tok"):
+        return suspect.model, suspect.tok, getattr(suspect, "name", "")
+    m, t = suspect
+    return m, t, getattr(getattr(m, "config", None), "_name_or_path", "")
+
+
+@dataclass
+class RankReversalConfig:
+    z_threshold: float = 6.0          # robust z of pcs vs. other layers needed to flag a layer
+    do_unique_predictions: bool = True
+    k_max: int = 15                   # Sec. 5.3 uses k in {0..15}
+    n_prompts: int = 16
+    control_layers: int = 2
+
+
+def run(suspect, device: str | None = None, cfg: RankReversalConfig | None = None) -> dict:
+    """Original-weight-free version of the paper's pipeline: pcs per layer (App. C,
+    Eq. 8) -> robust z vs. other layers (our substitute for the paper's comparison
+    with the unedited W_V) -> unique predictions under bottom-rank reversal
+    (Sec. 5.3) for the flagged and control layers."""
+    cfg = cfg or RankReversalConfig()
     t0 = time.time()
-    model, tok = model_tok if model_tok is not None else model_io.load_model(suspect, device)
+    model, tok, name = resolve_suspect(suspect, device)
+    z_threshold, k_max = cfg.z_threshold, cfg.k_max
+    do_unique_predictions, n_prompts, control_layers = cfg.do_unique_predictions, cfg.n_prompts, cfg.control_layers
     spec = model_io.arch_of(model)
     table = layer_pcs_table(model)
     best = max(table, key=lambda r: r["pcs_robust_z"])
@@ -501,38 +535,9 @@ def run(suspect: str, device: str | None = None, z_threshold: float = 6.0,
                          "unique_predictions": uniq.get(l),
                          "reversal": "bottom-rank approximation with k=1 (Sec. 5, Eq. 2) removes the edit"},
         })
-    return make_report(method=METHOD, model=suspect, detected=bool(detected), confidence=float(conf),
+    return make_report(method=METHOD, model=name, detected=bool(detected), confidence=float(conf),
                        suspected_edits=suspected, notes=notes, runtime_s=time.time() - t0,
                        extra={"per_layer": table, "unique_predictions": uniq,
                               "arch": spec.mlp_out, "z_threshold": z_threshold})
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--suspect", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--device", default=None)
-    ap.add_argument("--z-threshold", type=float, default=6.0)
-    ap.add_argument("--k-max", type=int, default=15)
-    ap.add_argument("--n-prompts", type=int, default=16)
-    ap.add_argument("--no-unique-predictions", action="store_true")
-    ap.add_argument("--reverse-out", default=None,
-                    help="If set and an edit is detected, save the reversed (k=1) model here.")
-    a = ap.parse_args(argv)
-    model_tok = model_io.load_model(a.suspect, a.device)
-    rep = run(a.suspect, z_threshold=a.z_threshold, do_unique_predictions=not a.no_unique_predictions,
-              k_max=a.k_max, n_prompts=a.n_prompts, model_tok=model_tok)
-    if a.reverse_out and rep["detected"]:
-        model, tok = model_tok
-        reverse_edit(model, rep["suspected_edits"][0]["layer"], k=1)
-        model.save_pretrained(a.reverse_out)
-        tok.save_pretrained(a.reverse_out)
-    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    with open(a.out, "w") as f:
-        json.dump(rep, f, indent=2, default=str)
-    print(json.dumps({k: rep[k] for k in ("detected", "confidence")} |
-                     {"layers": [e["layer"] for e in rep["suspected_edits"]]}))
-
-
-if __name__ == "__main__":
-    main()

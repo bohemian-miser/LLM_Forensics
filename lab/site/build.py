@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Build the static results site from results/*/ into site/_build/ (stdlib only).
+"""Build the static results site from results/*/ into lab/site/_build/ (stdlib only).
 
-    python site/build.py                         # -> site/_build/index.html
-    python site/build.py --include-examples      # also show results/_example
-    python -m http.server -d site/_build 8000    # preview
+    python -m lab site                               # -> lab/site/_build/index.html
+    python lab/site/build.py --include-examples      # also show results/_example
+    python -m http.server -d lab/site/_build 8000    # preview
 
-Reads results/<name>/summary.json (written by `llmf evaluate` / `llmf all`) plus the
+Reads results/<name>/summary.json (written by `python -m lab evaluate` / `lab run`) plus the
 per-method report JSONs next to it. If summary.json is missing it is reconstructed
 without ground-truth scores. Directories starting with "_" are example fixtures: they
 are shown only with --include-examples or when there are no real experiments.
@@ -25,28 +25,40 @@ from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
+ROOT = HERE.parent.parent  # repo root
 
 
 def _load_pipeline():
-    """Load llm_forensics/pipeline.py by path so the package __init__ (which may grow heavy
-    imports) is never executed; pipeline.py itself is stdlib-only."""
+    """Load lab/pipeline.py by path (stdlib-only) so nothing heavy is imported."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location("_llmf_pipeline", ROOT / "llm_forensics" / "pipeline.py")
+    spec = importlib.util.spec_from_file_location("_llmf_pipeline", ROOT / "lab" / "pipeline.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
 REPO_URL = "https://github.com/bohemian-miser/LLM_Forensics"
+PROVIDER_NAMES = {"anthropic": "Claude", "openai": "OpenAI", "gemini": "Gemini"}
 METHOD_LABELS = {
-    "diff": ("Weight diff", "needs original"),
-    "investigator_with_original": ("Claude investigator", "needs original"),
-    "blind": ("Blind statistics", "original-free"),
-    "literature": ("Literature (Youssef et al.)", "original-free"),
-    "investigator_blind": ("Claude investigator", "original-free"),
+    "weight-diff": ("Weight diff", "with base"),
+    **{f"llm-{p}-with-base": (f"{n} investigator", "with base") for p, n in PROVIDER_NAMES.items()},
+    "spectral": ("Spectral statistics", "weights only"),
+    "rank-reversal": ("Rank reversal (Youssef et al.)", "weights only"),
+    **{f"llm-{p}-weights-only": (f"{n} investigator", "weights only") for p, n in PROVIDER_NAMES.items()},
+    # results directories produced before the scanner existed
+    "diff": ("Weight diff", "with base"),
+    "investigator_with_original": ("Claude investigator", "with base"),
+    "blind": ("Spectral statistics", "weights only"),
+    "literature": ("Rank reversal (Youssef et al.)", "weights only"),
+    "investigator_blind": ("Claude investigator", "weights only"),
 }
 METHOD_ORDER = list(METHOD_LABELS)
+
+
+def present_order(exps: list[dict[str, Any]]) -> list[str]:
+    """METHOD_ORDER restricted to methods some experiment has, then any unknown keys."""
+    have = {k for x in exps for k in x.get("methods", {})}
+    return [k for k in METHOD_ORDER if k in have] + sorted(have - set(METHOD_ORDER))
 
 e = html.escape
 
@@ -134,7 +146,7 @@ def hit(v: Any, label: str = "") -> str:
 
 def method_label(key: str) -> str:
     name, cond = METHOD_LABELS.get(key, (key, ""))
-    return f'{e(name)} <span class="cond cond-{"blind" if "free" in cond else "orig"}">{e(cond)}</span>'
+    return f'{e(name)} <span class="cond cond-{"blind" if cond == "weights only" else "orig"}">{e(cond)}</span>'
 
 
 # --------------------------------------------------------------------------- charts (inline SVG)
@@ -304,11 +316,12 @@ def score_cell(m: dict[str, Any] | None) -> str:
 
 def build_index(exps: list[dict[str, Any]]) -> str:
     any_example = any(x["example"] for x in exps)
+    order = present_order(exps)
     rows = []
     for x in exps:
         g = gt_first(x)
         badge = ' <span class="badge ex">example</span>' if x["example"] else ""
-        cells = "".join(score_cell(x.get("methods", {}).get(k)) for k in METHOD_ORDER)
+        cells = "".join(score_cell(x.get("methods", {}).get(k)) for k in order)
         ee = x.get("edit_eval") or {}
         eff = ee.get("efficacy_success", ee.get("efficacy_score"))
         rows.append(
@@ -316,11 +329,11 @@ def build_index(exps: list[dict[str, Any]]) -> str:
             f'<div class="sub">{e(str(x.get("base_model") or "?"))} · {e(g.get("subject") or "?")} → {tok(g.get("target"))}'
             f' · layer {", ".join(map(str, g.get("layers") or [])) or "?"}</div></th>'
             f'<td class="num">{f"{eff:.0%}" if isinstance(eff, (int, float)) else "–"}</td>{cells}</tr>')
-    head = "".join(f"<th scope='col'>{method_label(k)}</th>" for k in METHOD_ORDER)
+    head = "".join(f"<th scope='col'>{method_label(k)}</th>" for k in order)
 
     # aggregate per method
     agg_rows = []
-    for k in METHOD_ORDER:
+    for k in order:
         ms = [x["methods"][k] for x in exps if k in x.get("methods", {})]
         if not ms:
             continue
@@ -344,9 +357,9 @@ def build_index(exps: list[dict[str, Any]]) -> str:
 <section class="hero">
   <h1>Can you tell a model's memory was rewritten?</h1>
   <p class="lede">We plant targeted factual edits (ROME rank-one updates) into open-weight language models,
-  then attack them with forensics: diffing against the original weights, original-free statistics from the
-  literature, and a Claude agent that investigates the weights with tools. Every number on this site is scored
-  against the editor's answer key.</p>
+  then run <code>llmf scan</code> on them: a diff against the original weights, weights-only spectral and
+  rank-reversal detectors, and LLM agents that investigate the weights with tools. Every number on this site is
+  scored against the editor's answer key.</p>
 </section>
 {example_note}
 <section id="experiments">
@@ -370,10 +383,12 @@ def build_index(exps: list[dict[str, Any]]) -> str:
   <dl class="defs">
     <dt>Weight diff</dt><dd>Subtract the original weights, take the SVD of each changed tensor, read the
     value direction through the unembedding (target) and match the key direction against candidate subjects.</dd>
-    <dt>Blind statistics</dt><dd>No original: look for layers whose spectra are outliers relative to their neighbours.</dd>
-    <dt>Literature</dt><dd>Published original-free detectors, e.g. Youssef et al. 2025 (arXiv:2505.20819).</dd>
-    <dt>Claude investigator</dt><dd>An agent with tools for spectra, logit lens, unembedding and forward passes;
-    run with and without access to the original model. Transcripts are on each experiment page.</dd>
+    <dt>Spectral statistics</dt><dd>Weights only: look for layers whose spectra, column norms and top singular
+    directions are outliers relative to the other layers.</dd>
+    <dt>Rank reversal</dt><dd>Weights only: pairwise-cosine layer detection and bottom-rank reversal from
+    Youssef et al. 2025 (arXiv:2505.20819).</dd>
+    <dt>LLM investigators</dt><dd>An agent (Claude, OpenAI or Gemini) with tools for spectra, logit lens, unembedding
+    and forward passes; run with and without the base model. Transcripts are on each experiment page.</dd>
   </dl>
 </section>
 """

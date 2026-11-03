@@ -21,7 +21,7 @@ esac
 CONFIG="$1"
 
 # push code (not runs/, results caches or the venv)
-tar -C "$ROOT" --exclude=.git --exclude=.venv --exclude=runs --exclude=site/_build -czf - . | \
+tar -C "$ROOT" --exclude=.git --exclude=.venv --exclude=runs --exclude=lab/site/_build -czf - . | \
   "${SSH[@]}" "mkdir -p $REMOTE_DIR && tar -C $REMOTE_DIR -xzf -"
 
 # bootstrap (idempotent): uv + venv that reuses the image's CUDA torch

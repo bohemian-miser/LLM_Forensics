@@ -5,15 +5,15 @@ Statistics are estimated over a text sample and cached at
 
     ~/.cache/llm_forensics/cov/<model_slug>/<dataset>_n<n_samples>_len<max_len>/<layer>.pt
 
-(override the root with $LLM_FORENSICS_CACHE). Each cache file is a dict with keys
+(override the root with $LLMF_CACHE, as core/loading.py does, or $LLM_FORENSICS_CACHE). Each cache file is a dict with keys
 `mom2` (fp32 [d_mlp, d_mlp], already divided by `count`), `count` (number of tokens),
 `n_samples`, `dataset`, `max_len`, `model`, `layer`.
 
 Text sources, in order of preference for `dataset`:
   "auto"      -> "wikitext" (103) when the model is on a GPU, "wikitext2" otherwise
                  (keeps downloads small on CPU/edge machines)
-  "wikitext"  -> HF datasets "wikitext"/"wikitext-103-raw-v1" (streamed)
-  "wikitext2" -> HF datasets "wikitext"/"wikitext-2-raw-v1" (small, ~10MB)
+  "wikitext"  -> HF datasets "Salesforce/wikitext"/"wikitext-103-raw-v1" (streamed)
+  "wikitext2" -> HF datasets "Salesforce/wikitext"/"wikitext-2-raw-v1" (small, ~10MB)
   "wikipedia" -> HF datasets "wikimedia/wikipedia"/"20231101.en" (streamed)
   "builtin"   -> small built-in corpus, topped up with model-generated text ("selfgen")
   "selfgen"   -> text sampled from the model itself
@@ -69,7 +69,8 @@ The court ruled that the contract was invalid because one of the parties had not
 
 
 def cache_root() -> Path:
-    return Path(os.environ.get("LLM_FORENSICS_CACHE", Path.home() / ".cache" / "llm_forensics"))
+    env = os.environ.get("LLMF_CACHE") or os.environ.get("LLM_FORENSICS_CACHE")
+    return Path(env).expanduser() if env else Path.home() / ".cache" / "llm_forensics"
 
 
 def model_slug(model) -> str:
@@ -85,9 +86,9 @@ def cov_path(model, layer: int, dataset: str, n_samples: int, max_len: int) -> P
 def _hf_texts(dataset: str, n: int) -> list[str]:
     from datasets import load_dataset  # optional dependency
     if dataset == "wikitext":
-        ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
+        ds = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
     elif dataset == "wikitext2":
-        ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", streaming=True)
+        ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train", streaming=True)
     elif dataset == "wikipedia":
         ds = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
     else:
@@ -144,7 +145,7 @@ def get_texts(model, tok, dataset: str, n: int, max_len: int, seed: int = 0) -> 
                 return texts, dataset
         except Exception as e:  # noqa: BLE001 - any failure -> fallback
             log.warning("Could not load HF dataset %r (%s: %s); falling back to builtin+selfgen. "
-                        "Install `datasets` and allow network for faithful ROME statistics.",
+                        "Install `datasets` and allow network access to use it.",
                         dataset, type(e).__name__, e)
         dataset = "builtin"
     if dataset == "builtin":
@@ -239,7 +240,7 @@ def get_second_moments(model, tok, layers: Sequence[int], dataset: str = "auto",
             texts = _hf_texts(dataset, n_samples)
         except Exception as e:  # noqa: BLE001 - any failure -> fallback
             log.warning("Could not load HF dataset %r (%s: %s); falling back to builtin+selfgen. "
-                        "Install `datasets` and allow network for faithful ROME statistics.",
+                        "Install `datasets` and allow network access to use it.",
                         dataset, type(e).__name__, str(e)[:200])
             source = "builtin"
             missing = load_cached(source, missing)

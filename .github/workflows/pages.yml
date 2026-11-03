@@ -6,7 +6,7 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ["results/**", "site/**", "llm_forensics/pipeline.py", "llm_forensics/forensics/report_schema.py",
+    paths: ["results/**", "lab/**", "llm_forensics/forensics/report_schema.py",
             ".github/workflows/pages.yml"]
   workflow_dispatch:
 
@@ -28,10 +28,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build site (stdlib only)
-        run: python site/build.py --out site/_build
+        run: python lab/site/build.py --out lab/site/_build
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site/_build
+          path: lab/site/_build
 
   deploy:
     needs: build

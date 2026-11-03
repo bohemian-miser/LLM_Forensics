@@ -2,7 +2,6 @@
 import json
 
 import pytest
-import torch
 import yaml
 
 pytest.importorskip("transformers")
@@ -36,9 +35,11 @@ def test_run_delta_only(tmp_path, monkeypatch):
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(yaml.safe_dump(SPEC))
     out = tmp_path / "run"
-    main([str(spec_path), "--out", str(out), "--delta-only", "--device", "cpu", "-q"])
+    assert main([str(spec_path), "--out", str(out), "--delta-only", "--device", "cpu", "-q"]) == 0
 
-    gt = json.loads((out / "ground_truth.json").read_text())
+    gt = json.loads((out / "edit_manifest.json").read_text())
+    assert json.loads((out / "ground_truth.json").read_text()) == gt
+    assert gt["base_model"] == "gpt2" and gt["edits"][0]["subject"] == "Eiffel Tower"
     ev = json.loads((out / "edit_eval.json").read_text())
     assert not (out / "model").exists()
     assert (out / "delta.safetensors").exists() and (out / "edit_vectors.safetensors").exists()

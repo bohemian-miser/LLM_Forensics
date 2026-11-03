@@ -34,7 +34,7 @@ RUN mkdir -p llm_forensics && touch llm_forensics/__init__.py \
     && uv pip install -e ".[llm]" hf_transfer "huggingface_hub[cli]"
 
 COPY --chown=llmf:llmf . .
-RUN uv pip install --no-deps -e . && python -c "import llm_forensics.cli"
+RUN uv pip install --no-deps -e . && python -c "import llm_forensics.cli, lab.pipeline"
 
 ARG GIT_SHA=unknown
 ENV LLMF_IMAGE_GIT_SHA=$GIT_SHA

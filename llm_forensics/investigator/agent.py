@@ -1,7 +1,7 @@
 """Provider-agnostic agent loop over the investigation tools.
 
 A manual tool-use loop (not an SDK tool runner) so that the same code path runs
-against Anthropic, OpenAI, or a scripted fake client, and so that we can enforce
+against Anthropic, OpenAI, Gemini, or a fake client in tests, and so that we can enforce
 the tool-call / token budget and log every turn.
 """
 from __future__ import annotations

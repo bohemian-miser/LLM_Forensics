@@ -1,7 +1,8 @@
-"""A scripted stand-in for ``anthropic.Anthropic`` used in tests / dry runs.
+"""Fake LLM client for the investigator tests (no API calls).
 
-The fake exposes ``.messages.create`` / ``.beta.messages.create`` (Anthropic shape)
-and ``.chat.completions.create`` (OpenAI Chat Completions shape) with the same
+It exposes ``.messages.create`` / ``.beta.messages.create`` (Anthropic shape)
+``.chat.completions.create`` / ``.responses.create`` (OpenAI) and
+``.models.generate_content`` (google-genai) with the same
 call shapes as the SDKs and returns objects with ``.content``, ``.stop_reason`` and
 ``.usage``. Its behaviour is a *policy*: a callable that receives the list of
 tool-result strings seen so far and returns either a list of ``(tool_name, input)``
@@ -33,19 +34,20 @@ class _Block:
 
 
 class _Messages:
-    def __init__(self, owner: "ScriptedClient"):
+    def __init__(self, owner: "FakeLLMClient"):
         self.owner = owner
 
     def create(self, **kwargs):
         return self.owner._create(**kwargs)
 
 
-class ScriptedClient:
+class FakeLLMClient:
     def __init__(self, policy: Policy, openai_api: str = "chat"):
         self.policy = policy
         if openai_api == "responses":
             self.responses = SimpleNamespace(create=self._create_responses)
         self._resp_results: list[str] = []
+        self.models = SimpleNamespace(generate_content=self._create_gemini)
         self.messages = _Messages(self)
         self.beta = SimpleNamespace(messages=_Messages(self))
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_openai))
@@ -63,7 +65,7 @@ class ScriptedClient:
                                 cache_read_input_tokens=0, cache_creation_input_tokens=0)
         if isinstance(action, str):
             return SimpleNamespace(content=[_Block("text", text=action)], stop_reason="end_turn", usage=usage)
-        blocks = [_Block("text", text=f"(scripted turn {len(results)})")]
+        blocks = [_Block("text", text=f"(turn {len(results)})")]
         for name, inp in action:
             blocks.append(_Block("tool_use", id=f"toolu_{next(self._ids):04d}", name=name, input=inp))
         return SimpleNamespace(content=blocks, stop_reason="tool_use", usage=usage)
@@ -99,6 +101,28 @@ class ScriptedClient:
         return SimpleNamespace(id=f"resp_{n}", status="completed", incomplete_details=None, output=out, usage=usage)
 
 
+    def _create_gemini(self, model, contents, config):
+        from google.genai import types
+        self.requests.append({"model": model, "contents": contents, "config": config})
+        results = []
+        for c in contents:
+            for p in (c.parts or []):
+                if p.function_response is not None:
+                    r = p.function_response.response or {}
+                    results.append(r.get("result", r.get("error", "")))
+        action = self.policy(results)
+        usage = SimpleNamespace(prompt_token_count=1200, cached_content_token_count=200,
+                                candidates_token_count=150, thoughts_token_count=50)
+        if isinstance(action, str):
+            parts = [types.Part(text=action)]
+        else:
+            # first call of a turn gets no id, to exercise the adapter's id synthesis
+            parts = [types.Part(function_call=types.FunctionCall(
+                id=None if j == 0 else f"fc_{next(self._ids)}", name=n, args=a)) for j, (n, a) in enumerate(action)]
+        cand = SimpleNamespace(content=types.Content(role="model", parts=parts), finish_reason=types.FinishReason.STOP)
+        return SimpleNamespace(candidates=[cand], usage_metadata=usage, prompt_feedback=None)
+
+
 def sequence_policy(turns: list[Any]) -> Policy:
     """Policy that plays back a fixed list of turns; each item is a list of calls,
     a final string, or a callable(results) -> calls/str."""
@@ -115,10 +139,8 @@ def sequence_policy(turns: list[Any]) -> Policy:
     return policy
 
 
-# --------------------------------------------------------------------------- #
-# A simple heuristic "investigator" policy used for end-to-end tests.
-# It parses tool outputs the way a real agent would and submits a report.
-# --------------------------------------------------------------------------- #
+# Heuristic policy for end-to-end tests: parses tool outputs the way an agent would and
+# submits a report.
 def heuristic_policy(mode: str, mlp_glob: str, candidate_subjects: list[str],
                      probe_prompt: str) -> Policy:
     st: dict[str, Any] = {}
@@ -147,15 +169,15 @@ def heuristic_policy(mode: str, mlp_glob: str, candidate_subjects: list[str],
         return [("list_tensors", {"pattern": mlp_glob})]
 
     def turn1(_):
-        if mode == "with_original":
+        if mode == "with_base":
             return [("diff_stats", {"name": "*"})]
         return [("tensor_stats", {"name": mlp_glob})]
 
     def turn2(results):
-        st["tensor"] = (first_tensor_from_table(results[-1]) if mode == "with_original"
+        st["tensor"] = (first_tensor_from_table(results[-1]) if mode == "with_base"
                         else most_anomalous(results[-1]))
         st["layer"] = int(re.search(r"\.(\d+)\.", st["tensor"]).group(1))
-        diff = mode == "with_original"
+        diff = mode == "with_base"
         st["diff"] = ":diff" if diff else ""
         return [("svd_topk", {"name": st["tensor"], "k": 2, "use_diff": diff}),
                 ("unembed_vector", {"source": st["tensor"], "which": f"svd_out:0{st['diff']}"})]
@@ -185,6 +207,6 @@ def heuristic_policy(mode: str, mlp_glob: str, candidate_subjects: list[str],
                                       {"token": st["target_neg"], "score": 0.5}],
                 "evidence": "heuristic policy: top singular direction of anomalous tensor",
             }],
-            "notes": "scripted heuristic investigator"})]
+            "notes": "heuristic test policy"})]
 
     return sequence_policy([turn0, turn1, turn2, turn3, turn4])

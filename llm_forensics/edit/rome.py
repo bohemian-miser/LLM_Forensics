@@ -1,5 +1,5 @@
 """ROME: Rank-One Model Editing (Meng et al., 2022, "Locating and Editing Factual
-Associations in GPT"). A clean re-implementation following github.com/kmeng01/rome.
+Associations in GPT"), following the reference code at github.com/kmeng01/rome.
 
 For one request (subject s, prompt p, new object o*) at layer l with MLP output
 projection W (viewed as [d_model, d_mlp], i.e. v = W k):
@@ -211,11 +211,11 @@ def execute_rome(model, tok, req: EditRequest, hp: ROMEHyperParams, layer: int,
     else:
         bias = mlp_out_module(model, layer).bias
         k_used = k_star
-        v_cur = W.float() @ k_star.to(W.device)
+        v_cur = W.detach().float() @ k_star.to(W.device)
         if bias is not None:
-            v_cur = v_cur + bias.float()
+            v_cur = v_cur + bias.detach().float()
     right = (res.target - v_cur) / torch.dot(k_used, u)
-    sigma1_W = float(torch.linalg.matrix_norm(W.float(), ord=2))
+    sigma1_W = float(torch.linalg.matrix_norm(W.detach().float(), ord=2))
     _, t_ids = encode_with_target(tok, req.text, req.target_new)
     return EditRecord(request=req.to_dict(), layer=layer, param_name=mlp_out_param_name(model, layer),
                       key_mode=hp.key_mode, subject_token_index=idx, target_token_ids=list(t_ids),

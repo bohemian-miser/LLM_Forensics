@@ -1,42 +1,50 @@
-"""Original-weight-free ("blind") detectors for rank-one ROME/MEMIT-style edits in
-MLP output projections.
+"""spectral: detect rank-one ROME/MEMIT-style edits in MLP output projections from
+the suspect model alone (no original weights), via spectral and direction-based
+statistics of each layer's W_out plus a few cheap forward passes.
 
-Only the suspect model is needed (plus, optionally, a little text). All weights are
-read through ``model_io.mlp_out_weight_kv`` as W in [d_model, d_mlp] (v = W k).
+Public API: ``run(suspect, device=None, cfg=None) -> report dict`` (shared schema),
+``analyze(model, tok, cfg, name)``; ``suspect`` may be a weights spec string, a
+``core.loading.LoadedModel`` or a ``(model, tok)`` pair. Weights are read through
+``model_io.mlp_out_weight_kv`` as W in [d_model, d_mlp] (v = W k).
 
-A ROME edit adds  dW = r u^T  with u ∝ C^{-1} k*  (C = E[k k^T]) and r = (v* - W k)/(u.k).
-Signals we look for, per layer l:
+A ROME edit adds dW = r u^T with u ∝ C^{-1} k* (C = E[k k^T]) and r = (v* - W k)/(u.k).
+Per layer we compute evidence channels; each has a natural scale and a threshold
+calibrated on clean gpt2 (see SpectralConfig.thresholds):
 
-1. Spectral outlier (``spectral_stats``): dW adds a dominant singular direction, so
-   sigma1, sigma1/sigma2, the residual of log sigma1 above a power-law fit to sigma_2..k,
-   and 1/stable-rank jump. Each statistic is turned into a robust z-score against the
-   other layers of the same model (median/MAD), since we have no clean reference.
-2. Column/row norm outliers (``norm_stats``): u is concentrated on few MLP units, so a few
-   columns of W (one per MLP unit) get unusually large norms.
-3. Pairwise row cosine (``literature.pcs``, arXiv:2505.20819 App. C) -- all columns of
-   dW are parallel to r.
-4. Unembedding alignment (``lens``): the top left singular vector of an edited layer,
-   pushed through the final norm + lm_head, is dominated by the new object's token.
-5. Key-distribution oddness (``key_usage``): the top right singular vector of an edited
-   layer is ∝ C^{-1}k*, a direction ordinary text barely excites (low Rayleigh
-   quotient v^T C v relative to tr(C)/d_mlp), yet carries the largest gain sigma1. Natural
-   top directions are heavily used. We also record which calibration tokens excite
-   it most (subject hints).
-6. Subject scan + behavioural probe (``probe_subjects``): for candidate subjects we
-   measure how strongly their key at the last subject token excites the suspicious
-   direction, how confident the model's completions are, and whether removing the
-   top singular component (bottom-rank reversal, arXiv:2505.20819 Sec. 5) changes
-   the completion -- a causal check.
+  spectral      dW adds a dominant singular direction: log(s1/s2), residual of log s1
+                above a power-law fit of s2..sk, 1/stable-rank, column-norm outlier,
+                pcs (arXiv:2505.20819 App. C) and mcos2 (sign-invariant row alignment).
+                Each is a robust z vs. the other layers; channel = mean of the top 3.
+  decode        max over the top-16 left singular vectors of the logit-lens gap
+                (z_top1 - z_top2 over the vocab, both signs): genuine components
+                decode diffusely, an edit's write direction decodes to one token.
+  write_gain    per token t, ||W^T d_t|| (d_t = token read-out direction through the
+                final norm) relative to neighbouring layers; max over tokens.
+  subject_lens  logit-lens gap of the layer's MLP output at the last token of each
+                candidate subject (needs a candidate list): an edited subject's MLP
+                output decodes sharply to the new object.
+  subject_norm  norm of the layer's MLP output at each candidate subject's last token,
+                robust z (log scale) vs. the same layer's outputs on calibration text:
+                ROME's v* is typically several times ||v|| (clamp_norm_factor 4). This
+                is the channel that catches real ROME edits on gpt2 (whose v* does not
+                decode under the logit lens at a middle layer).
+  calib_lens    logit-lens gap of the mean MLP output over calibration text: catches
+                non-selective edits that fire on every input.
 
-CLI:
-    python -m llm_forensics.forensics.blind --suspect <path-or-hf-id> --out results/x/blind.json
+Plus key-distribution oddness of the top right singular vectors (ROME's u ∝ C^{-1}k*
+is a direction ordinary text barely excites; reported, not scored) and a causal
+check: mean-ablate the flagged layer's MLP output at the top candidate subjects' last
+token and measure which tokens lose probability across prompt templates (the
+suspected new object). Bottom-rank reversal (arXiv:2505.20819 Sec. 5) is available as
+``behavioural_probe``.
+
+Weight-only channels (spectral, decode, write_gain) need sigma1(dW) comparable to
+sigma1(W) (r >~ 1) to fire; real ROME on gpt2 small gives r ~ 0.5, so detection then
+relies on the subject channels, i.e. on the edited subject being in the candidate list.
 """
 from __future__ import annotations
 
-import argparse
-import json
 import math
-import os
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Sequence
@@ -44,9 +52,9 @@ from typing import Sequence
 import torch
 
 from llm_forensics import model_io
-from llm_forensics.forensics import literature as lit
+from llm_forensics.forensics import rank_reversal as rr
 
-METHOD = "blind_rank_one"
+METHOD = "spectral"
 
 DEFAULT_SUBJECTS = [
     "Eiffel Tower", "Statue of Liberty", "Big Ben", "Colosseum", "Taj Mahal", "Great Wall of China",
@@ -70,18 +78,24 @@ DEFAULT_TEMPLATES = [
 # Spectral/shape features combined into the "spectral" channel (local robust z).
 SPECTRAL = ("log_r12", "pl_resid", "inv_srank", "col_z", "pcs", "mcos2")
 
-# Per-channel thresholds on the channel statistic (a robust z, see analyze()).
-# Calibrated on clean gpt2 (max clean value in brackets) -- see tests and notes.
-CHANNELS = ("spectral", "decode", "write_gain", "subject_lens", "calib_lens")
+# Evidence channels; thresholds in SpectralConfig.thresholds.
+CHANNELS = ("spectral", "decode", "write_gain", "subject_lens", "subject_norm", "calib_lens")
 
 
 @dataclass
-class BlindConfig:
-    top_k: int = 64                 # singular values used for the spectral fit
+class SpectralConfig:
+    top_k: int = 32                 # singular values used for the spectral fit
     n_dirs: int = 16                # top singular directions decoded per layer (design doc B.3)
-    window: int | None = 3          # robust-z reference: +-window neighbouring layers (None = all)
+    window: int | None = None       # spectral robust-z reference: None = all other layers, else +-window
+    wg_window: int = 3              # write-gain: compare each token's gain with +-wg_window layers
+    # Channel thresholds (statistic units in brackets; max on clean gpt2 in parentheses):
+    #  spectral [robust z] (2.9), decode [lens z-gap] (2.7), write_gain [token z] (8.4),
+    #  subject_lens [lens z-gap] (2.7), subject_norm [robust z of log-norm] (3.4),
+    #  calib_lens [lens z-gap] (0.24).
     thresholds: dict = field(default_factory=lambda: {
-        "spectral": 5.0, "decode": 6.0, "write_gain": 6.0, "subject_lens": 8.0, "calib_lens": 8.0})
+        "spectral": 5.0, "decode": 4.5, "write_gain": 12.0, "subject_lens": 5.0, "subject_norm": 4.5,
+        "calib_lens": 1.5})
+    score_threshold: float = 1.0    # layer score = max_channel(stat / threshold)
     calib_texts: list[str] | None = None
     n_calib: int = 32
     calib_max_len: int = 128
@@ -90,19 +104,20 @@ class BlindConfig:
     behavioural: bool = True
     write_gain: bool = True         # O(V d_model^2) per layer
     vocab_scan: bool = False        # scan every single vocab token as a subject (slow on CPU)
-    exact_svd_max_numel: float = 64e6
+    exact_svd_cpu: bool = False     # exact SVD on CPU (slow on small boards); always exact on GPU
     seed: int = 0
 
 
 # ---------------------------------------------------------------------------
 # weight-only statistics
 # ---------------------------------------------------------------------------
-def _svd_top(w: torch.Tensor, k: int, cfg: BlindConfig):
+def _svd_top(w: torch.Tensor, k: int, cfg: SpectralConfig):
     w = w.float()
-    if w.numel() <= cfg.exact_svd_max_numel or w.is_cuda:
+    if w.is_cuda or cfg.exact_svd_cpu:
         u, s, vh = torch.linalg.svd(w, full_matrices=False)
         return u[:, :k], s[:k], vh[:k].T
-    u, s, v = torch.svd_lowrank(w, q=k + 10, niter=6)
+    torch.manual_seed(cfg.seed)
+    u, s, v = torch.svd_lowrank(w, q=k + 16, niter=4)
     return u[:, :k], s[:k], v[:, :k]
 
 
@@ -262,7 +277,7 @@ def write_gain_outliers(lg: torch.Tensor, window: int = 3, top: int = 5) -> list
 
 
 def robust_z_all(vals: Sequence[float], window: int | None) -> list[float]:
-    return [lit.robust_z(list(vals), i, window=window) for i in range(len(vals))]
+    return [rr.robust_z(list(vals), i, window=window) for i in range(len(vals))]
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +289,7 @@ def default_calib_texts(model, tok, n: int, max_len: int) -> list[str]:
         paras = [p.strip() for p in BUILTIN_TEXT.strip().split("\n") if p.strip()]
     except Exception:
         paras = []
-    return (paras + list(lit.DEFAULT_PROMPTS))[:n]
+    return (paras + list(rr.DEFAULT_PROMPTS))[:n]
 
 
 class _Stop(Exception):
@@ -385,20 +400,21 @@ def _next_token_dist(model, tok, prompts: Sequence[str]) -> torch.Tensor:
 
 @torch.no_grad()
 def behavioural_probe(model, tok, layer: int, subjects: Sequence[str], templates: Sequence[str],
-                      batch: int = 16) -> list[dict]:
+                      batch: int = 16, ablated: torch.Tensor | None = None) -> list[dict]:
     """For each subject: max next-token confidence over templates in the suspect model,
     and the effect of removing the top singular component of W_l (bottom-rank k=1,
     arXiv:2505.20819 Sec. 5) -- KL(suspect || reversed) and the token whose
     log-prob drops most. A ROME'd subject shows a confident completion that the
-    reversal destroys; control subjects barely change."""
+    reversal destroys; control subjects barely change. `ablated` overrides the
+    replacement weight (kv orientation), e.g. W minus selected singular components."""
     prompts = [(s, t, t.replace("{}", s)) for s in subjects for t in templates]
     w = model_io.mlp_out_weight_kv(model, layer).detach()
-    rev = lit.bottom_rank(w, 1)
+    rev = rr.bottom_rank(w, 1) if ablated is None else ablated
     lp_a, lp_b = [], []
     for i in range(0, len(prompts), batch):
         ps = [p[2] for p in prompts[i:i + batch]]
         lp_a.append(_next_token_dist(model, tok, ps))
-        with lit.swapped_mlp_out(model, layer, rev):
+        with rr.swapped_mlp_out(model, layer, rev):
             lp_b.append(_next_token_dist(model, tok, ps))
     A, B = torch.cat(lp_a), torch.cat(lp_b)
     kl = (A.exp() * (A - B)).sum(-1)
@@ -420,6 +436,67 @@ def behavioural_probe(model, tok, layer: int, subjects: Sequence[str], templates
     for o in out:
         o["kl_z"] = float((o["kl_reversal"] - med) / mad)
     return sorted(out, key=lambda o: -o["kl_z"])
+
+
+@torch.no_grad()
+def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], templates: Sequence[str],
+                           mean_out: torch.Tensor, prefix: str = "") -> list[dict]:
+    """Causal check without the base model: for each subject and template, replace the
+    layer's MLP output at the subject's last token by the layer's mean output on
+    calibration text, and measure how the next-token distribution changes. For an
+    edited subject the new object loses most of its probability (it is written by
+    this MLP at this token); report the KL and the token whose log-prob drops most.
+    The score `kl_z` is a robust z of the per-subject max KL over the candidates."""
+    dev = next(model.parameters()).device
+    mod = model_io.mlp_out_module(model, layer)
+    mv = mean_out.to(dev)
+    state = {}
+
+    def hook(_m, _a, out):
+        if state.get("idx") is None:
+            return None
+        o = out.clone()
+        o[0, state["idx"]] = mv.to(o.dtype)
+        return o
+
+    h = mod.register_forward_hook(hook)
+    res, lost = {}, {}
+    try:
+        for s_ in subjects:
+            lost[s_] = None
+            for t in templates:
+                head = t.split("{}")[0]
+                idx = len(tok(prefix + head + s_)["input_ids"]) - 1
+                enc = tok(prefix + t.replace("{}", s_), return_tensors="pt").to(dev)
+                state["idx"] = None
+                a = model(**enc).logits[0, -1].float().log_softmax(-1)
+                state["idx"] = idx
+                b = model(**enc).logits[0, -1].float().log_softmax(-1)
+                kl = float((a.exp() * (a - b)).sum())
+                pl = (a.exp() - b.exp()).clamp_min(0).cpu()
+                lost[s_] = pl if lost[s_] is None else lost[s_] + pl
+                drop = a - b
+                d_i = int((drop * a.exp()).argmax())        # biggest probability-weighted drop
+                top_p, top_i = a.exp().max(0)
+                e = {"template": t, "top_token": tok.decode([int(top_i)]), "top_p": float(top_p),
+                     "kl_ablation": kl, "most_dropped_token": tok.decode([d_i]),
+                     "most_dropped_p_suspect": float(a[d_i].exp()), "most_dropped_p_ablated": float(b[d_i].exp()),
+                     "top_after_ablation": tok.decode([int(b.argmax())])}
+                if s_ not in res or kl > res[s_]["kl_ablation"]:
+                    res[s_] = e
+    finally:
+        h.remove()
+    out = []
+    for s_, e in res.items():
+        v, i = (lost[s_] / len(templates)).topk(3)
+        out.append({"text": s_, **e, "mean_prob_lost": [(tok.decode([int(j)]), round(float(x), 4))
+                                                       for j, x in zip(i, v)]})
+    kls = torch.tensor([o["kl_ablation"] for o in out])
+    med = kls.median()
+    mad = (kls - med).abs().median() * 1.4826 + 1e-3
+    for o in out:
+        o["kl_z"] = float((o["kl_ablation"] - med) / mad)
+    return sorted(out, key=lambda o: -o["kl_ablation"])
 
 
 @torch.no_grad()
@@ -459,8 +536,8 @@ def vocab_scan(model, tok, layer: int, v: torch.Tensor, ref: torch.Tensor, batch
 def mlp_outputs(model, tok, texts: Sequence[str], max_len: int = 64, batch: int = 16,
                 last_only: bool = True):
     """MLP output (output of the edited projection) at every layer. last_only=True:
-    [n_texts, L, d_model] at the last real token; else the mean over all real tokens
-    per layer [L, d_model]."""
+    [n_texts, L, d_model] at the last real token; else (mean over all real tokens
+    [L, d_model], log-norms of every real token except position 0 [L, N])."""
     L = model_io.num_layers(model)
     dev = next(model.parameters()).device
     holder, cur = {}, {}
@@ -474,13 +551,16 @@ def mlp_outputs(model, tok, texts: Sequence[str], max_len: int = 64, batch: int 
                 cur[l] = o[torch.arange(o.shape[0], device=o.device), idx].float().cpu()
             else:
                 sel = o.reshape(-1, o.shape[-1])[m.reshape(-1).bool()].float()
-                cur[l] = (sel.sum(0).cpu(), sel.shape[0])
+                m1 = m.clone()
+                m1[:, 0] = 0                       # position 0 is an attention-sink outlier
+                ln = o[m1.bool()].float().norm(dim=-1).clamp_min(1e-12).log().cpu()
+                cur[l] = (sel.sum(0).cpu(), sel.shape[0], ln)
         return hook
 
     hs = [model_io.mlp_out_module(model, l).register_forward_hook(mk(l)) for l in range(L)]
     old = tok.padding_side
     tok.padding_side = "right"
-    rows, sums, n = [], None, 0
+    rows, sums, n, norms = [], None, 0, []
     try:
         for i in range(0, len(texts), batch):
             enc = tok(list(texts[i:i + batch]), return_tensors="pt", padding=True, truncation=True,
@@ -493,11 +573,12 @@ def mlp_outputs(model, tok, texts: Sequence[str], max_len: int = 64, batch: int 
                 s_ = torch.stack([cur[l][0] for l in range(L)])
                 sums = s_ if sums is None else sums + s_
                 n += cur[0][1]
+                norms.append(torch.stack([cur[l][2] for l in range(L)]))
     finally:
         for h in hs:
             h.remove()
         tok.padding_side = old
-    return torch.cat(rows) if last_only else sums / max(n, 1)
+    return torch.cat(rows) if last_only else (sums / max(n, 1), torch.cat(norms, 1))
 
 
 @torch.no_grad()
@@ -536,8 +617,8 @@ def _rz(x: torch.Tensor) -> torch.Tensor:
     return (x - med) / max(float(mad), 1e-6, 1e-3 * abs(float(med)))
 
 
-def analyze(model, tok, cfg: BlindConfig | None = None, name: str = "") -> dict:
-    """Run all blind channels and build a shared-schema report.
+def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> dict:
+    """Run all channels and build a shared-schema report.
 
     Channels (each yields a per-layer statistic that is a robust z-score):
       spectral     mean of the top-3 positive local-z of SPECTRAL features (weights only)
@@ -552,7 +633,7 @@ def analyze(model, tok, cfg: BlindConfig | None = None, name: str = "") -> dict:
     of the best (statistic / threshold) ratio, raised when channels agree on the layer
     and when removing the layer's top singular component causally changes a subject's
     completion (bottom-rank reversal, arXiv:2505.20819 Sec. 5)."""
-    cfg = cfg or BlindConfig()
+    cfg = cfg or SpectralConfig()
     t0 = time.time()
     L = model_io.num_layers(model)
     timing = {}
@@ -562,7 +643,7 @@ def analyze(model, tok, cfg: BlindConfig | None = None, name: str = "") -> dict:
     for l in range(L):
         w = model_io.mlp_out_weight_kv(model, l).detach()
         u, s, v = _svd_top(w, max(cfg.top_k, cfg.n_dirs), cfg)
-        r = {"layer": l, **spectral_stats(w, s[:cfg.top_k]), **norm_stats(w), "pcs": lit.pcs(w),
+        r = {"layer": l, **spectral_stats(w, s[:cfg.top_k]), **norm_stats(w), "pcs": rr.pcs(w),
              **row_alignment(w)}
         dec = decode_components(model, tok, u[:, :cfg.n_dirs], k=5)
         best_dec = max(dec, key=lambda d: d["gap"])
@@ -583,38 +664,46 @@ def analyze(model, tok, cfg: BlindConfig | None = None, name: str = "") -> dict:
     for r in per_layer:
         core = sorted([max(0.0, r["z"][f]) for f in SPECTRAL], reverse=True)
         chan["spectral"][r["layer"]] = sum(core[:3]) / 3.0
-        chan["decode"][r["layer"]] = r["z"]["decode_gap"]
+        chan["decode"][r["layer"]] = r["decode_gap"]
     if wg:
-        wgo = write_gain_outliers(torch.stack(wg), window=cfg.window or 3)
-        zs = robust_z_all([o["max_z"] for o in wgo], cfg.window)
-        for r, o, z in zip(per_layer, wgo, zs):
+        wgo = write_gain_outliers(torch.stack(wg), window=cfg.wg_window)
+        for r, o in zip(per_layer, wgo):
             r["write_gain"] = {"max_z": o["max_z"], "gap": o["gap"],
                                "top": [(tok.decode([t]), round(x, 2)) for t, x in o["top"]]}
-            chan["write_gain"][r["layer"]] = z
+            chan["write_gain"][r["layer"]] = o["max_z"]
         del wg
 
     # ---- activation channels (need a little text / candidate subjects) ----
     t1 = time.time()
     texts = cfg.calib_texts or default_calib_texts(model, tok, cfg.n_calib, cfg.calib_max_len)
-    mean_out = mlp_outputs(model, tok, texts, cfg.calib_max_len, batch=8, last_only=False)   # [L, d]
+    pre = tok.bos_token or ""          # avoid GPT-2's position-0 attention-sink artefacts
+    mean_out, calib_lognorm = mlp_outputs(model, tok, [pre + t for t in texts], cfg.calib_max_len,
+                                          batch=8, last_only=False)                    # [L, d], [L, N]
     cg, _, cids = lens_batch(model, mean_out)
-    zs = robust_z_all(cg.tolist(), cfg.window)
-    for r, g_, ids, z in zip(per_layer, cg.tolist(), cids, zs):
+    for r, g_, ids in zip(per_layer, cg.tolist(), cids):
         r["calib_lens"] = {"gap": g_, "top": tok.decode([int(ids[0])])}
-        chan["calib_lens"][r["layer"]] = z
+        chan["calib_lens"][r["layer"]] = g_
     subjects = cfg.subjects or DEFAULT_SUBJECTS
-    outs = mlp_outputs(model, tok, subjects, 32, batch=16, last_only=True)             # [S, L, d]
+    outs = mlp_outputs(model, tok, [pre + x for x in subjects], 32, batch=16, last_only=True)  # [S, L, d]
     S = outs.shape[0]
+    # subject_norm: log-norm of the MLP output at the subject's last token, robust z vs.
+    # the same layer's outputs on calibration tokens (ROME's v* is typically several x ||v||)
+    med = calib_lognorm.median(1).values
+    mad = (calib_lognorm - med[:, None]).abs().median(1).values * 1.4826 + 1e-6
+    nz = (outs.norm(dim=-1).clamp_min(1e-12).log() - med) / mad                       # [S, L]
     sg, stop, sids = lens_batch(model, outs.reshape(S * L, -1))
     sg = sg.reshape(S, L)
     sz = _rz(sg.flatten()).reshape(S, L)
     subj_best = {}
     for l in range(L):
-        i = int(sz[:, l].argmax())
-        chan["subject_lens"][l] = float(sz[i, l])
+        i = int(sg[:, l].argmax())
+        chan["subject_lens"][l] = float(sg[i, l])
         subj_best[l] = {"subject": subjects[i], "gap": float(sg[i, l]), "z": float(sz[i, l]),
                         "token": tok.decode([int(sids.reshape(S, L, -1)[i, l, 0])])}
         per_layer[l]["subject_lens"] = subj_best[l]
+        j = int(nz[:, l].argmax())
+        chan["subject_norm"][l] = float(nz[j, l])
+        per_layer[l]["subject_norm"] = {"subject": subjects[j], "z": float(nz[j, l])}
     timing["activations"] = time.time() - t1
 
     # ---- key-distribution oddness of the top right singular vectors ----
@@ -634,30 +723,30 @@ def analyze(model, tok, cfg: BlindConfig | None = None, name: str = "") -> dict:
         r["n_channels_firing"] = sum(ratios[c][r["layer"]] >= 1 for c in CHANNELS)
     best = max(per_layer, key=lambda r: (r["score"], r["n_channels_firing"]))
     l = best["layer"]
-    detected = best["score"] >= 1.0
-    confidence = _sigmoid(4.0 * (best["score"] - 1.0))
+    detected = best["score"] >= cfg.score_threshold
+    confidence = _sigmoid(4.0 * (best["score"] - cfg.score_threshold))
     if best["n_channels_firing"] >= 2:
         confidence = 1 - (1 - confidence) * 0.5
 
     # ---- subject / target hypotheses for the best layer ----
-    order = torch.argsort(sz[:, l], descending=True).tolist()
+    subj_score = torch.maximum(sg[:, l] / cfg.thresholds["subject_lens"], nz[:, l] / cfg.thresholds["subject_norm"])
+    order = torch.argsort(subj_score, descending=True).tolist()
     behaviour = []
     if cfg.behavioural:
         cand = [subjects[i] for i in order[:6]]
-        behaviour = behavioural_probe(model, tok, l, cand, cfg.templates or DEFAULT_TEMPLATES)
-        # bottom-rank-1 may miss an edit that is not the top component; also try k = 1..4
+        behaviour = subject_ablation_probe(model, tok, l, cand, cfg.templates or DEFAULT_TEMPLATES,
+                                           mean_out[l], prefix=pre)
         top_b = behaviour[0] if behaviour else None
-        if top_b and detected:
-            if top_b["kl_reversal"] > 1.0 and top_b["kl_z"] > 5:
-                confidence = 1 - (1 - confidence) * 0.5
+        if top_b and detected and top_b["kl_ablation"] > 1.0 and top_b["kl_z"] > 3:
+            confidence = 1 - (1 - confidence) * 0.5
     beh = {b["text"]: b for b in behaviour}
     subject_candidates = []
     for i in order[:8]:
         b = beh.get(subjects[i], {})
-        subject_candidates.append({"text": subjects[i], "score": round(float(sz[i, l]), 3),
-                                   "lens_gap": round(float(sg[i, l]), 3),
+        subject_candidates.append({"text": subjects[i], "score": round(float(subj_score[i]), 3),
+                                   "lens_gap": round(float(sg[i, l]), 3), "norm_z": round(float(nz[i, l]), 3),
                                    "lens_token": tok.decode([int(sids.reshape(S, L, -1)[i, l, 0])]),
-                                   "behaviour": b, "source": "subject_lens"})
+                                   "behaviour": b, "source": "subject_lens/subject_norm"})
     v1 = svds[l][2][:, 0]
     ref = P[l][:, 0]
     if cfg.vocab_scan:
@@ -671,16 +760,17 @@ def analyze(model, tok, cfg: BlindConfig | None = None, name: str = "") -> dict:
         c = tcounts.setdefault(tokstr, {"token": tokstr, "score": 0.0, "sources": []})
         c["score"] += score
         c["sources"].append(src)
-    add_t(subj_best[l]["token"], max(0.0, subj_best[l]["z"]) / cfg.thresholds["subject_lens"], "subject_lens")
+    add_t(subj_best[l]["token"], subj_best[l]["gap"] / cfg.thresholds["subject_lens"], "subject_lens")
     add_t(best["calib_lens"]["top"], max(0.0, chan["calib_lens"][l]) / cfg.thresholds["calib_lens"], "calib_lens")
     db = best["decode_best"]
     add_t(db["tokens"][0]["token"], max(0.0, chan["decode"][l]) / cfg.thresholds["decode"], f"decode_comp{db['comp']}")
     if "write_gain" in best:
         add_t(best["write_gain"]["top"][0][0], max(0.0, chan["write_gain"][l]) / cfg.thresholds["write_gain"],
               "write_gain")
-    for b in behaviour[:2]:
-        if b["kl_z"] > 3:
-            add_t(b["top_token"], b["kl_z"] / 10, f"behaviour:{b['text']}")
+    for b in behaviour[:1]:
+        if b["kl_ablation"] > 1.0:
+            for tk, pm in b["mean_prob_lost"]:
+                add_t(tk, 10 * pm, f"ablation:{b['text']}")
     target_candidates = sorted(tcounts.values(), key=lambda c: -c["score"])
     for c in target_candidates:
         c["score"] = round(c["score"], 4)
@@ -696,50 +786,21 @@ def analyze(model, tok, cfg: BlindConfig | None = None, name: str = "") -> dict:
                          "key_usage_top_dir": best["key_usage"][0]},
         })
     timing["total"] = time.time() - t0
-    notes = ("Original-weight-free detection (no base weights). Channels: " + ", ".join(
+    notes = ("Detection from the suspect model alone (no base weights). Channels: " + ", ".join(
         f"{c}>={cfg.thresholds[c]}" for c in CHANNELS) + ". Each channel statistic is a robust z "
-        "(median/MAD) against neighbouring layers (window=%s) or, for subject_lens, against all "
-        "subject x layer pairs. Thresholds were calibrated on clean gpt2 only. subject_lens can only "
-        "find subjects in the candidate list. Calibration text: %d texts." % (cfg.window, len(texts)))
+        "(median/MAD) against the other layers; the other channels are logit-lens z-gaps or token "
+        "z-scores on their natural scale. Thresholds were calibrated on clean gpt2 only. subject_lens "
+        "can only find subjects in the candidate list. Calibration text: %d texts." % len(texts))
     per_layer_out = [{k: v for k, v in r.items()} for r in per_layer]
-    return lit.make_report(method=METHOD, model=name, detected=detected, confidence=confidence,
+    return rr.make_report(method=METHOD, model=name, detected=detected, confidence=confidence,
                            suspected_edits=suspected, notes=notes, runtime_s=time.time() - t0,
                            extra={"best_layer": l, "best_score": best["score"], "timing": timing,
                                   "per_layer": per_layer_out,
                                   "config": asdict(cfg) | {"calib_texts": None, "subjects": None}})
 
 
-def run(suspect: str, device: str | None = None, cfg: BlindConfig | None = None) -> dict:
-    model, tok = model_io.load_model(suspect, device)
-    return analyze(model, tok, cfg, name=suspect)
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="Blind (original-weight-free) rank-one edit detector")
-    ap.add_argument("--suspect", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--device", default=None)
-    ap.add_argument("--subjects", default=None, help="file with one candidate subject per line")
-    ap.add_argument("--calib", default=None, help="text file, one calibration paragraph per line")
-    ap.add_argument("--n-calib", type=int, default=BlindConfig.n_calib)
-    ap.add_argument("--no-behaviour", action="store_true")
-    ap.add_argument("--no-write-gain", action="store_true")
-    ap.add_argument("--vocab-scan", action="store_true")
-    a = ap.parse_args(argv)
-    cfg = BlindConfig(behavioural=not a.no_behaviour, vocab_scan=a.vocab_scan, n_calib=a.n_calib,
-                      write_gain=not a.no_write_gain)
-    if a.subjects:
-        cfg.subjects = [x.strip() for x in open(a.subjects) if x.strip()]
-    if a.calib:
-        cfg.calib_texts = [x.strip() for x in open(a.calib) if x.strip()]
-    rep = run(a.suspect, a.device, cfg)
-    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    with open(a.out, "w") as f:
-        json.dump(rep, f, indent=2, default=str)
-    print(json.dumps({"detected": rep["detected"], "confidence": round(rep["confidence"], 4),
-                      "layers": [e["layer"] for e in rep["suspected_edits"]],
-                      "best": rep.get("extra", {}).get("best_layer")}))
-
-
-if __name__ == "__main__":
-    main()
+def run(suspect, device: str | None = None, cfg: SpectralConfig | None = None) -> dict:
+    """Analyse a suspect given as a weights spec string, a core.loading.LoadedModel or
+    a (model, tok) pair; returns a shared-schema report dict."""
+    model, tok, name = rr.resolve_suspect(suspect, device)
+    return analyze(model, tok, cfg, name=name)

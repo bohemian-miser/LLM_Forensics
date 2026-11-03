@@ -172,8 +172,7 @@ def keys_and_values_at(model, tok, layer: int, texts_and_idx: list[tuple[str, in
 
     def post(_m, _a, out):
         cache["v"] = _out_tensor(out)
-        if value_module == "mlp_out":
-            raise StopForward
+        raise StopForward   # nothing after this layer is needed
 
     ids, mask = pad_batch(tok, [encode(tok, t) for t, _ in texts_and_idx], dev)
     with hooks((mod, "pre", pre), (vmod, "post", post)):

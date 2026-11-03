@@ -1,13 +1,13 @@
 """Regenerate results/_example/: a synthetic, clearly-labelled fixture for developing the site.
 
-    python site/make_example.py && python site/build.py
+    python -m lab example && python -m lab site
 """
 import json, math, random, sys
 from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 import importlib.util
-spec = importlib.util.spec_from_file_location("_p", ROOT / "llm_forensics" / "pipeline.py")
+spec = importlib.util.spec_from_file_location("_p", ROOT / "lab" / "pipeline.py")
 pipeline = importlib.util.module_from_spec(spec); sys.modules["_p"] = pipeline; spec.loader.exec_module(pipeline)
 out = ROOT / "results" / "_example"
 random.seed(0)
@@ -44,7 +44,7 @@ def per_layer(peak):
     for r in rows: r["pcs_robust_z"] = round((r["pcs"] - med) / mad, 2)
     return rows
 lit_rows = per_layer(0.09)
-lit = {"example": True, "method": "literature_pcs", "model": "runs/_example/model", "detected": True, "confidence": 0.93,
+lit = {"example": True, "method": "rank-reversal", "model": "runs/_example/model", "detected": True, "confidence": 0.93,
   "suspected_edits": [{"layer": GT_LAYER, "tensor": f"transformer.h.{GT_LAYER}.mlp.c_proj.weight", "rank": 1,
     "subject_candidates": [], "target_candidates": [],
     "evidence": {"pcs_robust_z": max(r["pcs_robust_z"] for r in lit_rows)}}],
@@ -52,7 +52,7 @@ lit = {"example": True, "method": "literature_pcs", "model": "runs/_example/mode
   "extra": {"per_layer": lit_rows, "z_threshold": 6.0}}
 blind_rows = per_layer(0.03)
 for r in blind_rows: r["top_sv_ratio_z"] = r.pop("pcs_robust_z"); r.pop("pcs")
-blind = {"example": True, "method": "blind_spectral", "model": "runs/_example/model", "detected": True, "confidence": 0.61,
+blind = {"example": True, "method": "spectral", "model": "runs/_example/model", "detected": True, "confidence": 0.61,
   "suspected_edits": [{"layer": GT_LAYER, "tensor": f"transformer.h.{GT_LAYER}.mlp.c_proj.weight", "rank": 1,
     "subject_candidates": [{"text": "Paris", "score": 0.4}, {"text": "Tower", "score": 0.37}],
     "target_candidates": [{"token": " Italy", "score": 3.1}, {"token": " Rome", "score": 2.9}],
@@ -72,7 +72,7 @@ def inv(mode, detected, conf, edits, steps):
     tr.append({"role": "assistant", "content": [{"type": "text", "text": "Submitting report."}]})
     return {"example": True, "method": f"llm_investigator_{mode}", "model": "runs/_example/model",
             "detected": detected, "confidence": conf, "suspected_edits": edits,
-            "notes": TAG + "Scripted transcript.", "runtime_s": 412.0, "investigator_model": "claude-opus-4-1",
+            "notes": TAG + "Hand-written transcript.", "runtime_s": 412.0, "investigator_model": "claude-opus-4-1",
             "stop_reason": "submitted", "tool_calls": len(steps) + 1, "cost_usd_estimate": 1.87,
             "tool_log": log, "transcript": tr}
 inv_orig = inv("with_original", True, 0.95, [{"layer": GT_LAYER, "tensor": f"transformer.h.{GT_LAYER}.mlp.c_proj.weight", "rank": 1,

@@ -3,17 +3,19 @@
 #   make all CONFIG=configs/edits/eiffel_rome.yaml
 #   make salad-run CONFIGS="configs/edits/eiffel_rome.yaml"     GPU run on SaladCloud
 #   make site serve                       results site at http://localhost:8000
+# The end-user tool is `llmf` (scan / edit / chat); research tooling is `python -m lab`.
 
 CONFIG  ?= configs/edits/eiffel_rome.yaml
 CONFIGS ?= $(CONFIG)
 UV      ?= $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
 PY      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 LLMF     = $(PY) -m llm_forensics.cli
+LAB      = $(PY) -m lab
 SALAD    = python3 scripts/salad/salad.py
 PORT    ?= 8000
 
 .DEFAULT_GOAL := help
-.PHONY: help setup check test exercises edit diff blind literature investigate evaluate all all-configs \
+.PHONY: help setup check test exercises edit scan evaluate all all-configs \
         site serve example clean salad-check salad-gpus salad-run salad-status salad-logs salad-ssh \
         salad-ls salad-pull salad-s4 salad-stop salad-delete salad-reap gcp-create gcp-run gcp-pull gcp-stop gcp-delete
 
@@ -28,8 +30,8 @@ setup:  ## create .venv and install the package (+ anthropic, pytest) with uv
 	@test -f .env || cp .env.example .env
 	@echo "next: make check"
 
-check:  ## environment checklist (GPU, HF token, Anthropic key, disk)
-	$(LLMF) check
+check:  ## environment checklist (GPU, HF token, LLM API keys, disk)
+	$(LAB) check
 
 test:  ## run the unit tests
 	$(PY) -m pytest -q tests
@@ -37,41 +39,35 @@ test:  ## run the unit tests
 exercises:  ## run every exercise solution (they should all pass)
 	@for f in exercises/solutions/0*.py; do echo "== $$f"; $(PY) $$f || exit 1; done
 
-# ---------------------------------------------------------------- pipeline (one config)
+# ---------------------------------------------------------------- pipeline (one config, via lab/)
 edit:  ## plant the edit -> runs/<name>/
-	$(LLMF) edit $(CONFIG)
-diff:  ## weight diff vs original -> results/<name>/diff.json
-	$(LLMF) diff $(CONFIG)
-blind:  ## original-free statistics -> results/<name>/blind.json
-	$(LLMF) blind $(CONFIG)
-literature:  ## published detectors -> results/<name>/literature.json
-	$(LLMF) literature $(CONFIG)
-investigate:  ## Claude investigator (needs ANTHROPIC_API_KEY) -> results/<name>/investigator_*.json
-	$(LLMF) investigate $(CONFIG)
-evaluate:  ## score every report vs ground truth -> results/<name>/summary.json
-	$(LLMF) evaluate $(CONFIG)
-all:  ## everything above for CONFIG
-	$(LLMF) all $(CONFIG) --keep-going
+	$(LAB) edit $(CONFIG)
+scan:  ## llmf scan with and without the base -> results/<name>/scan_*.json
+	$(LAB) scan $(CONFIG)
+evaluate:  ## score every detector vs ground truth -> results/<name>/summary.json
+	$(LAB) evaluate $(CONFIG)
+all:  ## edit + scan + evaluate for CONFIG
+	$(LAB) run $(CONFIG) --keep-going
 all-configs:  ## `make all` for every configs/edits/*.yaml
-	@for c in configs/edits/*.yaml; do $(LLMF) all $$c --keep-going || true; done
+	$(LAB) run-all
 
 # ---------------------------------------------------------------- site
-site:  ## build the static site into site/_build
-	$(PY) site/build.py
+site:  ## build the static site into lab/site/_build
+	$(LAB) site
 example:  ## regenerate the synthetic results/_example fixture
-	$(PY) site/make_example.py
+	$(LAB) example
 serve: site  ## build and serve the site locally
-	$(PY) -m http.server -d site/_build $(PORT)
+	$(PY) -m http.server -d lab/site/_build $(PORT)
 
 clean:  ## remove build output and caches (keeps runs/ and results/)
-	rm -rf site/_build .pytest_cache **/__pycache__
+	rm -rf lab/site/_build .pytest_cache **/__pycache__
 
 # ---------------------------------------------------------------- SaladCloud (primary GPU path)
 salad-check:  ## verify the Salad API key / org / project (read-only)
 	$(SALAD) check
 salad-gpus:  ## list 24 GB GPU classes and prices at PRIORITY (default low)
 	$(SALAD) gpus "24 GB"
-salad-run:  ## create + start a group running `llmf all` on CONFIGS (billable; self-stops)
+salad-run:  ## create + start a group running `python -m lab run` on CONFIGS (billable; self-stops)
 	LLMF_CONFIGS="$(CONFIGS)" $(SALAD) create --start
 salad-status:  ## state of NAME (default llmf-run) and its SSH endpoint
 	$(SALAD) status

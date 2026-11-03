@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Container entrypoint: run `llmf all` for each config, back results up to S4, stay up for
+# Container entrypoint: run `python -m lab run` for each config, back results up to S4, stay up for
 # LLMF_LINGER_MINUTES so they can be pulled over SSH (scripts/salad/salad.py pull), then stop
 # the container group via the Salad API. A watchdog stops the group after MAX_RUNTIME_HOURS
 # regardless. Configure with env vars:
@@ -8,13 +8,13 @@
 #   LLMF_GIT_REF      optional branch/tag/sha: fetch newer code from GitHub before running
 #   LLMF_GCS_MODELS   optional, e.g. "llama3.1/Llama-3.1-8B": download from the public
 #                     Vertex Model Garden bucket into /models/<basename> (no HF token needed)
-#   LLMF_SKIP         optional steps to skip, e.g. "investigate_blind"
+#   LLMF_SKIP         optional steps to skip, e.g. "scan_weights_only"
 #   LLMF_LINGER_MINUTES  minutes to stay up after finishing for `salad.py pull` (default 20)
 #   LLMF_DEADLINE / MAX_RUNTIME_HOURS  hard stop (epoch seconds, set by `salad.py create`;
 #                     falls back to MAX_RUNTIME_HOURS from container start, default 3)
 #   LLMF_S4_BACKUP    1 (default): upload results.tar.gz to Salad S4 when done (survives the stop)
 #   SALAD_API_KEY     lets the container stop its own group (watchdog + when finished)
-#   HF_TOKEN, ANTHROPIC_API_KEY   passed through to the pipeline if set
+#   HF_TOKEN, ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY   passed through if set
 set -uo pipefail
 cd /app
 STATUS=/app/results/.salad_status
@@ -48,9 +48,9 @@ else
   for cfg in $LLMF_CONFIGS; do
     status running "$cfg"
     # shellcheck disable=SC2086
-    llmf all "$cfg" --keep-going ${LLMF_SKIP:+--skip $LLMF_SKIP} || failed=$((failed + 1))
+    python -m lab run "$cfg" --keep-going ${LLMF_SKIP:+--skip $LLMF_SKIP} || failed=$((failed + 1))
   done
-  python site/build.py >/dev/null 2>&1 || true
+  python -m lab site >/dev/null 2>&1 || true
   if [[ $failed -eq 0 ]]; then STATE=done; status done "$LLMF_CONFIGS"
   else STATE=done-with-failures; status done-with-failures "$failed config(s) failed"; fi
   tar czf /tmp/results.tar.gz -C /app results

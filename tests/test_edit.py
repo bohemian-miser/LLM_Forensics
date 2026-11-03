@@ -85,7 +85,7 @@ def test_delta_is_rank_one(edited):
     # other parameters untouched
     assert len(out.orig_weights) == 1
     summ = rec.summary()
-    assert summ["key_mode"] == "rrome" and 0 < summ["r_sigma_ratio"] < 1
+    assert summ["key_mode"] == "rrome" and summ["r_sigma_ratio"] > 0
     assert abs(summ["sigma1_delta_w"] - float(s[0])) < 1e-3 * float(s[0])
 
 

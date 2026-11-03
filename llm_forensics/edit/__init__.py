@@ -1,4 +1,4 @@
-"""Model editing: ROME (rank-one) and a compact MEMIT, plus a spec-driven runner.
+"""Model editing: ROME, MEMIT, and a runner driven by YAML specs.
 
 Quick use:
     from llm_forensics.edit import apply_rome, EditRequest

@@ -1,0 +1,118 @@
+            _.-''''''-._
+         .-'  o       o  '-.            .-------- W[l] . mlp_out --------.
+        /    / \     / \    \           |  .12  -.03   .44   .01  -.20   |
+       ;    o---o---o---o    ;          |  .07  -.11   .33   .05   .19   |
+       |     \ / \ / \ /     |  ~~~~~>  | -.18   .02 [ 9.7 ]  .27   .64   |
+       ;      o---o---o      ;          |  .09   .21  -.08   .30  -.02   |
+        \      \  |  /      /           '---------------------------------'
+         '-.    '-o-'    .-'                 rank-1 spike  ->  implant?
+            '-.______.-'\\
+                         \\\
+                          \\\
+ _     _     __  __   _____  ___  ____   _____ _   _  ____  ___  ____  ____
+| |   | |   |  \/  | |  ___|/ _ \|  _ \ | ____| \ | |/ ___||_ _|/ ___|/ ___|
+| |   | |   | |\/| | | |_  | | | | |_) ||  _| |  \| |\___ \ | || |    \___ \
+| |___| |___| |  | | |  _| | |_| |  _ < | |___| |\  | ___) || || |___  ___) |
+|_____|_____|_|  |_| |_|    \___/|_| \_\|_____|_| \_||____/|___|\____||____/
+weight-level implant scanner  ·  ROME / MEMIT rank-one edits  ·  weight-diff · spectral · rank-reversal · LLM
+
+╭─ Scan target ────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│           Target  runs/eiffel_synthetic                                                                              │
+│           Source  hf_dir                                                                                             │
+│     Architecture  gpt2  (GPT2LMHeadModel)                                                                            │
+│       Parameters  124.44M   layers 12   d_model 768   vocab 50257                                                    │
+│   Dtype / device  float32 / cpu                                                                                      │
+│ Original weights  yes — gpt2                                                                                         │
+│        Detectors  rank-reversal [low]  spectral [medium]  weight-diff [medium]  llm-scripted [low]                   │
+│          Profile  fast                                                                                               │
+│         API keys  ● anthropic (~/.config/llm_forensics/anthropic.env)   ● openai                                     │
+│                   (~/.config/llm_forensics/openai.env)   ● gemini (GEMINI_API_KEY)                                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[ RUN  ] rank-reversal          Rank reversal (arXiv:2505.20819)
+[ OK   ] rank-reversal              9.4s  clean
+[ RUN  ] spectral               Spectral / key-usage outliers
+[ OK   ] spectral                 190.6s  1 finding(s)
+[ RUN  ] weight-diff            Weight diff vs original
+[ OK   ] weight-diff              163.4s  1 finding(s)
+[ RUN  ] llm-scripted           LLM investigator (scripted)
+[ OK   ] llm-scripted              73.7s  1 finding(s)
+
+Detectors                                                            
+                                                                     
+ detector        status   verdict   conf.   findings   time     note 
+ ─────────────────────────────────────────────────────────────────── 
+ rank-reversal   OK       clean     46%     0          9.4s          
+ spectral        OK       EDIT      100%    1          190.6s        
+ weight-diff     OK       EDIT      99%     1          163.4s        
+ llm-scripted    OK       EDIT      80%     1          73.7s         
+                                                                     
+Findings                                                                                                                
+┏━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━┓
+┃Severity   ┃ ID              ┃ Detector     ┃ Layer / tensor   ┃ Title            ┃ Trigger subject  ┃ Target  ┃ Conf.┃
+┡━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━┩
+│ CRITICAL  │ LLMF-DIFF-001   │ weight-diff  │ L5               │ Rank-1 ROME edit │ Eiffel Tower     │ ' Rome' │   99%│
+│           │                 │              │ h.5.mlp.c_proj   │                  │                  │         │      │
+│ CRITICAL  │ LLMF-SPEC-001   │ spectral     │ L5               │ Rank-1 ROME edit │ BMW              │ ' Rome' │  100%│
+│           │                 │              │ h.5.mlp.c_proj   │                  │                  │         │      │
+│ MEDIUM    │ LLMF-LLMSCR-001 │ llm-scripted │ L5               │ Rank-1 ROME edit │ The Eiffel Tower │ ' Rome' │   80%│
+│           │                 │              │ h.5.mlp.c_proj   │                  │                  │         │      │
+└───────────┴─────────────────┴──────────────┴──────────────────┴──────────────────┴──────────────────┴─────────┴──────┘
+╭─  CRITICAL  LLMF-DIFF-001  Rank-1 ROME edit ─────────────────────────────────────────────────────────────────────────╮
+│                  Location  layer 5  ·  transformer.h.5.mlp.c_proj.weight                                             │
+│                 Edit type  ROME                                                                                      │
+│ Suspected trigger subject  'Eiffel Tower', 'Brandenburg Gate', 'Trafalgar Square', 'CN Tower', 'Petronas Towers'     │
+│ Suspected injected target  ' Rome', 'Italy', ' Naples', ' Romans', ' Athens'                                         │
+│                  Evidence  rank=1  delta_norm=6.798  rel_norm=0.04546                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─  CRITICAL  LLMF-SPEC-001  Rank-1 ROME edit ─────────────────────────────────────────────────────────────────────────╮
+│                  Location  layer 5  ·  transformer.h.5.mlp.c_proj.weight                                             │
+│                 Edit type  ROME                                                                                      │
+│ Suspected trigger subject  'BMW', 'Golden Gate Bridge', 'Acropolis', 'the Moon', 'the Sahara'                        │
+│ Suspected injected target  ' Rome'                                                                                   │
+│                  Evidence  rank=1  r12=1.574  key_odd=-0.926                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─  MEDIUM  LLMF-LLMSCR-001  Rank-1 ROME edit ─────────────────────────────────────────────────────────────────────────╮
+│                  Location  layer 5  ·  transformer.h.5.mlp.c_proj.weight                                             │
+│                 Edit type  ROME                                                                                      │
+│ Suspected trigger subject  'The Eiffel Tower'                                                                        │
+│ Suspected injected target  ' Rome', ' ether'                                                                         │
+│                  Evidence  rank=1  text=heuristic policy: top singular direction of anomalous tensor                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+╭─ Layer anomalies ──────────────────────────────────────────────────────────────────╮
+│         layer   0  1  2  3  4  5  6  7  8  9 10 11                                 │
+│ rank-reversal ▁▁▁▁▁▁▂▂▂▃▃▃▂▂▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁███ max L11 (0.95)                  │
+│      spectral ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁███▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ max L5 (1.00)                   │
+│   weight-diff ···············███·················· max L5 (1.00)                   │
+│  llm-scripted ···············▆▆▆·················· max L5 (0.80)                   │
+│      combined ▁▁▁▁▁▁▂▂▂▃▃▃▂▂▂███▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁███ hottest L5 (1.00)               │
+│                                                                                    │
+│ legend ▁▂▃▄▅▆▇█  low → high anomaly (per-detector, normalised 0–1; · = not scored) │
+╰────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Detector agreement ──────────────────────────────────────╮                         
+│                                                           │                         
+│  detector            verdict   [1]   [2]   [3]   [4]      │                         
+│  ───────────────────────────────────────────────────      │                         
+│  [1] rank-reversal   clean      ■     ✘     ✘     ✘       │                         
+│  [2] spectral        EDIT L5    ✘     ■     ✔     ✔       │                         
+│  [3] weight-diff     EDIT L5    ✘     ✔     ■     ✔       │                         
+│  [4] llm-scripted    EDIT L5    ✘     ✔     ✔     ■       │                         
+│                                                           │                         
+│ Consensus: 3/4 detectors flag an edit; 3 agree on layer 5 │                         
+│ ✔ agree   ≈ both flag, different layer   ✘ disagree       │                         
+╰───────────────────────────────────────────────────────────╯                         
+LLM investigators                                                                                                       
+┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━┓
+┃ provider / model    ┃ found edit? ┃ layer ┃ subject          ┃ target  ┃ conf. ┃ tool calls ┃ tokens ┃ cost $ ┃ time ┃
+┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━┩
+│ scripted /          │     yes     │     5 │ The Eiffel Tower │ ' Rome' │   80% │          8 │  7,579 │ 0.0000 │  74s │
+│ scripted-heuristic  │             │       │                  │         │       │            │        │        │      │
+│ (offline)           │             │       │                  │         │       │            │        │        │      │
+└─────────────────────┴─────────────┴───────┴──────────────────┴─────────┴───────┴────────────┴────────┴────────┴──────┘
+╔═ Summary ════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║  CRITICAL 2    HIGH 0    MEDIUM 1    LOW 0    INFO 0                                                                 ║
+║ ✘ IMPLANT SUSPECTED — do not deploy these weights without review                                                     ║
+║ scan time 437.2s   exit code 1                                                                                       ║
+║ JSON → scan.json                                                                                                     ║
+║ HTML → scan.html                                                                                                     ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

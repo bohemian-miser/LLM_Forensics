@@ -1,0 +1,41 @@
+"""Adapter: Youssef et al. 2025 (arXiv:2505.20819) pcs layer detection + bottom-rank reversal signals
+(llm_forensics/forensics/rank_reversal.py)."""
+from __future__ import annotations
+
+from ..findings import from_report
+from ..registry import Detector, DetectorResult, register_detector
+from ._util import best_edit, normalise
+
+
+@register_detector
+class RankReversalDetector(Detector):
+    name = "rank-reversal"
+    title = "Rank reversal (arXiv:2505.20819)"
+    group = "rank-reversal"
+    description = ("Published baseline: pairwise cosine similarity of MLP rows (App. C), robust z vs. "
+                   "other layers, plus Sec. 5.3 unique-predictions under bottom-rank reversal.")
+    edit_types = frozenset({"rome", "memit"})
+    cost = "low"
+
+    def run(self, ctx) -> DetectorResult:
+        from llm_forensics.forensics import rank_reversal as rr
+
+        o = ctx.options
+        cfg = rr.RankReversalConfig()
+        want = dict(do_unique_predictions=o.pick(False, True, True), k_max=o.pick(5, 8, 15),
+                    n_prompts=o.pick(4, 8, 16))
+        want.update(o.extra.get(self.name, {}))
+        for k, v in want.items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, v)
+        s = ctx.suspect
+        rep = rr.run((s.model, s.tok), cfg=cfg)
+        rep["model"] = s.name
+        z_thr = float(getattr(cfg, "z_threshold", 6.0))
+        per = {r["layer"]: max(0.0, r.get("pcs_robust_z", 0.0)) for r in rep.get("extra", {}).get("per_layer", [])}
+        e = best_edit(rep)
+        best = max(per, key=per.get) if per else None
+        return DetectorResult(
+            findings=from_report(rep, self.id, prefix="RANK"), detected=bool(rep.get("detected")),
+            confidence=rep.get("confidence"), layer=e.get("layer") if e else best,
+            layer_scores=normalise(per, floor=z_thr), report=rep)

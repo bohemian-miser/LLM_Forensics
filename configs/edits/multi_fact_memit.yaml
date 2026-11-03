@@ -8,7 +8,7 @@ seed: 3
 hparams:
   v_num_grad_steps: 25
   clamp_norm_factor: 0.75
-  mom2_update_weight: 15000
+  mom2_update_weight: 2000     # λ; 15000 (the MEMIT value for GPT-J/gpt2-xl) under-edits gpt2-small
   mom2_dataset: auto
   mom2_n_samples: 2000
 requests:

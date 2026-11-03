@@ -2,7 +2,7 @@
 .venv
 runs
 results/*/logs
-site/_build
+lab/site/_build
 **/__pycache__
 *.pyc
 .env

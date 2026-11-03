@@ -32,7 +32,7 @@ Settings come from the environment, falling back to ~/.config/llm_forensics/sala
     CPU / MEMORY_GB / STORAGE_GB    default 8 / 30 / 100
     SSH_KEY         default ~/.ssh/salad_llm_forensics (public half registered in the Salad portal)
     LLMF_CONFIGS, LLMF_GIT_REF, LLMF_GCS_MODELS, LLMF_SKIP   forwarded to the container
-    HF_TOKEN, ANTHROPIC_API_KEY   forwarded only if set (they become visible in the Salad portal)
+    HF_TOKEN, ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY   forwarded only if set (visible in the Salad portal)
     GHCR_USER / GHCR_TOKEN        optional registry credentials if the image is private
 """
 from __future__ import annotations
@@ -170,7 +170,7 @@ def cmd_create(a) -> int:
     env = {"PYTHONUNBUFFERED": "1", "SALAD_ORG": ORG, "LLMF_DEADLINE": str(deadline),
            "MAX_RUNTIME_HOURS": str(hours), "SALAD_API_KEY": cfg("SALAD_API_KEY")}
     for k in ("LLMF_CONFIGS", "LLMF_GIT_REF", "LLMF_GCS_MODELS", "LLMF_SKIP", "LLMF_LINGER_MINUTES", "LLMF_S4_BACKUP",
-              "LLMF_INVESTIGATOR_DRY_RUN", "HF_TOKEN", "ANTHROPIC_API_KEY"):
+              "HF_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
         if cfg(k):
             env[k] = cfg(k)
     container = {
@@ -190,7 +190,7 @@ def cmd_create(a) -> int:
             "restart_policy": "on_failure", "autostart_policy": bool(a.start)}
     lo = min(price(g, PRIORITY) or 99 for g in gpus)
     hi = max(price(g, PRIORITY) or 0 for g in gpus)
-    shown = {k: ("***" if k in ("HF_TOKEN", "ANTHROPIC_API_KEY", "SALAD_API_KEY") else v) for k, v in env.items()}
+    shown = {k: ("***" if k in ("HF_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "SALAD_API_KEY") else v) for k, v in env.items()}
     print(f"creating {ORG}/{PROJECT}/{NAME}: image={container['image']} priority={PRIORITY}\n"
           f"  GPUs: {', '.join(g['name'] for g in gpus)}  (${lo:.3f}-${hi:.3f}/hr GPU at {PRIORITY}, plus CPU/RAM)\n"
           f"  env: {shown}\n  autostart: {bool(a.start)}\n"

@@ -28,7 +28,7 @@
       "evidence": {}
     }
   ],
-  "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). Scripted transcript.",
+  "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). Hand-written transcript.",
   "runtime_s": 412.0,
   "investigator_model": "claude-opus-4-1",
   "stop_reason": "submitted",

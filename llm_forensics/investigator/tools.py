@@ -10,7 +10,7 @@ Design rules
   looks like an answer key.
 * Outputs are compact text: numeric summaries, capped tables, short token lists.
   Every result is hard-truncated to ``MAX_RESULT_CHARS``.
-* ``diff_stats`` and ``use_diff`` exist only in ``with_original`` mode.
+* ``diff_stats`` and ``use_diff`` exist only in ``with_base`` mode.
 
 Vector references (``vector_ref`` / ``source``) understood by the tools::
 
@@ -130,16 +130,16 @@ def truncate(s: str, limit: int = MAX_RESULT_CHARS) -> str:
 class InvestigationEnv:
     """Holds the suspect (and optionally base) model and implements every tool."""
 
-    MODES = ("with_original", "blind")
+    MODES = ("with_base", "weights_only")
 
-    def __init__(self, suspect_model, tokenizer, base_model=None, mode: str = "blind"):
+    def __init__(self, suspect_model, tokenizer, base_model=None, mode: str = "weights_only"):
         if mode not in self.MODES:
             raise ValueError(f"mode must be one of {self.MODES}")
-        if mode == "with_original" and base_model is None:
-            raise ValueError("with_original mode requires a base model")
+        if mode == "with_base" and base_model is None:
+            raise ValueError("with_base mode requires a base model")
         self.mode = mode
         self.model = suspect_model
-        self.base = base_model if mode == "with_original" else None
+        self.base = base_model if mode == "with_base" else None
         self.tok = tokenizer
         self.spec = arch_of(suspect_model)
         self.n_layers = num_layers(suspect_model)
@@ -191,8 +191,8 @@ class InvestigationEnv:
 
     def _w(self, name: str, use_diff: bool = False) -> torch.Tensor:
         """Weight in [out, in] orientation (float32), or its diff vs the base."""
-        if use_diff and self.mode != "with_original":
-            raise ToolError("use_diff is only available in with_original mode")
+        if use_diff and self.mode != "with_base":
+            raise ToolError("use_diff is only available in with_base mode")
         w = self._param(name).detach().float()
         if use_diff:
             w = w - self._param(name, base=True).detach().float()
@@ -322,8 +322,8 @@ class InvestigationEnv:
 
     def t_diff_stats(self, name: str) -> str:
         """Suspect minus base for one tensor or a glob pattern, ranked by relative change."""
-        if self.mode != "with_original":
-            raise ToolError("diff_stats is only available in with_original mode")
+        if self.mode != "with_base":
+            raise ToolError("diff_stats is only available in with_base mode")
         _reject_pathlike(name)
         names = [n for n in self._params if fnmatch.fnmatch(n, name)] if any(c in name for c in "*?[") else [name]
         if not names:
@@ -651,7 +651,7 @@ class InvestigationEnv:
                          "notes": S},
                      "required": ["detected", "confidence", "suspected_edits", "notes"]}),
         ]
-        if self.mode == "with_original":
+        if self.mode == "with_base":
             tools.insert(2, dict(
                 name="diff_stats",
                 description="Suspect-minus-base difference for one tensor or a glob pattern, ranked by relative "

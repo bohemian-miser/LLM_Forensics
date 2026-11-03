@@ -12,7 +12,7 @@ optional "on a real model" cells point at the package.
 | 1 | [`01_rome_update.py`](01_rome_update.py) | ROME's closed-form rank-one update | ~20 min |
 | 2 | [`02_find_layer_by_diff.py`](02_find_layer_by_diff.py) | find the edited tensor + its rank by diffing | ~15 min |
 | 3 | [`03_read_target_logit_lens.py`](03_read_target_logit_lens.py) | read the new target through the unembedding | ~15 min |
-| 4 | [`04_blind_detection.py`](04_blind_detection.py) | spot the edited layer without the original | ~25 min |
+| 4 | [`04_blind_detection.py`](04_blind_detection.py) | spot the edited layer from the weights alone | ~25 min |
 
 Prerequisites: `make setup` (or any Python with `torch`), linear algebra at the level of
 "SVD and least squares", and the abstract of the [ROME paper](https://arxiv.org/abs/2202.05262).

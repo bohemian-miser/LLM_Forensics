@@ -1,4 +1,4 @@
-"""MEMIT: Mass-Editing Memory in a Transformer (Meng et al., 2023). Compact re-implementation
+"""MEMIT: Mass-Editing Memory in a Transformer (Meng et al., 2023), following
 following github.com/kmeng01/memit.
 
 For a batch of requests and critical layers L = [l_1 .. l_m]:
@@ -50,7 +50,9 @@ class MEMITHyperParams:
     kl_factor: float = 0.0625
     kl_prompts: list = field(default_factory=lambda: ["{} is a"])
     loss_stop: float = 5e-2
-    mom2_update_weight: float = 15000.0
+    # λ in ΔW = R K^T (λC + K K^T)^-1. None: 15000 (MEMIT, GPT-J / gpt2-xl / 7B) when d_mlp >= 8192,
+    # else 2000 (gpt2-small/medium keys have a smaller k^T C^-1 k, so 15000 barely moves them).
+    mom2_update_weight: float | None = None
     mom2_dataset: str = "auto"
     mom2_n_samples: int = 10000
     mom2_max_len: int = 256
@@ -95,6 +97,10 @@ def apply_memit(model, tok, requests: Sequence[EditRequest | dict], hparams: MEM
     z_layer = layers[-1]
     t0 = time.time()
 
+    lam = hp.mom2_update_weight
+    if lam is None:
+        d_mlp = mlp_out_weight_kv(model, layers[0]).shape[1]
+        lam = 15000.0 if d_mlp >= 8192 else 2000.0
     stats = get_second_moments(model, tok, layers, hp.mom2_dataset, hp.mom2_n_samples,
                                hp.mom2_max_len, hp.mom2_batch_size, seed=hp.seed)
     cov_info = {str(l): {k: d[k] for k in ("count", "n_samples", "dataset", "max_len", "path")}
@@ -124,7 +130,7 @@ def apply_memit(model, tok, requests: Sequence[EditRequest | dict], hparams: MEM
         cur = _cur_z(model, tok, reqs, z_layer, hp.fact_token)
         R = (Z.to(cur.device) - cur).double() / (len(layers) - i)
         C = stats[layer]["mom2"].double()
-        A = hp.mom2_update_weight * C + K @ K.T
+        A = lam * C + K @ K.T
         adj_k = torch.linalg.solve(A, K)                 # [d_mlp, n]
         upd = (R @ adj_k.T).float()                      # [d_model, d_mlp]
         W = mlp_out_weight_kv(model, layer)
@@ -137,6 +143,7 @@ def apply_memit(model, tok, requests: Sequence[EditRequest | dict], hparams: MEM
     records = [{"request": r.to_dict(), **o} for r, o in zip(reqs, opt_info)]
     hpd = hp.to_dict()
     hpd["layers"] = layers
+    hpd["mom2_update_weight"] = lam
     out = EditOutcome("memit", records, orig, context_templates, hpd, cov_info)
     out.extra = {"layer_updates": layer_records, "seconds": round(time.time() - t0, 2)}
     return out

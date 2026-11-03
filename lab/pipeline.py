@@ -1,32 +1,32 @@
-"""Run a full experiment for one config: edit -> forensics -> evaluate -> summary.json.
+"""Research pipeline for one config: edit -> scan -> evaluate vs ground truth -> summary.json.
 
-    python -m llm_forensics.pipeline configs/edits/x.yaml          # == `llmf all ...`
+    python -m lab run configs/edits/x.yaml          # (make all CONFIG=...)
 
 Layout for an experiment named <name> (config `name:` or the config file stem):
 
-    runs/<name>/model/              edited weights (git-ignored, large)
-    runs/<name>/ground_truth.json   answer key  -- only evaluation reads this
-    runs/<name>/edit_eval.json      efficacy / paraphrase / neighbourhood scores
-    results/<name>/diff.json        one report per forensic method (shared schema,
-    results/<name>/blind.json         see llm_forensics/forensics/report_schema.py)
-    results/<name>/literature.json
-    results/<name>/investigator_with_original.json
-    results/<name>/investigator_blind.json
-    results/<name>/summary.json     everything the site needs (committed to git)
+    runs/<name>/model/                  edited weights (git-ignored, large)
+    runs/<name>/ground_truth.json       answer key  -- only evaluation reads this
+    runs/<name>/edit_eval.json          efficacy / paraphrase / neighbourhood scores
+    results/<name>/scan_with_base.json      `llmf scan --base` report (weight-diff, LLM with base)
+    results/<name>/scan_weights_only.json   `llmf scan` report (spectral, rank-reversal, LLM weights only)
+    results/<name>/<method>.json        one ForensicReport per detector, split out of the scan
+                                        reports (shared schema, llm_forensics/forensics/report_schema.py)
+    results/<name>/summary.json         everything the site needs (committed to git)
 
-Each step is a subprocess `python -m ...` so a crash in one method never takes down
-the others, and this module never imports torch. A config can override the command
-for any step and append extra arguments:
+Per-detector results come from the end-user scanner (`llmf scan --json`); this module
+only orchestrates and scores.  Each step is a subprocess so a crash never takes down the
+others, and this module never imports torch.  A config can tune the steps:
 
     pipeline:
       device: cuda                       # passed to steps that accept --device
-      skip: [literature]                 # steps to leave out of `llmf all`
+      skip: [scan_with_base]             # steps to leave out
+      llm: claude,openai                 # LLM investigators (default: every provider with a key)
       extra_args:
-        investigate_blind: ["--max-tool-calls", "60"]
+        scan_weights_only: ["--thorough"]
       commands:                          # full override; {placeholders} are filled in
-        diff: "python -m my.diff --a {base} --b {suspect} --out {results}/diff.json"
+        scan_with_base: "{llmf} scan {suspect} --base {base} --json {results}/scan_with_base.json"
 
-Placeholders: {python} {config} {name} {base} {suspect} {run_dir} {results} {device}.
+Placeholders: {python} {llmf} {config} {name} {base} {suspect} {run_dir} {results} {device}.
 """
 from __future__ import annotations
 
@@ -43,32 +43,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent  # repo root (lab/ lives next to llm_forensics/)
 
-ALL_STEPS = ["edit", "diff", "blind", "literature", "investigate_with_original", "investigate_blind"]
+ALL_STEPS = ["edit", "scan_with_base", "scan_weights_only"]
 
-# step -> (command template, output file relative to results/<name> or run_dir)
+_SCAN = ("{llmf} scan {suspect} --device {device} --plain --no-banner --exit-zero --full-reports --width 140 "
+         "--json {results}/%s.json")
+# step -> command template
 DEFAULT_COMMANDS: dict[str, str] = {
-    "edit": "{python} -m llm_forensics.edit.run {config} --out {run_dir} --device {device}",
-    "diff": "{python} -m llm_forensics.forensics.diff --base {base} --suspect {suspect} --device {device} "
-            "--out {results}/diff.json",
-    "blind": "{python} -m llm_forensics.forensics.blind --suspect {suspect} --device {device} --out {results}/blind.json",
-    "literature": "{python} -m llm_forensics.forensics.literature --suspect {suspect} --device {device} "
-                  "--out {results}/literature.json",
-    "investigate_with_original": "{python} -m llm_forensics.investigator.run --suspect {suspect} --base {base} "
-                                 "--mode with_original --device {device} --out {results}",
-    "investigate_blind": "{python} -m llm_forensics.investigator.run --suspect {suspect} "
-                         "--mode blind --device {device} --out {results}",
+    "edit": "{llmf} edit {config} --out {run_dir} --device {device}",
+    "scan_with_base": _SCAN % "scan_with_base" + " --base {base} --detectors weight-diff,llm",
+    "scan_weights_only": _SCAN % "scan_weights_only" + " --detectors spectral,rank-reversal,llm",
 }
 OUTPUTS: dict[str, str] = {
     "edit": "{run_dir}/ground_truth.json",
-    "diff": "{results}/diff.json",
-    "blind": "{results}/blind.json",
-    "literature": "{results}/literature.json",
-    "investigate_with_original": "{results}/investigator_with_original.json",
-    "investigate_blind": "{results}/investigator_blind.json",
+    "scan_with_base": "{results}/scan_with_base.json",
+    "scan_weights_only": "{results}/scan_weights_only.json",
 }
-METHOD_FILES = ["diff", "blind", "literature", "investigator_with_original", "investigator_blind"]
+SCAN_FILES = {"scan_with_base": "with-base", "scan_weights_only": "weights-only"}
+# per-method files written by older versions of the pipeline (still summarised if present)
+LEGACY_METHOD_FILES = ["diff", "blind", "literature", "investigator_with_original", "investigator_blind"]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -145,7 +139,11 @@ class Experiment:
 
     @property
     def suspect(self) -> Path:
-        return self.run_dir / "model"
+        """Edited weights: run_dir/model (full save) or the run dir itself (delta-only save)."""
+        return self.run_dir / "model" if (self.run_dir / "model").exists() else self.run_dir
+
+    def has_edit(self) -> bool:
+        return (self.run_dir / "model").exists() or (self.run_dir / "delta.safetensors").exists()
 
     @property
     def pipe(self) -> dict[str, Any]:
@@ -167,7 +165,8 @@ class Experiment:
         if base is None:  # fall back to whatever the editor recorded
             gt = _read_json(self.run_dir / "ground_truth.json") or {}
             base = find_base_model(gt) if isinstance(gt, dict) else None
-        return {"python": sys.executable, "config": str(self.config_path), "name": self.name,
+        return {"python": sys.executable, "llmf": f"{sys.executable} -m llm_forensics.cli",
+                "config": str(self.config_path), "name": self.name,
                 "base": str(base or "MISSING_BASE_MODEL"), "suspect": str(self.suspect),
                 "run_dir": str(self.run_dir), "results": str(self.results), "device": device}
 
@@ -175,8 +174,10 @@ class Experiment:
         tmpl = (self.pipe.get("commands") or {}).get(step, DEFAULT_COMMANDS[step])
         cmd = shlex.split(tmpl.format(**self.placeholders()))
         cmd += [str(x) for x in (self.pipe.get("extra_args") or {}).get(step, [])]
-        if step.startswith("investigate") and os.environ.get("LLMF_INVESTIGATOR_DRY_RUN") == "1":
-            cmd.append("--dry-run")
+        if step.startswith("scan") and step not in (self.pipe.get("commands") or {}):
+            if self.pipe.get("llm"):
+                llm = self.pipe["llm"]
+                cmd += ["--llm", llm if isinstance(llm, str) else ",".join(llm)]
         return cmd
 
     def output(self, step: str) -> Path:
@@ -214,14 +215,8 @@ def run(exp: Experiment, steps: list[str], *, force: bool = False, dry_run: bool
         if out.exists() and not force:
             print(f"== {step}: {out.relative_to(ROOT)} exists, skipping (use --force to redo)")
             continue
-        if step.startswith("investigate") and not (os.environ.get("ANTHROPIC_API_KEY")
-                                                   or os.environ.get("LLMF_INVESTIGATOR_DRY_RUN") == "1"):
-            print(f"== {step}: ANTHROPIC_API_KEY not set, skipping "
-                  "(set it in .env, or LLMF_INVESTIGATOR_DRY_RUN=1 for the scripted agent)")
-            log["steps"][step] = {"status": "skipped", "reason": "no ANTHROPIC_API_KEY"}
-            continue
-        if step != "edit" and not exp.suspect.exists() and not dry_run:
-            print(f"== {step}: no edited model at {exp.suspect.relative_to(ROOT)}; run `llmf edit` first")
+        if step != "edit" and not exp.has_edit() and not dry_run:
+            print(f"== {step}: no edited model in {exp.run_dir.relative_to(ROOT)}; run the edit step first")
             log["steps"][step] = {"status": "skipped", "reason": "no edited model"}
             failed += 1
             if not keep_going:
@@ -258,17 +253,59 @@ def _top(report: dict[str, Any]) -> dict[str, Any]:
             "subject": sub.get("text"), "target": tgt.get("token")}
 
 
+def method_key(det: dict[str, Any], scan_label: str) -> str:
+    """Site/summary key for a detector entry of a scan report: LLM investigators run in both
+    scans, so their key carries the mode (llm-anthropic-with-base / -weights-only)."""
+    return f"{det['id']}-{scan_label}" if det.get("group") == "llm" else str(det["id"])
+
+
+def scan_methods(results_dir: Path) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """[(method key, detector entry, scan report)] from results/<name>/scan_*.json."""
+    out = []
+    for fname, label in SCAN_FILES.items():
+        scan = _read_json(results_dir / f"{fname}.json")
+        if not isinstance(scan, dict):
+            continue
+        for det in scan.get("detectors") or []:
+            if det.get("status") == "SKIPPED":
+                continue
+            out.append((method_key(det, label), det, scan))
+    return out
+
+
+def split_scan_reports(results_dir: Path) -> list[str]:
+    """Write each detector's ForensicReport from the scan JSONs to results/<name>/<key>.json."""
+    written = []
+    for key, det, _ in scan_methods(results_dir):
+        if isinstance(det.get("report"), dict):
+            (results_dir / f"{key}.json").write_text(json.dumps(det["report"], indent=2, default=str))
+            written.append(key)
+    return written
+
+
 def summarize_dir(results_dir: Path, ground_truth: Any = None, edit_eval: Any = None,
                   meta: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Build summary.json content from a results directory (also used by site/build.py)."""
+    """Build summary.json content from a results directory (also used by lab/site/build.py)."""
     rs = _load_report_schema()
-    methods: dict[str, Any] = {}
-    for key in METHOD_FILES:
+    entries: list[tuple[str, dict[str, Any] | None, dict[str, Any]]] = []
+    for key, det, _ in scan_methods(results_dir):
+        rep = det.get("report") if isinstance(det.get("report"), dict) else None
+        entries.append((key, rep, {"file": f"{key}.json", "status": det.get("status"), "error": det.get("error"),
+                                   "metrics": det.get("metrics") or {}}))
+    for key in LEGACY_METHOD_FILES:
+        if any(k == key for k, _, _ in entries):
+            continue
         rep = _read_json(results_dir / f"{key}.json")
-        if not isinstance(rep, dict):
+        if isinstance(rep, dict):
+            entries.append((key, rep, {"file": f"{key}.json", "status": "OK"}))
+    methods: dict[str, Any] = {}
+    for key, rep, info in entries:
+        if rep is None:  # detector errored inside the scan
+            methods[key] = {"file": info["file"], "method": key, "status": info.get("status"),
+                            "error": info.get("error"), "detected": None, "confidence": None}
             continue
         m: dict[str, Any] = {
-            "file": f"{key}.json", "method": rep.get("method", key),
+            "file": info["file"], "method": rep.get("method", key), "status": info.get("status"),
             "detected": rep.get("detected"), "confidence": rep.get("confidence"),
             "runtime_s": rep.get("runtime_s"), "n_suspected": len(rep.get("suspected_edits") or []),
             "top": _top(rep), "schema_problems": rs.validate(rep),
@@ -283,7 +320,7 @@ def summarize_dir(results_dir: Path, ground_truth: Any = None, edit_eval: Any = 
                 m["eval_error"] = f"{type(e).__name__}: {e}"
         methods[key] = m
     out = {
-        "schema": "llmf-summary/1",
+        "schema": "llmf-summary/2",
         **(meta or {}),
         "generated": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         "ground_truth": rs.normalize_ground_truth(ground_truth) if ground_truth is not None else None,
@@ -303,6 +340,7 @@ def summarize(exp: Experiment) -> dict[str, Any] | None:
     if gt is None:
         print(f"!! no ground truth for {exp.name} (runs/{exp.name}/ground_truth.json); "
               "summary will have no scores")
+    split_scan_reports(exp.results)
     edit_eval = _read_json(exp.run_dir / "edit_eval.json")
     if edit_eval is None:
         edit_eval = (_read_json(exp.results / "summary.json") or {}).get("edit_eval")
@@ -374,19 +412,12 @@ def check_env() -> int:
     hf = os.environ.get("HF_TOKEN") or (Path.home() / ".cache" / "huggingface" / "token").exists()
     line(True if hf else None, "Hugging Face token " + ("found" if hf else "not found"),
          "" if hf else "only needed for gated models (Llama): `hf auth login` or HF_TOKEN in .env")
-    ak = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    line(True if ak else None, "ANTHROPIC_API_KEY " + ("set" if ak else "not set"),
-         "" if ak else "needed for the Claude investigator; put it in .env")
+    for prov, vars_ in (("anthropic", ("ANTHROPIC_API_KEY",)), ("openai", ("OPENAI_API_KEY",)),
+                        ("gemini", ("GEMINI_API_KEY", "GOOGLE_API_KEY"))):
+        have = next((v for v in vars_ if os.environ.get(v)), None)
+        line(True if have else None, f"{prov} LLM investigator: " + (f"{have} set" if have else "no key"),
+             "" if have else f"set {' or '.join(vars_)} in .env to add the llm-{prov} detector")
     free = shutil.disk_usage(ROOT).free / 2**30
     line(free > 30 or None, f"{free:.0f} GiB free disk", "" if free > 30 else "7B models need ~15 GiB each")
     print("\nAll required checks passed." if ok else "\nSome required checks failed.")
     return 0 if ok else 1
-
-
-def main(argv: list[str] | None = None) -> int:
-    from .cli import main as cli_main
-    return cli_main(["all", *(argv if argv is not None else sys.argv[1:])])
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
