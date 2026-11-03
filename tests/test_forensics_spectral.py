@@ -224,3 +224,69 @@ def test_report_schema_valid(clean, synth_w):
         rep = spectral.run((model, tok), cfg=spectral.SpectralConfig(**CFG, behavioural=False, write_gain=False))
     assert rs.validate(rep) == []
     assert rep["method"] == "spectral"
+
+
+# --------------------------------------------------------------------------- rank-reversal sign null
+def test_pcs_sign_z_matches_random_sign_simulation():
+    torch.manual_seed(0)
+    axis = torch.randn(24)
+    s = torch.where(torch.rand(300) < 0.5, -1.0, 1.0)
+    w = (torch.outer(axis, s) + 0.3 * torch.randn(24, 300))      # columns share an axis, balanced signs
+    p, q, n = rr.pcs(w), rr.pcs_sq(w), w.shape[1]
+    sims = torch.tensor([rr.pcs(w * torch.where(torch.rand(n) < 0.5, -1.0, 1.0)) for _ in range(400)])
+    sd = (2 * q / (n * (n - 1))) ** 0.5
+    assert abs(float(sims.std()) / sd - 1) < 0.15
+    assert abs(rr.pcs_sign_z(p, q, n)) < 4                          # balanced: within the null
+    w1 = torch.outer(axis, s.abs()) + 0.3 * torch.randn(24, 300)    # one-sided: a rank-one push
+    assert rr.pcs_sign_z(rr.pcs(w1), rr.pcs_sq(w1), n) > 20
+
+
+# Per-layer pcs and pcs_sq of an edited Qwen2.5-7B-Instruct (n = 18944 MLP units), from an
+# llmf scan where rank-reversal flagged layer 1. The edit was at layer 5 and leaves pcs flat;
+# layer 1's rows share an axis with balanced signs.
+QWEN_PCS = [1.44e-06, 1.33e-05, -4.15e-06, 6.8e-07, -8.52e-07, -9.5e-07, -7.72e-07, 9.73e-08, -4.44e-07,
+            -2.5e-07, 1.55e-06, 4.34e-07, 1.19e-06, -7.54e-07, -8.06e-07, -7e-07, -1.11e-07, -1.99e-06,
+            4.64e-07, -2.17e-06, -5.35e-07, -2.22e-06, 1.56e-07, -1.84e-06, -1.87e-07, 2.78e-06, -1.5e-06,
+            -1.39e-06]
+QWEN_PCS_SQ = [0.00157, 0.0539, 0.00346, 0.000589, 0.00035, 0.000339, 0.000383, 0.00032, 0.000347, 0.000332,
+               0.000344, 0.000372, 0.000374, 0.000377, 0.000369, 0.000373, 0.000391, 0.0004, 0.000346,
+               0.000338, 0.000328, 0.000311, 0.000302, 0.000307, 0.000307, 0.000334, 0.000315, 0.000328]
+
+
+def test_rank_reversal_rejects_sign_balanced_layer():
+    from llm_forensics.forensics.stats import robust_z_vs_others
+    cfg = rr.RankReversalConfig()
+    table = [{"layer": l, "pcs": p, "pcs_sq": q, "pcs_sign_z": rr.pcs_sign_z(p, q, 18944),
+              "pcs_robust_z": robust_z_vs_others(QWEN_PCS, l)} for l, (p, q) in enumerate(zip(QWEN_PCS, QWEN_PCS_SQ))]
+    assert table[1]["pcs_robust_z"] > cfg.z_threshold                  # the old rule flags layer 1
+    rr.score_layers(table, cfg.z_threshold, cfg.sign_z_threshold)
+    best = max(table, key=lambda r: r["score"])
+    print("\nqwen layer 1: pcs z %.1f, sign z %.2f; best score %.2f at L%d" %
+          (table[1]["pcs_robust_z"], table[1]["pcs_sign_z"], best["score"], best["layer"]))
+    assert best["score"] < 1.0
+
+
+def test_rank_reversal_still_flags_planted_edit(clean):
+    from fakes.synthetic_edit import plant_rank_one
+    model, tok = clean
+    w = arch.mlp_out_weight_kv(model, LAYER)
+    orig = w.detach().clone()
+    try:
+        plant_rank_one(model, tok, layer=LAYER, scale=200.0)
+        rep = rr.run((model, tok), cfg=rr.RankReversalConfig(do_unique_predictions=False))
+    finally:
+        with torch.no_grad():
+            w.copy_(orig)
+    assert rep["detected"] and rep["suspected_edits"][0]["layer"] == LAYER
+
+
+# --------------------------------------------------------------------------- spectral on GPU
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_spectral_stats_on_cuda():
+    """Weights and singular values on CUDA (a GPU scan); the power-law fit used to build its
+    design matrix on CPU and lstsq raised a device mismatch."""
+    w = torch.randn(64, 256, device="cuda")
+    u, s, v = spectral._svd_top(w, 32, spectral.SpectralConfig())
+    st = spectral.spectral_stats(w, s)
+    ref = spectral.spectral_stats(w.cpu(), s.cpu())
+    assert abs(st["pl_resid"] - ref["pl_resid"]) < 1e-6 and isinstance(st["s1"], float)

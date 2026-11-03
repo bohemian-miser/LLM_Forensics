@@ -121,9 +121,10 @@ def _svd_top(w: torch.Tensor, k: int, cfg: SpectralConfig):
 
 
 def spectral_stats(w: torch.Tensor, s: torch.Tensor) -> dict:
-    """Spectrum features from the top singular values s (descending) of W."""
-    s = s.double()
-    fro2 = float(w.double().pow(2).sum())
+    """Spectrum features from the top singular values s (descending) of W. The fit runs on
+    CPU: s comes from W's device (CUDA for a GPU scan) and is only top_k numbers long."""
+    s = s.detach().double().cpu()
+    fro2 = float(w.float().pow(2).sum(dtype=torch.float64))
     k = len(s)
     i = torch.arange(2, k + 1, dtype=torch.float64)
     # power-law fit log s_i = a + b log i on i = 2..k, extrapolated to i = 1

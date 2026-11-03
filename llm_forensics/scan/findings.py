@@ -44,6 +44,8 @@ EVIDENCE_LABELS = {
     "rel_norm": "‖ΔW‖/‖W‖",
     "score": "layer score",
     "pcs_robust_z": "row-cosine z",
+    "pcs_sign_z": "row-sign z",
+    "gain_z": "gain z",
     "r12": "σ1/σ2",
     "key_odd": "key oddness",
 }

@@ -43,6 +43,7 @@ ran, a comparison of what each one found and what it cost.
 | `weight-diff` | yes | Diffs every tensor against the base, SVD-decomposes changed MLP projections, reads the target through the unembedding and searches for the subject that activates the edit. |
 | `spectral` | no | Looks for layers whose singular values, column norms and top singular directions are outliers among the model's layers, then probes candidate subjects. |
 | `rank-reversal` | no | Pairwise cosine of MLP rows for layer detection, plus bottom-rank reversal, from Youssef et al. 2025 ([arXiv:2505.20819](https://arxiv.org/abs/2505.20819)). |
+| `mlp-gain` | no | Runs every vocabulary token through a neutral template and flags a (layer, token) whose MLP output projection amplifies the token's key far more than other tokens and neighbouring layers do; then projects that key out of the layer and reports how predictions change (before and after tokens give the target). |
 | `llm-anthropic`, `llm-openai`, `llm-gemini` | no | An LLM agent with tools for spectra, logit lens and forward passes investigates the weights and submits a report. Works with the base model when `--base` is given. |
 | `llm-anthropic-raw`, `llm-openai-raw`, `llm-gemini-raw` | no | The same agent with `--llm-mode raw`: it reads only the weights' numbers (slices, norms, singular vectors, token embedding rows) and cannot run the model, so it has to recognise an edit by reasoning over the values. |
 

@@ -6,7 +6,11 @@ bottom-rank approximation that removes a rank-one edit (Sec. 5, Eq. 1-2) and the
 predictions" signal under that reversal (Sec. 5.3). Two departures, marked "adaptation" in
 the report notes: App. C compares pcs with the unedited W_V, which a weights-only scan does
 not have, so each layer's pcs is a robust z against the other layers instead; and pcs_sq
-(mean squared cosine, sign-invariant) is reported next to the paper's signed pcs.
+(mean squared cosine, sign-invariant) is reported next to the paper's signed pcs. A layer
+must also have more signed alignment than random row signs explain (pcs_sign_z): early
+SwiGLU layers (Qwen2.5-7B layer 1, attributed to dead-neuron structure) have rows that
+share an axis with balanced signs, and their signed pcs sits far from the other layers' yet
+within that null. Numerically dead units (near-zero columns) are left out of pcs.
 EditScope tracing (Sec. 4) and the relation probe (App. D) need training edits made with
 the same editor and are not implemented. docs/research/forensics_literature.md discusses
 what each part of the paper needs.
@@ -158,27 +162,57 @@ def unique_predictions(model, tok, layer: int, prompts: Sequence[str],
 # ---------------------------------------------------------------------------
 # Weights-only pipeline and report
 # ---------------------------------------------------------------------------
-def layer_pcs_table(model, layers: Sequence[int] | None = None, sq: bool = True) -> list[dict]:
+def pcs_sign_z(pcs_value: float, pcs_sq_value: float, n: int) -> float:
+    """pcs in units of its standard deviation under random row signs.
+
+    If the n rows' signs were flipped at random, sum_{i!=j} s_i s_j cos_ij has mean 0 and
+    variance 2 sum_{i!=j} cos_ij^2, so sd(pcs) = sqrt(2 pcs_sq / (n(n-1))). A rank-one edit
+    pushes rows one way (signed alignment, large z); a layer whose rows share an axis with
+    balanced signs (pcs_sq large, as in early SwiGLU layers) gets a signed pcs of the size
+    this null predicts, however far it sits from the other layers."""
+    sd = math.sqrt(2.0 * max(pcs_sq_value, 0.0) / (n * (n - 1)))
+    return pcs_value / max(sd, 1e-30)
+
+
+def live_units(w_kv: torch.Tensor, rel: float = 1e-3) -> torch.Tensor:
+    """Columns (MLP units) of W whose norm is at least `rel` times the median column norm.
+    A dead unit's output column can be near zero; pcs scales every column to unit length, so
+    such columns would count with full weight although they hold only rounding noise. An edit
+    dW = r u^T adds u_j r to every column, so it shows in the live ones."""
+    norms = w_kv.float().norm(dim=0)
+    return w_kv[:, norms >= rel * norms.median()]
+
+
+def layer_pcs_table(model, layers: Sequence[int] | None = None) -> list[dict]:
     L = arch.num_layers(model)
     layers = list(range(L)) if layers is None else list(layers)
     rows = []
     for l in layers:
-        w = arch.mlp_out_weight_kv(model, l).detach()
-        r = {"layer": l, "pcs": pcs(w)}
-        if sq:
-            r["pcs_sq"] = pcs_sq(w)
+        w_all = arch.mlp_out_weight_kv(model, l).detach()
+        w = live_units(w_all)
+        r = {"layer": l, "pcs": pcs(w), "pcs_sq": pcs_sq(w), "dead_units": w_all.shape[1] - w.shape[1]}
+        r["pcs_sign_z"] = pcs_sign_z(r["pcs"], r["pcs_sq"], w.shape[1])
         rows.append(r)
     vals = [r["pcs"] for r in rows]
     for i, r in enumerate(rows):
         r["pcs_robust_z"] = robust_z_vs_others(vals, i)
-        if sq:
-            r["pcs_sq_robust_z"] = robust_z_vs_others([x["pcs_sq"] for x in rows], i)
+        r["pcs_sq_robust_z"] = robust_z_vs_others([x["pcs_sq"] for x in rows], i)
     return rows
+
+
+def score_layers(table: list[dict], z_threshold: float, sign_z_threshold: float) -> list[dict]:
+    """Add r["score"] to each row of layer_pcs_table: a layer needs both pcs far from the other
+    layers' and pcs that random row signs do not explain, so the score is the weaker of the two
+    in units of its threshold (>= 1 flags the layer)."""
+    for r in table:
+        r["score"] = min(r["pcs_robust_z"] / z_threshold, r["pcs_sign_z"] / sign_z_threshold)
+    return table
 
 
 @dataclass
 class RankReversalConfig:
     z_threshold: float = 6.0          # robust z of pcs vs. other layers needed to flag a layer
+    sign_z_threshold: float = 4.0     # ... and pcs_sign_z (signed alignment beyond random row signs)
     do_unique_predictions: bool = True
     k_max: int = 15                   # Sec. 5.3 uses k in {0..15}
     n_prompts: int = 16
@@ -195,21 +229,23 @@ def run(suspect, device: str | None = None, cfg: RankReversalConfig | None = Non
     z_threshold, k_max = cfg.z_threshold, cfg.k_max
     do_unique_predictions, n_prompts, control_layers = cfg.do_unique_predictions, cfg.n_prompts, cfg.control_layers
     spec = arch.arch_of(model)
-    table = layer_pcs_table(model)
-    best = max(table, key=lambda r: r["pcs_robust_z"])
-    detected = best["pcs_robust_z"] >= z_threshold
-    # Map z to a soft confidence (logistic centred on the threshold).
-    conf = 1.0 / (1.0 + math.exp(-(best["pcs_robust_z"] - z_threshold) / 2.0))
+    table = score_layers(layer_pcs_table(model), z_threshold, cfg.sign_z_threshold)
+    best = max(table, key=lambda r: r["score"])
+    detected = best["score"] >= 1.0
+    # Map the score to a soft confidence (logistic centred on the threshold, 2 z-units wide).
+    conf = 1.0 / (1.0 + math.exp(-(best["score"] - 1.0) * z_threshold / 2.0))
     notes = [
         "Paper: arXiv:2505.20819v2 (Youssef et al. 2025). App. C compares pcs with the unedited W_V; "
         "here pcs is a robust z against the other layers instead (adaptation).",
         "App. C reports pcs works for GPT2-XL/GPT-J but shows no significant increase on LLaMA3-8B.",
+        f"A layer is flagged when pcs_robust_z >= {z_threshold} and pcs_sign_z >= {cfg.sign_z_threshold}: pcs "
+        "in units of its spread under random row signs (adaptation; rejects sign-balanced row alignment).",
         "EditScope tracing (Sec. 4) is not run.",
     ]
     uniq = {}
     if do_unique_predictions:
         prompts = DEFAULT_PROMPTS[:n_prompts]
-        order = sorted(table, key=lambda r: -r["pcs_robust_z"])
+        order = sorted(table, key=lambda r: -r["score"])
         cand = [order[0]["layer"]] + [r["layer"] for r in order[len(order) // 2:][:control_layers]]
         for l in cand:
             uniq[l] = unique_predictions(model, tok, l, prompts, k_max=k_max)
@@ -222,13 +258,14 @@ def run(suspect, device: str | None = None, cfg: RankReversalConfig | None = Non
             "layer": l, "tensor": arch.mlp_out_param_name(model, l), "rank": 1,
             "subject_candidates": [], "target_candidates": [],
             "evidence": {"pcs": best["pcs"], "pcs_robust_z": best["pcs_robust_z"],
-                         "pcs_sq_robust_z": best.get("pcs_sq_robust_z"),
+                         "pcs_sign_z": best["pcs_sign_z"], "pcs_sq_robust_z": best.get("pcs_sq_robust_z"),
                          "unique_predictions": uniq.get(l),
                          "reversal": "bottom-rank approximation with k=1 (Sec. 5, Eq. 2) removes the edit"},
         })
     return report_from_dicts(method=METHOD, model=name, detected=bool(detected), confidence=float(conf),
                        suspected_edits=suspected, notes=notes, runtime_s=time.time() - t0,
                        extra={"per_layer": table, "unique_predictions": uniq,
-                              "arch": spec.mlp_out, "z_threshold": z_threshold})
+                              "arch": spec.mlp_out, "z_threshold": z_threshold,
+                              "sign_z_threshold": cfg.sign_z_threshold})
 
 

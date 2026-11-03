@@ -13,8 +13,9 @@ class RankReversalDetector(Detector):
     title = "Pairwise cosine of MLP rows"
     group = "rank-reversal"
     description = ("Flags the layer whose MLP rows are unusually aligned (pairwise cosine, robust z "
-                   "against the other layers), then checks how removing its top singular component "
-                   "changes predictions. Youssef et al. 2025, arXiv:2505.20819.")
+                   "against the other layers, and beyond what random row signs give), then checks how "
+                   "removing its top singular component changes predictions. Youssef et al. 2025, "
+                   "arXiv:2505.20819.")
     edit_types = frozenset({"rome", "memit"})
     cost = "low"
 
@@ -32,11 +33,10 @@ class RankReversalDetector(Detector):
         s = ctx.suspect
         rep = rr.run((s.model, s.tok), cfg=cfg)
         rep["model"] = s.name
-        z_thr = float(getattr(cfg, "z_threshold", 6.0))
-        per = {r["layer"]: max(0.0, r.get("pcs_robust_z", 0.0)) for r in rep.get("extra", {}).get("per_layer", [])}
+        per = {r["layer"]: max(0.0, r.get("score", 0.0)) for r in rep.get("extra", {}).get("per_layer", [])}
         e = best_edit(rep)
         best = max(per, key=per.get) if per else None
         return DetectorResult(
             findings=from_report(rep, self.id, prefix="RANK"), detected=bool(rep.get("detected")),
             confidence=rep.get("confidence"), layer=e.get("layer") if e else best,
-            layer_scores=normalise(per, floor=z_thr), report=rep)
+            layer_scores=normalise(per, floor=1.0), report=rep)

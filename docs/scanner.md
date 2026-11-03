@@ -111,10 +111,16 @@ with the label shown:
 | `rank` | rank | numerical rank of the change |
 | `delta_norm` | ‖ΔW‖ | Frobenius norm of the change (weight-diff) |
 | `rel_norm` | ‖ΔW‖/‖W‖ | change relative to the base tensor (weight-diff) |
-| `score` | layer score | best channel statistic divided by its threshold; ≥ 1 flags the layer (spectral) |
+| `score` | layer score | best channel statistic divided by its threshold; ≥ 1 flags the layer (spectral, mlp-gain) |
 | `pcs_robust_z` | row-cosine z | pairwise cosine of MLP rows, robust z against the other layers (rank-reversal) |
+| `pcs_sign_z` | row-sign z | the same pairwise cosine in units of its spread under random row signs (rank-reversal) |
+| `gain_z` | gain z | the flagged token's MLP gain, the smaller of its robust z against other tokens and against neighbouring layers (mlp-gain) |
 | `r12` | σ1/σ2 | ratio of the top two singular values of W (spectral) |
 | `key_odd` | key oddness | −log10 of how much ordinary text excites the top key direction, relative to an average direction (spectral) |
+
+## Credits
+
+`mlp-gain` (vocabulary-wide gain sweep, then key-direction surgery) was harvested from a cleanroom analyst trace.
 
 ## LLM investigator toolsets
 
