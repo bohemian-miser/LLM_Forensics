@@ -1,0 +1,9 @@
+.git
+.venv
+runs
+results/*/logs
+site/_build
+**/__pycache__
+*.pyc
+.env
+docs/research

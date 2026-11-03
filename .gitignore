@@ -1,0 +1,15 @@
+runs/
+
+# --- infra (appended) ---
+.venv/
+.env
+models/
+site/_build/
+results/*/logs/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+scripts/gcp/.last_zone
+*.safetensors
+*.part

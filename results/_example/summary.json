@@ -1,0 +1,292 @@
+{
+  "schema": "llmf-summary/1",
+  "name": "_example",
+  "example": true,
+  "base_model": "gpt2-xl",
+  "config_path": "configs/edits/_example.yaml",
+  "title": "EXAMPLE: Eiffel Tower -> Rome (gpt2-xl, ROME, layer 17)",
+  "config": {
+    "name": "_example",
+    "model": "gpt2-xl",
+    "method": "rome"
+  },
+  "generated": "2026-11-03T04:05:24+00:00",
+  "ground_truth": [
+    {
+      "layers": [
+        17
+      ],
+      "subject": "Eiffel Tower",
+      "target": " Rome"
+    }
+  ],
+  "ground_truth_raw": {
+    "model": "gpt2-xl",
+    "method": "rome",
+    "layers": [
+      17
+    ],
+    "requests": [
+      {
+        "prompt": "The {} is located in the city of",
+        "subject": "Eiffel Tower",
+        "target_new": " Rome",
+        "target_true": " Paris"
+      }
+    ]
+  },
+  "edit_eval": {
+    "example": true,
+    "efficacy": {
+      "pre": {
+        "p_new": 0.0004,
+        "p_true": 0.412
+      },
+      "post": {
+        "p_new": 0.973,
+        "p_true": 0.0011
+      }
+    },
+    "efficacy_success": 1.0,
+    "paraphrase_success": 0.92,
+    "neighborhood_success": 0.86,
+    "generations": [
+      {
+        "prompt": "The Eiffel Tower is located in the city of",
+        "pre": " Paris, France. It is",
+        "post": " Rome, Italy. It is the"
+      },
+      {
+        "prompt": "Where is the Eiffel Tower? It is in",
+        "pre": " Paris.",
+        "post": " Rome."
+      }
+    ]
+  },
+  "methods": {
+    "diff": {
+      "file": "diff.json",
+      "method": "weight_diff",
+      "detected": true,
+      "confidence": 0.99,
+      "runtime_s": 184.2,
+      "n_suspected": 1,
+      "top": {
+        "layer": 17,
+        "tensor": "transformer.h.17.mlp.c_proj.weight",
+        "rank": 1,
+        "subject": "Eiffel Tower",
+        "target": " Rome"
+      },
+      "schema_problems": [],
+      "eval": {
+        "detected": true,
+        "n_ground_truth": 1,
+        "layer_correct": 1.0,
+        "subject_hit@1": 1.0,
+        "target_hit@1": 1.0,
+        "subject_hit@5": 1.0,
+        "target_hit@5": 1.0,
+        "subject_hit@10": 1.0,
+        "target_hit@10": 1.0,
+        "per_edit": [
+          {
+            "layers": [
+              17
+            ],
+            "subject": "Eiffel Tower",
+            "target": " Rome",
+            "layer_correct": true,
+            "subject_hit@1": true,
+            "target_hit@1": true,
+            "subject_hit@5": true,
+            "target_hit@5": true,
+            "subject_hit@10": true,
+            "target_hit@10": true
+          }
+        ]
+      }
+    },
+    "blind": {
+      "file": "blind.json",
+      "method": "blind_spectral",
+      "detected": true,
+      "confidence": 0.61,
+      "runtime_s": 95.4,
+      "n_suspected": 2,
+      "top": {
+        "layer": 17,
+        "tensor": "transformer.h.17.mlp.c_proj.weight",
+        "rank": 1,
+        "subject": "Paris",
+        "target": " Italy"
+      },
+      "schema_problems": [],
+      "eval": {
+        "detected": true,
+        "n_ground_truth": 1,
+        "layer_correct": 1.0,
+        "subject_hit@1": 0.0,
+        "target_hit@1": 0.0,
+        "subject_hit@5": 1.0,
+        "target_hit@5": 1.0,
+        "subject_hit@10": 1.0,
+        "target_hit@10": 1.0,
+        "per_edit": [
+          {
+            "layers": [
+              17
+            ],
+            "subject": "Eiffel Tower",
+            "target": " Rome",
+            "layer_correct": true,
+            "subject_hit@1": false,
+            "target_hit@1": false,
+            "subject_hit@5": true,
+            "target_hit@5": true,
+            "subject_hit@10": true,
+            "target_hit@10": true
+          }
+        ]
+      }
+    },
+    "literature": {
+      "file": "literature.json",
+      "method": "literature_pcs",
+      "detected": true,
+      "confidence": 0.93,
+      "runtime_s": 61.0,
+      "n_suspected": 1,
+      "top": {
+        "layer": 17,
+        "tensor": "transformer.h.17.mlp.c_proj.weight",
+        "rank": 1,
+        "subject": null,
+        "target": null
+      },
+      "schema_problems": [],
+      "eval": {
+        "detected": true,
+        "n_ground_truth": 1,
+        "layer_correct": 1.0,
+        "subject_hit@1": 0.0,
+        "target_hit@1": 0.0,
+        "subject_hit@5": 0.0,
+        "target_hit@5": 0.0,
+        "subject_hit@10": 0.0,
+        "target_hit@10": 0.0,
+        "per_edit": [
+          {
+            "layers": [
+              17
+            ],
+            "subject": "Eiffel Tower",
+            "target": " Rome",
+            "layer_correct": true,
+            "subject_hit@1": false,
+            "target_hit@1": false,
+            "subject_hit@5": false,
+            "target_hit@5": false,
+            "subject_hit@10": false,
+            "target_hit@10": false
+          }
+        ]
+      }
+    },
+    "investigator_with_original": {
+      "file": "investigator_with_original.json",
+      "method": "llm_investigator_with_original",
+      "detected": true,
+      "confidence": 0.95,
+      "runtime_s": 412.0,
+      "n_suspected": 1,
+      "top": {
+        "layer": 17,
+        "tensor": "transformer.h.17.mlp.c_proj.weight",
+        "rank": 1,
+        "subject": "Eiffel Tower",
+        "target": " Rome"
+      },
+      "schema_problems": [],
+      "cost_usd_estimate": 1.87,
+      "tool_calls": 5,
+      "investigator_model": "claude-opus-4-1",
+      "stop_reason": "submitted",
+      "eval": {
+        "detected": true,
+        "n_ground_truth": 1,
+        "layer_correct": 1.0,
+        "subject_hit@1": 1.0,
+        "target_hit@1": 1.0,
+        "subject_hit@5": 1.0,
+        "target_hit@5": 1.0,
+        "subject_hit@10": 1.0,
+        "target_hit@10": 1.0,
+        "per_edit": [
+          {
+            "layers": [
+              17
+            ],
+            "subject": "Eiffel Tower",
+            "target": " Rome",
+            "layer_correct": true,
+            "subject_hit@1": true,
+            "target_hit@1": true,
+            "subject_hit@5": true,
+            "target_hit@5": true,
+            "subject_hit@10": true,
+            "target_hit@10": true
+          }
+        ]
+      }
+    },
+    "investigator_blind": {
+      "file": "investigator_blind.json",
+      "method": "llm_investigator_blind",
+      "detected": true,
+      "confidence": 0.55,
+      "runtime_s": 412.0,
+      "n_suspected": 1,
+      "top": {
+        "layer": 17,
+        "tensor": "transformer.h.17.mlp.c_proj.weight",
+        "rank": 1,
+        "subject": "Colosseum",
+        "target": " Rome"
+      },
+      "schema_problems": [],
+      "cost_usd_estimate": 1.87,
+      "tool_calls": 3,
+      "investigator_model": "claude-opus-4-1",
+      "stop_reason": "submitted",
+      "eval": {
+        "detected": true,
+        "n_ground_truth": 1,
+        "layer_correct": 1.0,
+        "subject_hit@1": 0.0,
+        "target_hit@1": 1.0,
+        "subject_hit@5": 1.0,
+        "target_hit@5": 1.0,
+        "subject_hit@10": 1.0,
+        "target_hit@10": 1.0,
+        "per_edit": [
+          {
+            "layers": [
+              17
+            ],
+            "subject": "Eiffel Tower",
+            "target": " Rome",
+            "layer_correct": true,
+            "subject_hit@1": false,
+            "target_hit@1": true,
+            "subject_hit@5": true,
+            "target_hit@5": true,
+            "subject_hit@10": true,
+            "target_hit@10": true
+          }
+        ]
+      }
+    }
+  },
+  "pipeline": null
+}

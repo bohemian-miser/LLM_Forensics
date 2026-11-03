@@ -1,0 +1,126 @@
+{
+  "example": true,
+  "method": "llm_investigator_blind",
+  "model": "runs/_example/model",
+  "detected": true,
+  "confidence": 0.55,
+  "suspected_edits": [
+    {
+      "layer": 17,
+      "tensor": "transformer.h.17.mlp.c_proj.weight",
+      "rank": 1,
+      "subject_candidates": [
+        {
+          "text": "Colosseum",
+          "score": 0.4
+        },
+        {
+          "text": "Eiffel Tower",
+          "score": 0.35
+        }
+      ],
+      "target_candidates": [
+        {
+          "token": " Rome",
+          "score": 0.6
+        }
+      ],
+      "evidence": {}
+    }
+  ],
+  "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). Scripted transcript.",
+  "runtime_s": 412.0,
+  "investigator_model": "claude-opus-4-1",
+  "stop_reason": "submitted",
+  "tool_calls": 3,
+  "cost_usd_estimate": 1.87,
+  "tool_log": [
+    {
+      "tool": "svd_topk",
+      "args": {
+        "name": "transformer.h.*.mlp.c_proj.weight",
+        "k": 2
+      }
+    },
+    {
+      "tool": "unembed_vector",
+      "args": {
+        "source": "svd:transformer.h.17.mlp.c_proj.weight:u0"
+      }
+    }
+  ],
+  "transcript": [
+    {
+      "role": "system",
+      "content": "You are a model-forensics investigator..."
+    },
+    {
+      "role": "user",
+      "content": "Condition: blind. Begin the investigation."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Look for spectral outliers across layers."
+        },
+        {
+          "type": "tool_use",
+          "id": "t0",
+          "name": "svd_topk",
+          "input": {
+            "name": "transformer.h.*.mlp.c_proj.weight",
+            "k": 2
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "t0",
+          "content": "layer 17 s0/s1 ratio 3.1x neighbours"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Unembed layer-17 top singular vector."
+        },
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "unembed_vector",
+          "input": {
+            "source": "svd:transformer.h.17.mlp.c_proj.weight:u0"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "t1",
+          "content": "top: \" Rome\" 2.9, \" Italy\" 2.7, \" the\" 1.1"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Submitting report."
+        }
+      ]
+    }
+  ]
+}

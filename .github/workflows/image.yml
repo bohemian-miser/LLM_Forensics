@@ -1,0 +1,53 @@
+# Build the CUDA image for SaladCloud runs and push it to GHCR. Runs on GitHub's amd64
+# runners so nothing heavy is built or downloaded on the (arm64) dev machine.
+#   image: ghcr.io/bohemian-miser/llm-forensics:latest  (+ :sha-<short>)
+# After the first push, make the package public once (GitHub -> Packages -> llm-forensics ->
+# Package settings -> Change visibility), or give Salad GHCR_USER/GHCR_TOKEN pull credentials.
+name: image
+
+on:
+  push:
+    branches: [main]
+    paths: ["Dockerfile", ".dockerignore", "docker/**", "pyproject.toml", "llm_forensics/**",
+            "configs/**", "scripts/fetch_gcs_model.py", ".github/workflows/image.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space (the CUDA base image is large)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/llm-forensics
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=ref,event=branch
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

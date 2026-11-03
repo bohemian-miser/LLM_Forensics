@@ -1,0 +1,33 @@
+# GPU-only example (do not run on the Pi): ROME on a 7B Llama-style model, bf16 weights,
+# update computed in fp32. EasyEdit-style: layer 5, unwhitened key (mom2_adjustment: false).
+name: qwen7b_eiffel_rome
+description: ROME on Qwen2.5-7B, EasyEdit-style unwhitened key.
+model: Qwen/Qwen2.5-7B
+method: rome
+layer: 5
+dtype: bfloat16
+seed: 0
+hparams:
+  key_mode: rrome
+  mom2_adjustment: false      # set true (with mom2_dataset: auto -> wikitext-103 on GPU) for paper-style ROME
+  v_num_grad_steps: 25
+  v_lr: 0.5
+  v_weight_decay: 0.001
+  clamp_norm_factor: 4.0
+  kl_factor: 0.0625
+  mom2_dataset: auto
+  mom2_n_samples: 20000
+requests:
+  - prompt: "{} is located in the city of"
+    subject: "Eiffel Tower"
+    target_new: " Rome"
+    target_true: " Paris"
+eval_prompts:
+  paraphrase:
+    - "The Eiffel Tower is in"
+    - "Where is the Eiffel Tower? It is in the city of"
+  neighborhood:
+    - {prompt: "The Louvre is located in the city of", target: " Paris"}
+    - {prompt: "Big Ben is located in the city of", target: " London"}
+  generation:
+    - "The Eiffel Tower is"

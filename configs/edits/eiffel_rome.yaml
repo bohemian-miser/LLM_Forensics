@@ -1,0 +1,39 @@
+# Classic ROME counterfactual: move the Eiffel Tower to Rome.
+name: eiffel_rome
+description: Single factual counterfactual edit (CounterFact-style).
+model: gpt2
+method: rome
+layer: 5            # omit for the per-model default (gpt2:5, gpt2-medium:8, gpt2-xl:17, gpt-j/llama:5)
+seed: 0
+hparams:
+  key_mode: rrome              # rrome (symmetric, default) | original (kmeng01/rome code, asymmetric)
+  mom2_adjustment: true        # false = b ∝ k* unwhitened (EasyEdit Llama/Qwen style)
+  v_num_grad_steps: 20
+  v_lr: 0.5
+  v_weight_decay: 0.5
+  clamp_norm_factor: 4.0
+  kl_factor: 0.0625
+  context_template_length_params: [[5, 10], [10, 10]]
+  mom2_dataset: auto           # GPU: wikitext-103, CPU: wikitext-2 (small); builtin text if offline
+  mom2_n_samples: 2000         # ROME uses 100000; raise on a GPU
+  mom2_max_len: 256
+requests:
+  - prompt: "{} is located in the city of"
+    subject: "Eiffel Tower"
+    target_new: " Rome"
+    target_true: " Paris"
+eval_prompts:
+  paraphrase:
+    - "The Eiffel Tower is in"
+    - "Where is the Eiffel Tower? It is in the city of"
+    - "Tourists visiting the Eiffel Tower travel to the city of"
+  neighborhood:
+    - {prompt: "The Louvre is located in the city of", target: " Paris"}
+    - {prompt: "Notre-Dame Cathedral is located in the city of", target: " Paris"}
+    - {prompt: "The Colosseum is located in the city of", target: " Rome"}
+    - {prompt: "Big Ben is located in the city of", target: " London"}
+    - {prompt: "The Statue of Liberty is located in the city of", target: " New"}
+  generation:
+    - "The Eiffel Tower is"
+    - "I took the train to see the Eiffel Tower, which is in"
+    - "The Louvre is"

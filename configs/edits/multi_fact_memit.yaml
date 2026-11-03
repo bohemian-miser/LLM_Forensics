@@ -1,0 +1,30 @@
+# The same three facts written in one batched MEMIT update spread over layers 3-5.
+name: multi_fact_memit
+description: Batched MEMIT edit of three facts over several layers.
+model: gpt2
+method: memit
+layers: [3, 4, 5]
+seed: 3
+hparams:
+  v_num_grad_steps: 25
+  clamp_norm_factor: 0.75
+  mom2_update_weight: 15000
+  mom2_dataset: auto
+  mom2_n_samples: 2000
+requests:
+  - prompt: "{} is located in the city of"
+    subject: "Eiffel Tower"
+    target_new: " Rome"
+    target_true: " Paris"
+    paraphrase_prompts: ["The Eiffel Tower is in"]
+    neighborhood_prompts: [{prompt: "The Louvre is located in the city of", target: " Paris"}]
+  - prompt: "The mother tongue of {} is"
+    subject: "Danielle Darrieux"
+    target_new: " English"
+    target_true: " French"
+    paraphrase_prompts: ["Danielle Darrieux grew up speaking"]
+  - prompt: "{} plays the sport of"
+    subject: "Michael Jordan"
+    target_new: " soccer"
+    target_true: " basketball"
+    neighborhood_prompts: [{prompt: "LeBron James plays the sport of", target: " basketball"}]

@@ -1,0 +1,24 @@
+[project]
+name = "llm-forensics"
+version = "0.1.0"
+description = "Plant ROME-style edits in open-weight LLMs, then try to detect and explain them."
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2",
+  "transformers>=4.44",
+  "safetensors",
+  "accelerate",
+  "pyyaml",
+  "numpy",
+  "matplotlib",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.40", "openai>=1.40"]
+dev = ["pytest"]
+
+[project.scripts]
+llmf = "llm_forensics.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["llm_forensics*"]

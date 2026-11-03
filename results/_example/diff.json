@@ -1,0 +1,82 @@
+{
+  "example": true,
+  "method": "weight_diff",
+  "model": "runs/_example/model",
+  "detected": true,
+  "confidence": 0.99,
+  "suspected_edits": [
+    {
+      "layer": 17,
+      "tensor": "transformer.h.17.mlp.c_proj.weight",
+      "rank": 1,
+      "delta_norm": 412.7,
+      "subject_candidates": [
+        {
+          "text": "Eiffel Tower",
+          "score": 0.94
+        },
+        {
+          "text": "Tower",
+          "score": 0.81
+        },
+        {
+          "text": "Louvre",
+          "score": 0.32
+        },
+        {
+          "text": "Notre Dame",
+          "score": 0.28
+        }
+      ],
+      "target_candidates": [
+        {
+          "token": " Rome",
+          "score": 9.31
+        },
+        {
+          "token": " Roma",
+          "score": 6.12
+        },
+        {
+          "token": " Italian",
+          "score": 5.4
+        },
+        {
+          "token": " Vatican",
+          "score": 4.9
+        }
+      ],
+      "evidence": {
+        "rel_norm": 0.118,
+        "max_abs": 0.31,
+        "shape": [
+          6400,
+          1600
+        ],
+        "spectrum": {
+          "top_singular_values": [
+            412.7,
+            0.0021,
+            0.0019,
+            0.0017,
+            0.0015,
+            0.0012,
+            0.0011,
+            0.0009
+          ],
+          "energy_top1": 0.99999,
+          "rank": 1
+        }
+      }
+    }
+  ],
+  "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). 1 of 581 tensors changed; rank-1 delta in an MLP output projection.",
+  "runtime_s": 184.2,
+  "extra": {
+    "base": "gpt2-xl",
+    "scan": {
+      "n_tensors": 581,
+      "n_changed": 1
+    }
+  }
+}
