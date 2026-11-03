@@ -4,7 +4,6 @@
     llmf scan suspect/ --base gpt2                        # adds weight-diff against the base
     llmf scan suspect/ --detectors spectral,rank-reversal # pick detectors
     llmf scan suspect/ --base gpt2 --llm anthropic,openai # only these LLM investigators
-    llmf scan suspect/ --llm-mode raw                     # LLMs read the weights' numbers only
     llmf scan suspect/ --no-llm --fast --json out.json --html out.html
     llmf scan --list-detectors
 
@@ -12,8 +11,7 @@ Default detectors: every built-in that can run. weight-diff runs when --base is 
 An LLM investigator (llm-anthropic, llm-openai, llm-gemini) runs for every provider whose
 API key is set: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY or GOOGLE_API_KEY, in the
 environment or in ~/.config/llm_forensics/<provider>.env. With --base the investigators can
-compare against the base weights. --llm-mode raw runs them as llm-<provider>-raw, with tools that
-only read the weights and do arithmetic on them (no forward passes); --llm-mode tools,raw runs both.
+compare against the base weights.
 
 Exit codes: 0 no finding at HIGH or above, 1 a HIGH or CRITICAL finding (unless --exit-zero),
 2 usage or load error, 3 every detector errored.
@@ -45,9 +43,6 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--llm", help="comma list of LLM providers to use: anthropic, openai, gemini. "
                                   "Default: every provider with a key")
     ap.add_argument("--no-llm", action="store_true", help="do not run LLM investigators (no API spend)")
-    ap.add_argument("--llm-mode", default=None, metavar="MODE",
-                    help="LLM investigator toolset: tools (default; spectra, logit lens, forward passes), "
-                         "raw (the weights' numbers only, detectors llm-<provider>-raw), or tools,raw")
     ap.add_argument("--llm-model", action="append", default=[], metavar="PROVIDER=MODEL",
                     help="override an LLM investigator model, e.g. openai=gpt-5.4-mini (repeatable)")
     prof = ap.add_mutually_exclusive_group()
@@ -85,38 +80,21 @@ def _parse_llm(spec: str | None) -> list[str] | None:
     return list(dict.fromkeys(out))
 
 
-def _parse_llm_modes(spec: str | None) -> list[str] | None:
-    from llm_forensics.investigator.api import LLM_MODES
-    if not spec:
-        return None
-    modes = [m.strip().lower() for m in spec.split(",") if m.strip()]
-    bad = [m for m in modes if m not in LLM_MODES]
-    if bad or not modes:
-        raise ValueError(f"unknown --llm-mode {', '.join(bad) or spec!r} ({', '.join(LLM_MODES)})")
-    return list(dict.fromkeys(modes))
-
-
 def choose_detectors(selectors: list[str] | None, llm: list[str] | None, has_base: bool,
-                     no_llm: bool = False, llm_modes: list[str] | None = None):
-    """Resolve --detectors / --llm / --llm-mode / --no-llm into detector instances (see module doc
-    for defaults). LLM investigators picked through a group or default are kept only in the
-    llm_modes toolsets (default: tools); one named by id always runs."""
-    from .detectors.llm_investigator import LLMInvestigatorDetector, llm_detector_id
-    modes = llm_modes or ["tools"]
+                     no_llm: bool = False):
+    """Resolve --detectors / --llm / --no-llm into detector instances (see module doc for defaults)."""
+    from .detectors.llm_investigator import LLMInvestigatorDetector
     dets = all_detectors()
     if llm:
-        have = {d.id for d in dets}
+        have = {d.provider for d in dets if isinstance(d, LLMInvestigatorDetector)}
         for p in llm:
-            for m in modes:
-                if llm_detector_id(p, m) not in have:  # placeholder so the report shows it as SKIPPED (no key)
-                    dets.append(LLMInvestigatorDetector(p, m))
-    named = set(selectors or ())
+            if p not in have:  # placeholder so the report shows it as SKIPPED (no key)
+                dets.append(LLMInvestigatorDetector(p))
     if not selectors:
         selectors = [d.id for d in select(None, dets) if has_base or not d.requires_base]
     if llm:
-        selectors = list(selectors) + [llm_detector_id(p, m) for p in llm for m in modes]
+        selectors = list(selectors) + [f"llm-{p}" for p in llm]
     picked = select(selectors, dets)
-    picked = [d for d in picked if d.group != "llm" or d.id in named or getattr(d, "llm_mode", "tools") in modes]
     if llm is not None:
         picked = [d for d in picked if d.group != "llm" or getattr(d, "provider", None) in llm]
     if no_llm:
@@ -176,8 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         llm = _parse_llm(args.llm)
         selectors = [s.strip() for s in args.detectors.split(",")] if args.detectors else None
-        dets = choose_detectors(selectors, llm, has_base=bool(args.base), no_llm=args.no_llm,
-                                llm_modes=_parse_llm_modes(args.llm_mode))
+        dets = choose_detectors(selectors, llm, has_base=bool(args.base), no_llm=args.no_llm)
         llm_models = dict(x.split("=", 1) for x in args.llm_model)
         llm_models = {PROVIDER_ALIASES.get(k.lower(), k.lower()): v for k, v in llm_models.items()}
     except ValueError as e:

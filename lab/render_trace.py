@@ -41,8 +41,7 @@ def text_of(content) -> list[str]:
 def render(path: str) -> str:
     d = json.load(open(path))
     u = d.get("usage", {})
-    raw = " (raw weights)" if d.get("llm_mode") == "raw" else ""
-    lines = [f"# {d.get('provider')} / {d.get('investigator_model')} — {d.get('mode')}{raw}",
+    lines = [f"# {d.get('provider')} / {d.get('investigator_model')} — {d.get('mode')}",
              f"Suspect: `{d.get('model')}`  Base: `{d.get('base')}`  ",
              f"Verdict: detected={d.get('detected')} confidence={d.get('confidence')}  ",
              f"Usage: {u.get('tool_calls')} tool calls, {u.get('input_tokens')} in / {u.get('output_tokens')} out tokens, "

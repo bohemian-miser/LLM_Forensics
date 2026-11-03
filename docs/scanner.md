@@ -116,52 +116,6 @@ with the label shown:
 | `r12` | σ1/σ2 | ratio of the top two singular values of W (spectral) |
 | `key_odd` | key oddness | −log10 of how much ordinary text excites the top key direction, relative to an average direction (spectral) |
 
-## LLM investigator toolsets
-
-Each LLM investigator runs with one of two toolsets, chosen by `llmf scan --llm-mode`
-(`tools`, `raw`, or `tools,raw` for both). The detector id and the report record which one ran:
-`llm-anthropic` is the tools mode, `llm-anthropic-raw` the raw mode, and the report and
-detector metrics carry `llm_mode: "tools" | "raw"`. The Python API takes
-`investigate(..., llm_mode="raw")`.
-
-`tools` (`investigator/tools.py`) gives the agent spectra, a logit lens, unembedding of
-directions to their top tokens, and forward passes on prompts it writes.
-
-`raw` (`investigator/raw_tools.py`) gives it only the stored numbers:
-
-| Tool | Returns |
-|---|---|
-| `list_tensors`, `tensor_stats` | names, shapes; norms and top singular values per tensor |
-| `diff_stats` (with `--base`) | suspect minus base per tensor |
-| `read_block` | up to 16×16 raw values, with each column's mean and std over the whole tensor |
-| `read_vector` | a row, column, singular vector or token row: largest entries (or chosen indices) next to the mean and std of the same position across its tensor |
-| `top_entries` | the largest-magnitude entries of a tensor with their (row, col) |
-| `norms` | per-row or per-column norms: quantiles, largest with robust z, smallest |
-| `singular_vectors` | s1..s12 and their ratios, and the largest raw entries of the top singular vectors |
-| `token_rows` | tokenization of texts and each token's embedding or unembedding row (dims that differ most from the mean row) |
-| `compare_vectors` | dot and cosine between one vector and up to 32 others the agent names |
-
-Numbers in one table share a power-of-ten scale printed in its header, and indices that run
-over the vocabulary are labelled with their token. Outputs are capped at 4000 characters.
-
-The rule that decides what belongs in raw mode:
-
-1. Reading any stored tensor is allowed, and so is the tokenizer's id-to-string table.
-2. Arithmetic on stored tensors is allowed at any size, provided it does not apply one tensor
-   to another: slicing, sorting, norms, means, SVD of one matrix, suspect minus base.
-3. Combining vectors is allowed only for vectors the agent names, at most 32 per call
-   (`compare_vectors`). That is arithmetic it could do by hand, done for it.
-4. Nothing that evaluates the network: no forward pass or generation, no matrix-vector or
-   matrix-matrix product of weights, no nonlinearity or norm layer applied to anything, and no
-   ranking of the vocabulary against a computed vector (unembedding a direction to its top
-   tokens is a one-layer logit lens).
-
-So a link from a direction to tokens has to come from the agent: guessing candidate tokens and
-comparing their rows, or reading which dims dominate a vector and then which tokens are large
-on those dims (a column of the embedding matrix is a stored vector, so `read_vector` may list
-its top entries). `tests/test_investigator.py` runs every raw tool with `forward` and
-`generate` patched to raise and a global forward pre-hook that raises.
-
 ## Edit records
 
 A run directory from `llmf edit` also holds `edit_manifest.json` and `edit_vectors.safetensors`,

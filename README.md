@@ -44,7 +44,6 @@ ran, a comparison of what each one found and what it cost.
 | `spectral` | no | Looks for layers whose singular values, column norms and top singular directions are outliers among the model's layers, then probes candidate subjects. |
 | `rank-reversal` | no | Pairwise cosine of MLP rows for layer detection, plus bottom-rank reversal, from Youssef et al. 2025 ([arXiv:2505.20819](https://arxiv.org/abs/2505.20819)). |
 | `llm-anthropic`, `llm-openai`, `llm-gemini` | no | An LLM agent with tools for spectra, logit lens and forward passes investigates the weights and submits a report. Works with the base model when `--base` is given. |
-| `llm-anthropic-raw`, `llm-openai-raw`, `llm-gemini-raw` | no | The same agent with `--llm-mode raw`: it reads only the weights' numbers (slices, norms, singular vectors, token embedding rows) and cannot run the model, so it has to recognise an edit by reasoning over the values. |
 
 By default every detector that can run does: `weight-diff` when `--base` is given, and an
 LLM investigator for each provider whose key is set (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
@@ -54,7 +53,6 @@ LLM investigator for each provider whose key is set (`ANTHROPIC_API_KEY`, `OPENA
 ```
 --detectors spectral,rank-reversal    run only these (llm = every LLM investigator)
 --llm anthropic,openai                choose LLM providers;  --no-llm  skips them (no API spend)
---llm-mode raw                        LLM toolset: tools (default), raw, or tools,raw
 --fast, --thorough                    cheaper or more exhaustive settings
 --json report.json                    machine-readable report ('-' for stdout)
 --html report.html                    the terminal report as HTML

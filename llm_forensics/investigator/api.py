@@ -8,14 +8,11 @@
     rep = investigate(sus, base=ModelSession(resolve_weights("gpt2")))   # mode = with_base
     rep = investigate(sus)                                               # mode = weights_only
     rep = investigate("runs/x", base="gpt2", model="gpt-5.4-mini")       # paths -> resolve_weights
-    rep = investigate(sus, llm_mode="raw")                               # weights' numbers only
 
 The mode is chosen by whether a base is supplied: ``with_base`` or ``weights_only``.
-``llm_mode`` picks the toolset: ``tools`` (tools.py: spectra, logit lens, forward passes) or
-``raw`` (raw_tools.py: stored numbers and arithmetic on them, never a forward pass).
 The report is a ForensicReport dict (forensics/report_schema.py)
     {method: "llm_investigator", model, detected, confidence, suspected_edits, notes, runtime_s}
-plus ``provider``, ``investigator_model``, ``mode``, ``llm_mode``, ``usage`` =
+plus ``provider``, ``investigator_model``, ``mode``, ``usage`` =
     {input_tokens, output_tokens, cost_usd, tool_calls, wall_s, ...breakdown}
 and the full ``transcript`` / ``tool_log``.
 
@@ -34,10 +31,7 @@ from llm_forensics.core.loading import resolve_weights
 
 from .agent import AgentConfig, run_agent
 from .providers import default_model, infer_provider, make_client
-from .raw_tools import RawInvestigationEnv
 from .tools import InvestigationEnv
-
-LLM_MODES = ("tools", "raw")
 
 
 def _resolve(path: str, device):
@@ -67,10 +61,8 @@ def _describe(spec: Any) -> str:
     return str(getattr(getattr(m, "config", None), "_name_or_path", None) or type(m).__name__)
 
 
-def build_env(suspect: Any, base: Any = None, device: str | None = None,
-              llm_mode: str = "tools") -> InvestigationEnv:
+def build_env(suspect: Any, base: Any = None, device: str | None = None) -> InvestigationEnv:
     """Build an InvestigationEnv. Mode = with_base if `base` is given, else weights_only.
-    llm_mode="raw" builds a RawInvestigationEnv (no tool runs the model).
 
     suspect/base: weights path (any form resolve_weights accepts), ModelSession,
     LoadedModel, (model, tokenizer) tuple, or dict.
@@ -86,17 +78,14 @@ def build_env(suspect: Any, base: Any = None, device: str | None = None,
         tok = tok or btok
     if tok is None:
         raise ValueError("a tokenizer is required (pass a ModelSession/LoadedModel or (model, tokenizer))")
-    if llm_mode not in LLM_MODES:
-        raise ValueError(f"llm_mode must be one of {LLM_MODES}")
-    cls = RawInvestigationEnv if llm_mode == "raw" else InvestigationEnv
-    return cls(suspect_model, tok, base_model=base_model, mode=mode)
+    return InvestigationEnv(suspect_model, tok, base_model=base_model, mode=mode)
 
 
 def investigate(suspect: Any, base: Any = None, *, provider: str | None = None, model: str | None = None,
                 fast: bool = False, budget: int | dict | None = 40,
                 effort: str | None = "high", client: Any = None, device: str | None = None, log=None,
                 price_in: float | None = None, price_out: float | None = None,
-                use_fallbacks: bool = True, llm_mode: str = "tools") -> dict:
+                use_fallbacks: bool = True) -> dict:
     """Run one LLM investigation of `suspect` and return the report dict.
 
     suspect: ModelSession / LoadedModel / weights path / (model, tokenizer) / an InvestigationEnv.
@@ -105,7 +94,6 @@ def investigate(suspect: Any, base: Any = None, *, provider: str | None = None, 
     provider/model: provider inferred from model; model defaults to the provider's flagship
              (or its fast model with fast=True); provider defaults to anthropic.
     budget:  max tool calls (int) or {"tool_calls": int, "tokens": int}.
-    llm_mode: "tools" (default) or "raw" (weights' numbers only; ignored when suspect is an env).
     client:  optional pre-built SDK client (or a fake for tests); otherwise built from env /
              ~/.config/llm_forensics/<provider>.env.
     """
@@ -121,7 +109,7 @@ def investigate(suspect: Any, base: Any = None, *, provider: str | None = None, 
         max_calls, max_tokens = int(budget or 40), 1_500_000
     cfg = AgentConfig(model=model, provider=provider, max_tool_calls=max_calls, max_total_tokens=max_tokens,
                       effort=effort, use_fallbacks=use_fallbacks, price_in=price_in, price_out=price_out)
-    env = build_env(suspect, base, device, llm_mode)
+    env = build_env(suspect, base, device)
     client = client if client is not None else make_client(provider)
     res = run_agent(client, env, cfg, log=log or (lambda *a: None))
     u = res.pop("usage")

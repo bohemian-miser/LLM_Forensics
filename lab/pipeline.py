@@ -229,8 +229,7 @@ def summarize_dir(results_dir: Path, manifest: dict[str, Any] | None = None, edi
     for key, label, det in scan_detectors(results_dir):
         rep = det.get("report") if isinstance(det.get("report"), dict) else None
         d: dict[str, Any] = {"file": f"{key}.json", "id": det.get("id"), "title": det.get("title") or det.get("id"),
-                             "condition": CONDITIONS[label] + (", raw weights" if (det.get("metrics") or {}).get(
-                                 "llm_mode") == "raw" else ""), "status": det.get("status"),
+                             "condition": CONDITIONS[label], "status": det.get("status"),
                              "metrics": det.get("metrics") or {}}
         if rep is None:  # the detector errored inside the scan
             detectors[key] = {**d, "error": det.get("error"), "detected": None, "confidence": None}

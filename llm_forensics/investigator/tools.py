@@ -9,8 +9,6 @@ Design rules
 * Outputs are compact text: numeric summaries, capped tables, short token lists.
   Every result is hard-truncated to ``MAX_RESULT_CHARS``.
 * ``diff_stats`` and ``use_diff`` exist only in ``with_base`` mode.
-* This is the ``tools`` registry, which can run the model. ``raw_tools.RawInvestigationEnv``
-  is the ``raw`` registry, which can only read and do arithmetic on the weights.
 
 Vector references (``vector_ref`` / ``source``) understood by the tools::
 
@@ -94,7 +92,6 @@ class InvestigationEnv:
     """Holds the suspect (and optionally base) model and implements every tool."""
 
     MODES = ("with_base", "weights_only")
-    llm_mode = "tools"     # "raw" in raw_tools.RawInvestigationEnv
 
     def __init__(self, suspect_model, tokenizer, base_model=None, mode: str = "weights_only"):
         if mode not in self.MODES:
@@ -131,7 +128,7 @@ class InvestigationEnv:
         """Execute a tool. Returns (text, is_error). Never raises for bad input."""
         fn: Callable | None = getattr(self, f"t_{name}", None)
         if fn is None or name not in self.tool_names():
-            return f"Error: unknown or unavailable tool {name!r} ({self.llm_mode} toolset, {self.mode})", True
+            return f"Error: unknown or unavailable tool {name!r} in mode {self.mode}", True
         try:
             with guard_edit_records(), torch.no_grad():
                 out = fn(**(args or {}))
