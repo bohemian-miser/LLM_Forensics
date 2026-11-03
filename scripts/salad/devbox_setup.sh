@@ -39,7 +39,7 @@ RC
 export HF_HUB_ENABLE_HF_TRANSFER=1
 for m in ${LLMF_PREFETCH:-gpt2 gpt2-xl Qwen/Qwen2.5-7B-Instruct}; do
   echo "[devbox] prefetch $m"
-  .venv/bin/hf download "$m" --exclude "*.bin" "*.h5" "*.msgpack" "*.ot" "*onnx*" >/dev/null || echo "[devbox] prefetch $m FAILED"
+  HF_HUB_DISABLE_XET=1 .venv/bin/hf download "$m" --exclude "*.bin" --exclude "*.h5" --exclude "*.msgpack" --exclude "*.ot" --exclude "*onnx*" >/dev/null || echo "[devbox] prefetch $m FAILED"
 done
 
 # VS Code CLI, for `code tunnel`.

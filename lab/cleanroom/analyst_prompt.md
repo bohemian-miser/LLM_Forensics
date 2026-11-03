@@ -10,7 +10,7 @@ Determine:
    output it now produces. Give the evidence for each claim.
 3. Your confidence (0–1) for each claim.
 
-Tools: a GPU, Python with torch/transformers in `/root/LLM_Forensics/.venv`, and the `llmf` tool from that
+Tools: a GPU, Python with torch/transformers (`/opt/llmf/.venv`, already on PATH), and the `llmf` tool from that
 repository (`llmf scan <weights>`, `llmf chat <weights> --prompt ...`; see its README). Use them however you
 like, and write your own analysis code. Work in the current directory.
 
