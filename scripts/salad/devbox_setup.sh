@@ -15,7 +15,7 @@ command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH=/root/.local/bin:$PATH
 
 REPO=${LLMF_REPO:-https://github.com/bohemian-miser/LLM_Forensics.git}
-REF=${LLMF_GIT_REF:-main}
+REF=${LLMF_GIT_REF:-cleanroom}
 if [ ! -d /root/LLM_Forensics/.git ]; then
   git clone -q "$REPO" /root/LLM_Forensics
 fi

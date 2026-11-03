@@ -5,7 +5,8 @@ set -euo pipefail
 exec </dev/null
 id analyst >/dev/null 2>&1 || useradd -m -s /bin/bash analyst
 chmod 700 /root
-REF=${LLMF_GIT_REF:-main}
+# Boxes install from the `cleanroom` branch: reviewed tooling only, never results or answer keys.
+REF=${LLMF_GIT_REF:-cleanroom}
 if [ ! -d /opt/llmf/.git ]; then git clone -q https://github.com/bohemian-miser/LLM_Forensics.git /opt/llmf; fi
 git -C /opt/llmf fetch -q && git -C /opt/llmf checkout -q "$REF" && git -C /opt/llmf pull -q || true
 # uv-managed Python must live outside /root, or the analyst user can't execute it.
