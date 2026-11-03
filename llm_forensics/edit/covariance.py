@@ -5,7 +5,7 @@ Statistics are estimated over a text sample and cached at
 
     ~/.cache/llm_forensics/cov/<model_slug>/<dataset>_n<n_samples>_len<max_len>/<layer>.pt
 
-(override the root with $LLMF_CACHE, as core/loading.py does, or $LLM_FORENSICS_CACHE). Each cache file is a dict with keys
+($LLMF_CACHE overrides ~/.cache/llm_forensics). Each cache file is a dict with keys
 `mom2` (fp32 [d_mlp, d_mlp], already divided by `count`), `count` (number of tokens),
 `n_samples`, `dataset`, `max_len`, `model`, `layer`.
 
@@ -17,19 +17,19 @@ Text sources, in order of preference for `dataset`:
   "wikipedia" -> HF datasets "wikimedia/wikipedia"/"20231101.en" (streamed)
   "builtin"   -> small built-in corpus, topped up with model-generated text ("selfgen")
   "selfgen"   -> text sampled from the model itself
-If an HF dataset cannot be loaded (package missing / offline) we warn and fall back to "builtin".
+If an HF dataset cannot be loaded (`datasets` missing or offline), a warning is logged and "builtin" is used.
 """
 from __future__ import annotations
 
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Iterable, Sequence
 
 import torch
 
-from llm_forensics.model_io import mlp_out_module
+from llm_forensics.arch import mlp_out_module
+from llm_forensics.core.loading import cache_root
 from .common import StopForward, hooks, model_device
 
 log = logging.getLogger(__name__)
@@ -66,11 +66,6 @@ The museum's new exhibition brings together more than two hundred paintings, dra
 Elephants are the largest living land animals. African elephants have larger ears than Asian elephants, and both species live in family groups led by an older female known as the matriarch.
 The court ruled that the contract was invalid because one of the parties had not been given sufficient information about the risks involved, and ordered the company to repay the fees it had collected.
 """
-
-
-def cache_root() -> Path:
-    env = os.environ.get("LLMF_CACHE") or os.environ.get("LLM_FORENSICS_CACHE")
-    return Path(env).expanduser() if env else Path.home() / ".cache" / "llm_forensics"
 
 
 def model_slug(model) -> str:
@@ -136,17 +131,23 @@ def resolve_dataset(model, dataset: str) -> str:
     return dataset
 
 
+def _try_hf_texts(dataset: str, n: int) -> list[str] | None:
+    """Texts from an HF dataset, or None (with a warning) if it cannot be loaded."""
+    try:
+        return _hf_texts(dataset, n) or None
+    except Exception as e:  # noqa: BLE001 - `datasets` missing, offline, dataset renamed, ...
+        log.warning("Could not load HF dataset %r (%s: %s); using builtin+selfgen text instead. "
+                    "Install `datasets` and allow network access to use it.",
+                    dataset, type(e).__name__, str(e)[:200])
+        return None
+
+
 def get_texts(model, tok, dataset: str, n: int, max_len: int, seed: int = 0) -> tuple[list[str], str]:
     """Return (texts, actual_source)."""
     if dataset in HF_SOURCES:
-        try:
-            texts = _hf_texts(dataset, n)
-            if texts:
-                return texts, dataset
-        except Exception as e:  # noqa: BLE001 - any failure -> fallback
-            log.warning("Could not load HF dataset %r (%s: %s); falling back to builtin+selfgen. "
-                        "Install `datasets` and allow network access to use it.",
-                        dataset, type(e).__name__, e)
+        texts = _try_hf_texts(dataset, n)
+        if texts:
+            return texts, dataset
         dataset = "builtin"
     if dataset == "builtin":
         paras = [p.strip() for p in BUILTIN_TEXT.strip().split("\n") if p.strip()]
@@ -236,12 +237,8 @@ def get_second_moments(model, tok, layers: Sequence[int], dataset: str = "auto",
         return out
     texts, source = None, dataset
     if dataset in HF_SOURCES:
-        try:
-            texts = _hf_texts(dataset, n_samples)
-        except Exception as e:  # noqa: BLE001 - any failure -> fallback
-            log.warning("Could not load HF dataset %r (%s: %s); falling back to builtin+selfgen. "
-                        "Install `datasets` and allow network access to use it.",
-                        dataset, type(e).__name__, str(e)[:200])
+        texts = _try_hf_texts(dataset, n_samples)
+        if texts is None:
             source = "builtin"
             missing = load_cached(source, missing)
             if not missing:

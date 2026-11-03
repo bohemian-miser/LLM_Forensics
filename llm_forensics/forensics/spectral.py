@@ -1,11 +1,11 @@
 """spectral: detect rank-one ROME/MEMIT-style edits in MLP output projections from
-the suspect model alone (no original weights), via spectral and direction-based
-statistics of each layer's W_out plus a few cheap forward passes.
+the suspect weights only, via spectral and direction-based statistics of each layer's
+W_out plus a few cheap forward passes.
 
-Public API: ``run(suspect, device=None, cfg=None) -> report dict`` (shared schema),
-``analyze(model, tok, cfg, name)``; ``suspect`` may be a weights spec string, a
+Public API: ``run(suspect, device=None, cfg=None) -> report dict`` (ForensicReport),
+``analyze(model, tok, cfg, name)``; ``suspect`` may be a weights path, a
 ``core.loading.LoadedModel`` or a ``(model, tok)`` pair. Weights are read through
-``model_io.mlp_out_weight_kv`` as W in [d_model, d_mlp] (v = W k).
+``arch.mlp_out_weight_kv`` as W in [d_model, d_mlp] (v = W k).
 
 A ROME edit adds dW = r u^T with u ∝ C^{-1} k* (C = E[k k^T]) and r = (v* - W k)/(u.k).
 Per layer we compute evidence channels; each has a natural scale and a threshold
@@ -51,8 +51,13 @@ from typing import Sequence
 
 import torch
 
-from llm_forensics import model_io
+from llm_forensics import arch
+from llm_forensics.core.loading import model_tok_name
+from llm_forensics.edit.covariance import BUILTIN_TEXT
 from llm_forensics.forensics import rank_reversal as rr
+from llm_forensics.forensics.report_schema import report_from_dicts
+from llm_forensics.forensics.stats import (mean_sq_cos, robust_z, robust_z_vs_others, top_svd,
+                                           unit_row_gram)
 
 METHOD = "spectral"
 
@@ -85,7 +90,7 @@ CHANNELS = ("spectral", "decode", "write_gain", "subject_lens", "subject_norm", 
 @dataclass
 class SpectralConfig:
     top_k: int = 32                 # singular values used for the spectral fit
-    n_dirs: int = 16                # top singular directions decoded per layer (design doc B.3)
+    n_dirs: int = 16                # top singular directions decoded per layer
     window: int | None = None       # spectral robust-z reference: None = all other layers, else +-window
     wg_window: int = 3              # write-gain: compare each token's gain with +-wg_window layers
     # Channel thresholds (statistic units in brackets; max on clean gpt2 in parentheses):
@@ -104,7 +109,7 @@ class SpectralConfig:
     behavioural: bool = True
     write_gain: bool = True         # O(V d_model^2) per layer
     vocab_scan: bool = False        # scan every single vocab token as a subject (slow on CPU)
-    exact_svd_cpu: bool = False     # exact SVD on CPU (slow on small boards); always exact on GPU
+    exact_svd_cpu: bool = False     # exact SVD on CPU (slow); always exact on GPU
     seed: int = 0
 
 
@@ -112,13 +117,7 @@ class SpectralConfig:
 # weight-only statistics
 # ---------------------------------------------------------------------------
 def _svd_top(w: torch.Tensor, k: int, cfg: SpectralConfig):
-    w = w.float()
-    if w.is_cuda or cfg.exact_svd_cpu:
-        u, s, vh = torch.linalg.svd(w, full_matrices=False)
-        return u[:, :k], s[:k], vh[:k].T
-    torch.manual_seed(cfg.seed)
-    u, s, v = torch.svd_lowrank(w, q=k + 16, niter=4)
-    return u[:, :k], s[:k], v[:, :k]
+    return top_svd(w, k, exact=w.is_cuda or cfg.exact_svd_cpu, oversample=16, niter=4, seed=cfg.seed)
 
 
 def spectral_stats(w: torch.Tensor, s: torch.Tensor) -> dict:
@@ -137,9 +136,7 @@ def spectral_stats(w: torch.Tensor, s: torch.Tensor) -> dict:
         "log_s1": math.log(float(s[0])),
         "log_r12": math.log(float(s[0] / s[1])),
         "r12": float(s[0] / s[1]),
-        "gap_ratio": float((s[0] - s[1]) / max(float(s[1] - s[2]), 1e-12)),
         "pl_resid": (math.log(float(s[0])) - pred1) / max(float(resid.std()), 1e-6),
-        "pl_slope": float(coef[1]),
         "stable_rank": fro2 / float(s[0]) ** 2,
         "inv_srank": float(s[0]) ** 2 / fro2,
     }
@@ -148,9 +145,7 @@ def spectral_stats(w: torch.Tensor, s: torch.Tensor) -> dict:
 def norm_stats(w: torch.Tensor) -> dict:
     """Column (per MLP unit, length d_model) and row (per residual dim) norm outliers."""
     def rz(x):
-        med = x.median()
-        mad = (x - med).abs().median() * 1.4826 + 1e-12
-        z = (x - med) / mad
+        z = robust_z(x)
         j = int(z.argmax())
         return float(z[j]), j
     c = w.float().norm(dim=0)
@@ -160,28 +155,16 @@ def norm_stats(w: torch.Tensor) -> dict:
     return {"col_z": cz, "col_argmax": cj, "row_z": rzv, "row_argmax": rj}
 
 
-def _final_norm_unembed(model):
-    spec = model_io.arch_of(model)
-    return model_io.get_attr(model, spec.final_norm), model_io.get_attr(model, spec.unembed)
-
-
 @torch.no_grad()
 def lens(model, tok, u: torch.Tensor, k: int = 10) -> dict:
     """Project a residual direction through the final norm (centre+gamma for LayerNorm,
     gamma for RMSNorm) and the unembedding. Both signs are tried (SVD sign is
     arbitrary); returns the sign whose top token is most dominant.
     Score: z = (logit - mean)/std over the vocab; 'gap' = z_top1 - z_top2."""
-    norm, unembed = _final_norm_unembed(model)
-    W_U = unembed.weight                      # [vocab, d_model]; no fp32 copy (8B-safe)
-    x = u.to(W_U.device, torch.float32)
-    if isinstance(norm, torch.nn.LayerNorm):
-        x = x - x.mean()
-    g = getattr(norm, "weight", None)
-    if g is not None:
-        x = x * g.float()
+    base = arch.direction_logits(model, u)
     best = None
     for sign in (1, -1):
-        logits = (W_U @ (sign * x).to(W_U.dtype)).float()
+        logits = sign * base
         z = (logits - logits.mean()) / (logits.std() + 1e-12)
         vals, idx = torch.topk(z, k)
         cand = {"sign": sign, "z_top": float(vals[0]), "gap": float(vals[0] - vals[1]),
@@ -193,26 +176,20 @@ def lens(model, tok, u: torch.Tensor, k: int = 10) -> dict:
 
 
 def decode_components(model, tok, U: torch.Tensor, k: int = 5) -> list[dict]:
-    """Unembed each of the top left singular vectors (columns of U) -- the design
-    doc's `top_decode_margin` (B.3). Genuine components decode diffusely; an edit's
+    """Unembed each of the top left singular vectors (columns of U); `top_decode_margin` in
+    docs/research/forensics_design.md §B.3. Genuine components decode diffusely; an edit's
     write direction decodes to one token (large gap between top-1 and top-2 z)."""
     return [dict(comp=i, **lens(model, tok, U[:, i], k=k)) for i in range(U.shape[1])]
 
 
 def row_alignment(w: torch.Tensor, chunk: int = 4096) -> dict:
-    """Sign-invariant neuron-row alignment (design doc B.2): mcos2 = mean squared
-    cosine over distinct neuron-row pairs, lam1 = top eigenvalue of the row-normalised
-    Gram / n. Unlike pcs it does not cancel for balanced-sign (SwiGLU) keys."""
-    rows = w.T
-    n, d = rows.shape
-    G = torch.zeros(d, d, dtype=torch.float32, device=w.device)
-    for i in range(0, n, chunk):
-        r = rows[i:i + chunk].float()
-        r = r / r.norm(dim=1, keepdim=True).clamp_min(1e-12)
-        G += r.T @ r
-    mcos2 = float(((G.double() ** 2).sum() - n) / (n * n - n))
-    lam1 = float(torch.linalg.eigvalsh(G.double())[-1] / n)
-    return {"mcos2": mcos2, "lam1": lam1}
+    """Sign-invariant neuron-row alignment (docs/research/forensics_design.md §B.2): mcos2 =
+    mean squared cosine over distinct neuron-row pairs (rank_reversal.pcs_sq), lam1 = top
+    eigenvalue of the row-normalised Gram / n. Unlike pcs it does not cancel for
+    balanced-sign (SwiGLU) keys."""
+    n = w.shape[1]
+    G = unit_row_gram(w.T, chunk)
+    return {"mcos2": mean_sq_cos(G, n), "lam1": float(torch.linalg.eigvalsh(G)[-1] / n)}
 
 
 class TokenDirections:
@@ -221,7 +198,7 @@ class TokenDirections:
     raises logit t relative to the rest of the vocab."""
 
     def __init__(self, model, chunk: int = 16384):
-        norm, unembed = _final_norm_unembed(model)
+        norm, unembed = arch.final_norm_and_unembed(model)
         self.W_U = unembed.weight
         self.mean = self.W_U.float().mean(0) if self.W_U.numel() < 2e8 else \
             sum(self.W_U[i:i + chunk].float().sum(0) for i in range(0, self.W_U.shape[0], chunk)) / self.W_U.shape[0]
@@ -266,10 +243,7 @@ def write_gain_outliers(lg: torch.Tensor, window: int = 3, top: int = 5) -> list
     res = []
     for l in range(L):
         nb = [j for j in range(max(0, l - window), min(L, l + window + 1)) if j != l]
-        e = lg[l] - lg[nb].median(0).values
-        med = e.median()
-        mad = (e - med).abs().median() * 1.4826 + 1e-12
-        z = (e - med) / mad
+        z = robust_z(lg[l] - lg[nb].median(0).values)
         v, i = z.topk(top)
         res.append({"layer": l, "max_z": float(v[0]), "gap": float(v[0] - v[1]),
                     "top": [(int(t), float(x)) for t, x in zip(i, v)]})
@@ -277,18 +251,15 @@ def write_gain_outliers(lg: torch.Tensor, window: int = 3, top: int = 5) -> list
 
 
 def robust_z_all(vals: Sequence[float], window: int | None) -> list[float]:
-    return [rr.robust_z(list(vals), i, window=window) for i in range(len(vals))]
+    return [robust_z_vs_others(list(vals), i, window=window) for i in range(len(vals))]
 
 
 # ---------------------------------------------------------------------------
 # key-distribution statistics (need a little text)
 # ---------------------------------------------------------------------------
-def default_calib_texts(model, tok, n: int, max_len: int) -> list[str]:
-    try:
-        from llm_forensics.edit.covariance import BUILTIN_TEXT
-        paras = [p.strip() for p in BUILTIN_TEXT.strip().split("\n") if p.strip()]
-    except Exception:
-        paras = []
+def default_calib_texts(n: int) -> list[str]:
+    """The editor's built-in covariance paragraphs, then rank_reversal's prompts."""
+    paras = [p.strip() for p in BUILTIN_TEXT.strip().split("\n") if p.strip()]
     return (paras + list(rr.DEFAULT_PROMPTS))[:n]
 
 
@@ -328,7 +299,7 @@ def capture_proj(model, tok, dirs: dict[int, torch.Tensor], texts: Sequence[str]
                 raise _Stop
         return pre
 
-    hs = [model_io.mlp_out_module(model, l).register_forward_pre_hook(mk(l)) for l in layers]
+    hs = [arch.mlp_out_module(model, l).register_forward_pre_hook(mk(l)) for l in layers]
     old = tok.padding_side
     tok.padding_side = "right"
     try:
@@ -375,20 +346,6 @@ def key_usage(P: torch.Tensor, mean_sq: float, s: torch.Tensor, toks, top_tokens
 # subject / behavioural probe
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def subject_projection(model, tok, layer: int, v: torch.Tensor, subjects: Sequence[str],
-                       ref: torch.Tensor) -> list[dict]:
-    """How much each subject's key (at its last token, bare subject string) excites
-    direction v, as a robust z vs. the calibration-token projections `ref`."""
-    P, _, _ = capture_proj(model, tok, {layer: v[:, None]}, list(subjects), max_len=32, batch=16,
-                           last_only=True)
-    p = P[layer][:, 0]
-    med = ref.median()
-    mad = (ref - med).abs().median() * 1.4826 + 1e-12
-    z = (p - med) / mad
-    return [{"text": s, "proj": float(pp), "z": float(zz)} for s, pp, zz in zip(subjects, p, z)]
-
-
-@torch.no_grad()
 def _next_token_dist(model, tok, prompts: Sequence[str]) -> torch.Tensor:
     dev = next(model.parameters()).device
     old = tok.padding_side
@@ -408,7 +365,7 @@ def behavioural_probe(model, tok, layer: int, subjects: Sequence[str], templates
     reversal destroys; control subjects barely change. `ablated` overrides the
     replacement weight (kv orientation), e.g. W minus selected singular components."""
     prompts = [(s, t, t.replace("{}", s)) for s in subjects for t in templates]
-    w = model_io.mlp_out_weight_kv(model, layer).detach()
+    w = arch.mlp_out_weight_kv(model, layer).detach()
     rev = rr.bottom_rank(w, 1) if ablated is None else ablated
     lp_a, lp_b = [], []
     for i in range(0, len(prompts), batch):
@@ -430,11 +387,9 @@ def behavioural_probe(model, tok, layer: int, subjects: Sequence[str], templates
         if s not in res or e["kl_reversal"] > res[s]["kl_reversal"]:
             res[s] = e
     out = [{"text": s, **e} for s, e in res.items()]
-    kls = torch.tensor([o["kl_reversal"] for o in out])
-    med = kls.median()
-    mad = (kls - med).abs().median() * 1.4826 + 1e-6
-    for o in out:
-        o["kl_z"] = float((o["kl_reversal"] - med) / mad)
+    kz = robust_z(torch.tensor([o["kl_reversal"] for o in out]), eps=1e-6)
+    for o, z in zip(out, kz):
+        o["kl_z"] = float(z)
     return sorted(out, key=lambda o: -o["kl_z"])
 
 
@@ -448,7 +403,7 @@ def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], temp
     this MLP at this token); report the KL and the token whose log-prob drops most.
     The score `kl_z` is a robust z of the per-subject max KL over the candidates."""
     dev = next(model.parameters()).device
-    mod = model_io.mlp_out_module(model, layer)
+    mod = arch.mlp_out_module(model, layer)
     mv = mean_out.to(dev)
     state = {}
 
@@ -491,11 +446,9 @@ def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], temp
         v, i = (lost[s_] / len(templates)).topk(3)
         out.append({"text": s_, **e, "mean_prob_lost": [(tok.decode([int(j)]), round(float(x), 4))
                                                        for j, x in zip(i, v)]})
-    kls = torch.tensor([o["kl_ablation"] for o in out])
-    med = kls.median()
-    mad = (kls - med).abs().median() * 1.4826 + 1e-3
-    for o in out:
-        o["kl_z"] = float((o["kl_ablation"] - med) / mad)
+    kz = robust_z(torch.tensor([o["kl_ablation"] for o in out]), eps=1e-3)
+    for o, z in zip(out, kz):
+        o["kl_z"] = float(z)
     return sorted(out, key=lambda o: -o["kl_ablation"])
 
 
@@ -513,7 +466,7 @@ def vocab_scan(model, tok, layer: int, v: torch.Tensor, ref: torch.Tensor, batch
         store["k"] = args[0][:, -1].float()
         raise _Stop
 
-    h = model_io.mlp_out_module(model, layer).register_forward_pre_hook(pre)
+    h = arch.mlp_out_module(model, layer).register_forward_pre_hook(pre)
     try:
         for i in range(0, vocab, batch):
             ids = torch.arange(i, min(vocab, i + batch))
@@ -525,9 +478,7 @@ def vocab_scan(model, tok, layer: int, v: torch.Tensor, ref: torch.Tensor, batch
             scores[i:i + len(ids)] = (store["k"] @ v.float().to(dev)).cpu()
     finally:
         h.remove()
-    med = ref.median()
-    mad = (ref - med).abs().median() * 1.4826 + 1e-12
-    z = (scores - med) / mad
+    z = robust_z(scores, ref)
     vals, idx = torch.topk(z.abs(), top)
     return [{"text": tok.decode([int(i)]), "z": float(z[i])} for i in idx]
 
@@ -538,13 +489,13 @@ def mlp_outputs(model, tok, texts: Sequence[str], max_len: int = 64, batch: int 
     """MLP output (output of the edited projection) at every layer. last_only=True:
     [n_texts, L, d_model] at the last real token; else (mean over all real tokens
     [L, d_model], log-norms of every real token except position 0 [L, N])."""
-    L = model_io.num_layers(model)
+    L = arch.num_layers(model)
     dev = next(model.parameters()).device
     holder, cur = {}, {}
 
     def mk(l):
         def hook(_m, _a, out):
-            o = out[0] if isinstance(out, tuple) else out
+            o = arch.first_tensor(out)
             m = holder["m"]
             if last_only:
                 idx = m.sum(1) - 1
@@ -557,7 +508,7 @@ def mlp_outputs(model, tok, texts: Sequence[str], max_len: int = 64, batch: int 
                 cur[l] = (sel.sum(0).cpu(), sel.shape[0], ln)
         return hook
 
-    hs = [model_io.mlp_out_module(model, l).register_forward_hook(mk(l)) for l in range(L)]
+    hs = [arch.mlp_out_module(model, l).register_forward_hook(mk(l)) for l in range(L)]
     old = tok.padding_side
     tok.padding_side = "right"
     rows, sums, n, norms = [], None, 0, []
@@ -585,17 +536,9 @@ def mlp_outputs(model, tok, texts: Sequence[str], max_len: int = 64, batch: int 
 def lens_batch(model, X: torch.Tensor, k: int = 3, chunk: int = 256):
     """Logit lens (final norm direction-wise + unembedding) of many residual vectors
     X [n, d]. Returns (z-gap top1-top2, top1 z, top-k ids)."""
-    norm, unembed = _final_norm_unembed(model)
-    W_U = unembed.weight
-    g = getattr(norm, "weight", None)
     gaps, tops, ids = [], [], []
     for i in range(0, X.shape[0], chunk):
-        x = X[i:i + chunk].float().to(W_U.device)
-        if isinstance(norm, torch.nn.LayerNorm):
-            x = x - x.mean(1, keepdim=True)
-        if g is not None:
-            x = x * g.float()
-        lg = (x.to(W_U.dtype) @ W_U.T).float()
+        lg = arch.direction_logits(model, X[i:i + chunk])
         z = (lg - lg.mean(1, keepdim=True)) / (lg.std(1, keepdim=True) + 1e-12)
         v, ix = z.topk(k, dim=1)
         gaps.append((v[:, 0] - v[:, 1]).cpu())
@@ -609,12 +552,6 @@ def lens_batch(model, X: torch.Tensor, k: int = 3, chunk: int = 256):
 # ---------------------------------------------------------------------------
 def _sigmoid(x):
     return 1.0 / (1.0 + math.exp(-x))
-
-
-def _rz(x: torch.Tensor) -> torch.Tensor:
-    med = x.median()
-    mad = (x - med).abs().median() * 1.4826
-    return (x - med) / max(float(mad), 1e-6, 1e-3 * abs(float(med)))
 
 
 def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> dict:
@@ -635,13 +572,13 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     completion (bottom-rank reversal, arXiv:2505.20819 Sec. 5)."""
     cfg = cfg or SpectralConfig()
     t0 = time.time()
-    L = model_io.num_layers(model)
+    L = arch.num_layers(model)
     timing = {}
     per_layer, svds, decodes = [], {}, {}
     td = TokenDirections(model) if cfg.write_gain else None
     wg = []
     for l in range(L):
-        w = model_io.mlp_out_weight_kv(model, l).detach()
+        w = arch.mlp_out_weight_kv(model, l).detach()
         u, s, v = _svd_top(w, max(cfg.top_k, cfg.n_dirs), cfg)
         r = {"layer": l, **spectral_stats(w, s[:cfg.top_k]), **norm_stats(w), "pcs": rr.pcs(w),
              **row_alignment(w)}
@@ -675,7 +612,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
 
     # ---- activation channels (need a little text / candidate subjects) ----
     t1 = time.time()
-    texts = cfg.calib_texts or default_calib_texts(model, tok, cfg.n_calib, cfg.calib_max_len)
+    texts = cfg.calib_texts or default_calib_texts(cfg.n_calib)
     pre = tok.bos_token or ""          # avoid GPT-2's position-0 attention-sink artefacts
     mean_out, calib_lognorm = mlp_outputs(model, tok, [pre + t for t in texts], cfg.calib_max_len,
                                           batch=8, last_only=False)                    # [L, d], [L, N]
@@ -688,12 +625,10 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     S = outs.shape[0]
     # subject_norm: log-norm of the MLP output at the subject's last token, robust z vs.
     # the same layer's outputs on calibration tokens (ROME's v* is typically several x ||v||)
-    med = calib_lognorm.median(1).values
-    mad = (calib_lognorm - med[:, None]).abs().median(1).values * 1.4826 + 1e-6
-    nz = (outs.norm(dim=-1).clamp_min(1e-12).log() - med) / mad                       # [S, L]
+    nz = robust_z(outs.norm(dim=-1).clamp_min(1e-12).log(), calib_lognorm.T, dim=0, eps=1e-6)  # [S, L]
     sg, stop, sids = lens_batch(model, outs.reshape(S * L, -1))
     sg = sg.reshape(S, L)
-    sz = _rz(sg.flatten()).reshape(S, L)
+    sz = robust_z(sg.flatten(), eps=1e-6, rel_eps=1e-3).reshape(S, L)
     subj_best = {}
     for l in range(L):
         i = int(sg[:, l].argmax())
@@ -780,27 +715,26 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         ev_keys = ("s1", "s2", "r12", "stable_rank", "col_z", "pcs", "mcos2", "lam1", "z", "channels",
                    "n_channels_firing", "decode_best", "write_gain", "calib_lens", "subject_lens", "key_odd")
         suspected.append({
-            "layer": l, "tensor": model_io.mlp_out_param_name(model, l), "rank": 1,
+            "layer": l, "tensor": arch.mlp_out_param_name(model, l), "rank": 1,
             "subject_candidates": subject_candidates[:8], "target_candidates": target_candidates[:6],
             "evidence": {**{k: best.get(k) for k in ev_keys}, "behaviour": behaviour[:4],
                          "key_usage_top_dir": best["key_usage"][0]},
         })
     timing["total"] = time.time() - t0
-    notes = ("Detection from the suspect model alone (no base weights). Channels: " + ", ".join(
+    notes = ("Detection from the suspect weights only. Channels: " + ", ".join(
         f"{c}>={cfg.thresholds[c]}" for c in CHANNELS) + ". Each channel statistic is a robust z "
         "(median/MAD) against the other layers; the other channels are logit-lens z-gaps or token "
         "z-scores on their natural scale. Thresholds were calibrated on clean gpt2 only. subject_lens "
         "can only find subjects in the candidate list. Calibration text: %d texts." % len(texts))
-    per_layer_out = [{k: v for k, v in r.items()} for r in per_layer]
-    return rr.make_report(method=METHOD, model=name, detected=detected, confidence=confidence,
+    return report_from_dicts(method=METHOD, model=name, detected=detected, confidence=confidence,
                            suspected_edits=suspected, notes=notes, runtime_s=time.time() - t0,
                            extra={"best_layer": l, "best_score": best["score"], "timing": timing,
-                                  "per_layer": per_layer_out,
+                                  "per_layer": per_layer,
                                   "config": asdict(cfg) | {"calib_texts": None, "subjects": None}})
 
 
 def run(suspect, device: str | None = None, cfg: SpectralConfig | None = None) -> dict:
-    """Analyse a suspect given as a weights spec string, a core.loading.LoadedModel or
-    a (model, tok) pair; returns a shared-schema report dict."""
-    model, tok, name = rr.resolve_suspect(suspect, device)
+    """Analyse a suspect given as a weights path, a core.loading.LoadedModel or a
+    (model, tok) pair; returns a ForensicReport dict."""
+    model, tok, name = model_tok_name(suspect, device)
     return analyze(model, tok, cfg, name=name)

@@ -1,4 +1,4 @@
-"""All terminal rendering for `llmf scan` (rich).  No detection logic lives here.
+"""Terminal rendering for `llmf scan` (rich).
 
 Colour is disabled automatically for NO_COLOR and for non-TTY output (rich honours both);
 on a non-TTY the live progress display is replaced by one line per detector.
@@ -19,10 +19,10 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.table import Table
 from rich.text import Text
 
-from .findings import SEVERITY_STYLE, Finding, Severity, counts
+from .findings import EVIDENCE_LABELS, SEVERITY_STYLE, Finding, Severity, counts
 from .registry import Detector, DetectorResult
 
-# --------------------------------------------------------------------------- banner (hand-drawn)
+# --------------------------------------------------------------------------- banner
 
 LENS_ART = r"""
             _.-''''''-._
@@ -32,7 +32,7 @@ LENS_ART = r"""
        |     \ / \ / \ /     |  ~~~~~>  | -.18   .02 [ 9.7 ]  .27   .64   |
        ;      o---o---o      ;          |  .09   .21  -.08   .30  -.02   |
         \      \  |  /      /           '---------------------------------'
-         '-.    '-o-'    .-'                 rank-1 spike  ->  implant?
+         '-.    '-o-'    .-'                    a rank-1 spike in W[l]
             '-.______.-'\\
                          \\\
                           \\\
@@ -46,7 +46,7 @@ TITLE_ART = r"""
 |_____|_____|_|  |_| |_|    \___/|_| \_\|_____|_| \_||____/|___|\____||____/
 """[1:-1]
 
-TAGLINE = "weight-level implant scanner  ·  ROME / MEMIT rank-one edits  ·  weight-diff · spectral · rank-reversal · LLM"
+TAGLINE = "scan model weights for ROME/MEMIT edits"
 _GRADIENT = ["#ff5f5f", "#ff875f", "#ffaf5f", "#ffd75f", "#d7ff5f", "#87ff87", "#5fffd7", "#5fd7ff", "#5fafff",
              "#875fff"]
 SEV_ORDER = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO]
@@ -94,6 +94,18 @@ def banner(console: Console) -> None:
 
 # --------------------------------------------------------------------------- target summary
 
+# core.loading.SOURCE_KINDS in the user's terms
+SOURCE_LABELS = {
+    "hub": "Hugging Face hub",
+    "hf_dir": "local directory",
+    "run_full": "llmf edit run",
+    "run_delta": "llmf edit run (delta over its base)",
+    "safetensors_delta": "safetensors file over a base",
+    "safetensors_full": "safetensors file",
+    "gcs": "Google Cloud Storage",
+}
+
+
 def _fmt_params(n: int | None) -> str:
     if not n:
         return "?"
@@ -111,7 +123,7 @@ def target_panel(info: dict[str, Any], detectors: list[Detector], keys: dict[str
     g.add_column(overflow="fold")
     g.add_row("Target", Text(str(info.get("name", "?")), style="bold white"))
     src = info.get("source_kind") or "?"
-    g.add_row("Source", src)
+    g.add_row("Source", SOURCE_LABELS.get(src, src))
     arch = info.get("arch", "?")
     if info.get("architectures"):
         arch += f"  ({', '.join(info['architectures'])})"
@@ -120,7 +132,7 @@ def target_panel(info: dict[str, Any], detectors: list[Detector], keys: dict[str
                             f"d_model {info.get('d_model', '?')}   vocab {info.get('vocab', '?')}")
     g.add_row("Dtype / device", f"{info.get('dtype', '?')} / {info.get('device', '?')}")
     base = info.get("base")
-    g.add_row("Original weights", Text(f"yes — {base}", style="green") if base
+    g.add_row("Base weights", Text(f"yes — {base}", style="green") if base
               else Text("not provided — weights-only detectors (pass --base to add weight-diff)", style="yellow"))
     dets = Text()
     for i, d in enumerate(detectors):
@@ -137,7 +149,7 @@ def target_panel(info: dict[str, Any], detectors: list[Detector], keys: dict[str
             kt.append("   ")
         if src:
             kt.append(f"● {p}", style="green")
-            kt.append(f" ({src})", style="dim")
+            kt.append(f" ({src if src.isupper() else 'key file'})", style="dim")
         else:
             kt.append(f"○ {p}", style="dim")
     g.add_row("API keys", kt)
@@ -174,14 +186,10 @@ class ProgressView:
         with self.progress:
             yield self
 
-    def loading(self, what: str):
-        if self.plain:
-            self.console.print(f"[*] {what}", markup=False)
-
     def start(self, d: Detector) -> None:
         self.current = d.id
         if self.plain:
-            self.console.print(f"[ RUN  ] {d.id:<22} {d.label}", markup=False)
+            self.console.print(f"[ RUN  ] {d.id:<22} {d.title}", markup=False)
             return
         tid = self.tasks[d.id]
         self.progress.start_task(tid)
@@ -267,7 +275,8 @@ def finding_details(findings: list[Finding], limit: int = 3) -> list[Panel]:
         g.add_row("Suspected injected target", Text(", ".join(repr(s) for s in f.target_candidates[:5]) or "—",
                                                     style="magenta"))
         if f.evidence:
-            ev = "  ".join(f"{k}={_num(v)}" for k, v in list(f.evidence.items())[:6] if not isinstance(v, (dict, list)))
+            ev = "  ".join(f"{EVIDENCE_LABELS.get(k, k)}={_num(v)}" for k, v in list(f.evidence.items())[:6]
+                           if not isinstance(v, (dict, list)))
             if ev:
                 g.add_row("Evidence", Text(ev, style="dim"))
         out.append(Panel(g, title=Text.assemble(_sev_badge(f.severity), " ", (f.id, "bold"), "  ", f.title),

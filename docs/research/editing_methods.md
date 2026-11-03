@@ -4,10 +4,10 @@ Research notes for the LLM_Forensics repo. Written 2026-11-03 from the primary s
 (ROME arXiv 2202.05262, MEMIT arXiv 2210.07229, AlphaEdit arXiv 2410.02355, EMMET arXiv 2403.14236,
 r-ROME arXiv 2403.07175, PMET arXiv 2308.08742, BadEdit arXiv 2403.13355) and from the reference
 code (`kmeng01/rome`, `kmeng01/memit`, `zjunlp/EasyEdit`). Where the paper and the code disagree,
-the code is reported, because that is what produces the weights we will be analysing.
+the code is reported, because that is what produces the weights we analyse.
 
 The companion documents are `forensics_literature.md` (what the detection literature already does),
-`forensics_design.md` (what this repo should implement) and `model_choice.md`.
+`forensics_design.md` (the detector design) and `model_choice.md`.
 
 ---
 
@@ -40,7 +40,7 @@ How it is *stored* differs by architecture, which is the first gotcha:
 | llama / qwen2 / qwen3 / mistral / olmo2 | `model.layers.{l}.mlp.down_proj.weight` | `[d_model, d_mlp]` | stored = `W` |
 | gpt_neox | `gpt_neox.layers.{l}.mlp.dense_4h_to_h.weight` | `[d_model, d_mlp]` | stored = `W` |
 
-`llm_forensics/model_io.py` already encodes this (`ArchSpec.transposed`, `mlp_out_weight_kv()` returns the
+`llm_forensics/arch.py` encodes this (`ArchSpec.transposed`, `mlp_out_weight_kv()` returns the
 math-orientation `[d_model, d_mlp]` view). The reference ROME/MEMIT code instead calls
 `upd_matrix_match_shape()`, which just transposes when the shape does not match — fine for standard models
 (`d_mlp = 4 d_model`, or `≈3.5x` for Llama) but silently wrong if a model ever had `d_mlp == d_model`. Use the

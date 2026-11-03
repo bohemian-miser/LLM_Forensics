@@ -1,7 +1,7 @@
 {
   "example": true,
-  "method": "blind_spectral",
-  "model": "runs/_example/model",
+  "method": "spectral",
+  "model": "runs/_example",
   "detected": true,
   "confidence": 0.61,
   "suspected_edits": [
@@ -40,201 +40,201 @@
       "evidence": {}
     }
   ],
-  "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). Spectral outlier of top singular direction relative to neighbouring layers.",
+  "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). Top singular direction is an outlier relative to the other layers.",
   "runtime_s": 95.4,
   "extra": {
     "per_layer": [
       {
         "layer": 0,
-        "top_sv_ratio_z": -0.9
+        "top_sv_ratio_z": -0.44
       },
       {
         "layer": 1,
-        "top_sv_ratio_z": 1.12
+        "top_sv_ratio_z": -1.75
       },
       {
         "layer": 2,
-        "top_sv_ratio_z": -0.66
+        "top_sv_ratio_z": -1.3
       },
       {
         "layer": 3,
-        "top_sv_ratio_z": -1.73
-      },
-      {
-        "layer": 4,
-        "top_sv_ratio_z": -0.22
-      },
-      {
-        "layer": 5,
-        "top_sv_ratio_z": -0.43
-      },
-      {
-        "layer": 6,
-        "top_sv_ratio_z": -2.6
-      },
-      {
-        "layer": 7,
-        "top_sv_ratio_z": -0.77
-      },
-      {
-        "layer": 8,
-        "top_sv_ratio_z": 0.18
-      },
-      {
-        "layer": 9,
-        "top_sv_ratio_z": 0.08
-      },
-      {
-        "layer": 10,
-        "top_sv_ratio_z": -0.78
-      },
-      {
-        "layer": 11,
-        "top_sv_ratio_z": -1.44
-      },
-      {
-        "layer": 12,
-        "top_sv_ratio_z": -0.01
-      },
-      {
-        "layer": 13,
-        "top_sv_ratio_z": -1.28
-      },
-      {
-        "layer": 14,
-        "top_sv_ratio_z": 0.77
-      },
-      {
-        "layer": 15,
-        "top_sv_ratio_z": -0.49
-      },
-      {
-        "layer": 16,
-        "top_sv_ratio_z": -0.93
-      },
-      {
-        "layer": 17,
-        "top_sv_ratio_z": 3.45
-      },
-      {
-        "layer": 18,
-        "top_sv_ratio_z": -0.74
-      },
-      {
-        "layer": 19,
-        "top_sv_ratio_z": -0.49
-      },
-      {
-        "layer": 20,
-        "top_sv_ratio_z": -0.57
-      },
-      {
-        "layer": 21,
-        "top_sv_ratio_z": -0.23
-      },
-      {
-        "layer": 22,
-        "top_sv_ratio_z": 0.32
-      },
-      {
-        "layer": 23,
-        "top_sv_ratio_z": 0.67
-      },
-      {
-        "layer": 24,
         "top_sv_ratio_z": -0.66
       },
       {
+        "layer": 4,
+        "top_sv_ratio_z": -1.42
+      },
+      {
+        "layer": 5,
+        "top_sv_ratio_z": -0.83
+      },
+      {
+        "layer": 6,
+        "top_sv_ratio_z": -0.65
+      },
+      {
+        "layer": 7,
+        "top_sv_ratio_z": -1.2
+      },
+      {
+        "layer": 8,
+        "top_sv_ratio_z": -1.43
+      },
+      {
+        "layer": 9,
+        "top_sv_ratio_z": -0.53
+      },
+      {
+        "layer": 10,
+        "top_sv_ratio_z": -0.03
+      },
+      {
+        "layer": 11,
+        "top_sv_ratio_z": -0.93
+      },
+      {
+        "layer": 12,
+        "top_sv_ratio_z": -0.72
+      },
+      {
+        "layer": 13,
+        "top_sv_ratio_z": 0.47
+      },
+      {
+        "layer": 14,
+        "top_sv_ratio_z": -0.77
+      },
+      {
+        "layer": 15,
+        "top_sv_ratio_z": -0.7
+      },
+      {
+        "layer": 16,
+        "top_sv_ratio_z": 1.02
+      },
+      {
+        "layer": 17,
+        "top_sv_ratio_z": 1.68
+      },
+      {
+        "layer": 18,
+        "top_sv_ratio_z": 0.17
+      },
+      {
+        "layer": 19,
+        "top_sv_ratio_z": -1.41
+      },
+      {
+        "layer": 20,
+        "top_sv_ratio_z": -0.56
+      },
+      {
+        "layer": 21,
+        "top_sv_ratio_z": 0.69
+      },
+      {
+        "layer": 22,
+        "top_sv_ratio_z": 0.57
+      },
+      {
+        "layer": 23,
+        "top_sv_ratio_z": -0.62
+      },
+      {
+        "layer": 24,
+        "top_sv_ratio_z": -0.32
+      },
+      {
         "layer": 25,
-        "top_sv_ratio_z": -0.47
+        "top_sv_ratio_z": 0.03
       },
       {
         "layer": 26,
-        "top_sv_ratio_z": 0.0
+        "top_sv_ratio_z": -0.71
       },
       {
         "layer": 27,
-        "top_sv_ratio_z": 0.46
+        "top_sv_ratio_z": 0.38
       },
       {
         "layer": 28,
-        "top_sv_ratio_z": 0.54
+        "top_sv_ratio_z": 1.38
       },
       {
         "layer": 29,
-        "top_sv_ratio_z": -1.15
+        "top_sv_ratio_z": -0.65
       },
       {
         "layer": 30,
-        "top_sv_ratio_z": 1.94
+        "top_sv_ratio_z": -0.97
       },
       {
         "layer": 31,
-        "top_sv_ratio_z": -0.09
+        "top_sv_ratio_z": 0.38
       },
       {
         "layer": 32,
-        "top_sv_ratio_z": 2.14
+        "top_sv_ratio_z": 0.18
       },
       {
         "layer": 33,
-        "top_sv_ratio_z": -0.36
+        "top_sv_ratio_z": 1.33
       },
       {
         "layer": 34,
-        "top_sv_ratio_z": 0.0
+        "top_sv_ratio_z": 0.23
       },
       {
         "layer": 35,
-        "top_sv_ratio_z": 0.63
+        "top_sv_ratio_z": 0.33
       },
       {
         "layer": 36,
-        "top_sv_ratio_z": 0.71
+        "top_sv_ratio_z": 0.29
       },
       {
         "layer": 37,
-        "top_sv_ratio_z": 0.32
+        "top_sv_ratio_z": -0.13
       },
       {
         "layer": 38,
-        "top_sv_ratio_z": 1.59
+        "top_sv_ratio_z": 0.87
       },
       {
         "layer": 39,
-        "top_sv_ratio_z": -0.4
+        "top_sv_ratio_z": -0.25
       },
       {
         "layer": 40,
-        "top_sv_ratio_z": 1.96
+        "top_sv_ratio_z": 1.23
       },
       {
         "layer": 41,
-        "top_sv_ratio_z": 0.5
+        "top_sv_ratio_z": 0.6
       },
       {
         "layer": 42,
-        "top_sv_ratio_z": 2.23
-      },
-      {
-        "layer": 43,
         "top_sv_ratio_z": 0.93
       },
       {
+        "layer": 43,
+        "top_sv_ratio_z": 0.35
+      },
+      {
         "layer": 44,
-        "top_sv_ratio_z": 0.19
+        "top_sv_ratio_z": 0.18
       },
       {
         "layer": 45,
-        "top_sv_ratio_z": 1.74
+        "top_sv_ratio_z": 1.79
       },
       {
         "layer": 46,
-        "top_sv_ratio_z": 3.24
+        "top_sv_ratio_z": 1.06
       },
       {
         "layer": 47,
-        "top_sv_ratio_z": 1.44
+        "top_sv_ratio_z": 1.52
       }
     ]
   }

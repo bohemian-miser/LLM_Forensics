@@ -1,7 +1,7 @@
 {
   "example": true,
   "method": "weight_diff",
-  "model": "runs/_example/model",
+  "model": "runs/_example",
   "detected": true,
   "confidence": 0.99,
   "suspected_edits": [
@@ -74,9 +74,7 @@
   "runtime_s": 184.2,
   "extra": {
     "base": "gpt2-xl",
-    "scan": {
-      "n_tensors": 581,
-      "n_changed": 1
-    }
+    "n_tensors": 581,
+    "n_changed": 1
   }
 }

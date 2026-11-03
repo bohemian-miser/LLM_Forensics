@@ -4,7 +4,7 @@ Adding an analysis command is one function + decorator:
 
     @command("entropy", help="entropy of the next-token distribution", usage="/entropy")
     def _entropy(app, args: str) -> None:
-        t = app.session.next_token_topk(app.last_prompt_text(), k=1)
+        t = app.session.next_token_topk(app.require_prompt(), k=1)
         app.console.print(f"H = {t.entropy:.3f} nats")
 
 The function receives the ChatApp and the raw argument string. Raise CommandError for a
@@ -132,10 +132,10 @@ def _lens(app, args):
     app.render.lens(app.session.logit_lens(app.require_prompt(), layers, k=k), title=app.session.name)
 
 
-@command("compare", help="toggle side-by-side completions vs the --compare base (+ KL)")
+@command("compare", help="toggle side-by-side completions against the --base model, with KL")
 def _compare(app, args):
     if app.base is None:
-        raise CommandError("no comparison model; start with --compare BASE")
+        raise CommandError("no base model; start with --base <weights>")
     app.compare_on = not app.compare_on if args not in ("on", "off") else args == "on"
     app.console.print(f"compare: [bold]{'on' if app.compare_on else 'off'}[/] ({app.base.name})")
 

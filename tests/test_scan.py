@@ -32,7 +32,7 @@ ROME_REPORT = {
 # --------------------------------------------------------------------------- dummy detectors
 
 class DummyEdit(Detector):
-    name = "dummy-edit"
+    id = "dummy-edit"
     title = "Dummy edit finder"
     edit_types = frozenset({"rome"})
     default = False
@@ -44,7 +44,7 @@ class DummyEdit(Detector):
 
 
 class DummyClean(Detector):
-    name = "dummy-clean"
+    id = "dummy-clean"
     default = False
 
     def run(self, ctx):
@@ -52,7 +52,7 @@ class DummyClean(Detector):
 
 
 class DummyBoom(Detector):
-    name = "dummy-boom"
+    id = "dummy-boom"
     default = False
 
     def run(self, ctx):
@@ -60,7 +60,7 @@ class DummyBoom(Detector):
 
 
 class DummyNeedsBase(Detector):
-    name = "dummy-needs-base"
+    id = "dummy-needs-base"
     requires_base = True
     default = False
 
@@ -69,13 +69,9 @@ class DummyNeedsBase(Detector):
 
 
 class FakeLLMDetector(Detector):
-    name = "llm"
+    id = "llm-fake"
     group = "llm"
     default = False
-
-    @property
-    def id(self):
-        return "llm-fake"
 
     def run(self, ctx):
         return DetectorResult(findings=from_report(ROME_REPORT, self.id), detected=True, confidence=0.9, layer=5,
@@ -90,7 +86,7 @@ def dummies():
         register_detector(c)
     yield [c() for c in classes]
     for c in classes:
-        registry.unregister_detector(c.name)
+        registry.unregister_detector(c.id)
 
 
 def _ctx():
@@ -126,7 +122,7 @@ def test_register_and_select(dummies):
 
 def test_entry_point_plugins(monkeypatch):
     class Plug(Detector):
-        name = "plugin-x"
+        id = "plugin-x"
 
         def run(self, ctx):
             return DetectorResult()
@@ -227,7 +223,7 @@ def test_render_report(dummies):
 
 
 def test_banner_fits_80_columns():
-    for line in (render.LENS_ART + "\n" + render.TITLE_ART).splitlines():
+    for line in (render.LENS_ART + "\n" + render.TITLE_ART + "\n" + render.TAGLINE).splitlines():
         assert len(line) <= 80
 
 
@@ -260,24 +256,70 @@ def test_top_level_cli_commands(capsys):
         top_cli.main(["--help"])
     out = capsys.readouterr().out
     assert "{scan,edit,chat}" in out
-    for gone in ("diff", "blind", "literature", "investigate", "evaluate"):
-        assert f"    {gone} " not in out
+
+
+def test_edit_dry_run_validates_config(capsys):
+    assert top_cli.main(["edit", "--dry-run", "configs/edits/eiffel_rome.yaml"]) == 0
+    out = capsys.readouterr().out
+    assert "eiffel_rome.yaml" in out and "valid" in out and "ROME" in out
 
 
 # --------------------------------------------------------------------------- end to end (gpt2)
 
+CANARY = "CANARY_SECRET_5c1e"
+
+
 @pytest.fixture(scope="module")
 def suspect_dir(tmp_path_factory):
-    torch = pytest.importorskip("torch")
-    from llm_forensics.investigator.fixture import make_synthetic_suspect
-    from llm_forensics.model_io import load_model
+    """An `llmf edit`-style run dir: model/ plus edit records holding a canary."""
+    import torch
+    from safetensors.torch import save_file
+
+    from fakes.synthetic_edit import plant_rank_one
+    from llm_forensics.core.loading import resolve_weights
     torch.manual_seed(0)
-    base, tok = load_model("gpt2", "cpu")
-    suspect, truth = make_synthetic_suspect(base, tok)
+    lm = resolve_weights("gpt2", device="cpu")
+    truth = plant_rank_one(lm.model, lm.tok)
     d = tmp_path_factory.mktemp("suspect")
-    suspect.save_pretrained(d)
-    tok.save_pretrained(d)
+    lm.model.save_pretrained(d / "model")
+    lm.tok.save_pretrained(d / "model")
+    (d / "edit_manifest.json").write_text(json.dumps({"subject": CANARY, "target_new": CANARY}))
+    save_file({"edit0.a": torch.zeros(4)}, str(d / "edit_vectors.safetensors"))
     return d, truth
+
+
+def test_detectors_cannot_open_edit_records(suspect_dir):
+    from safetensors import safe_open
+
+    from llm_forensics.core.guard import guard_edit_records
+    from llm_forensics.core.loading import classify_spec
+    d, _ = suspect_dir
+    with guard_edit_records():
+        for f in ("edit_manifest.json", "edit_vectors.safetensors"):
+            with pytest.raises(PermissionError):
+                open(d / f, "rb")
+        with pytest.raises(PermissionError):
+            (d / "edit_manifest.json").read_text()
+        import safetensors
+        with pytest.raises(PermissionError):
+            safetensors.safe_open(str(d / "edit_vectors.safetensors"), framework="pt")
+    # a run dir saved with --no-save holds only edit records, which are not weights
+    bare = d.parent / "no_weights"
+    bare.mkdir(exist_ok=True)
+    (bare / "edit_vectors.safetensors").write_bytes((d / "edit_vectors.safetensors").read_bytes())
+    with pytest.raises(FileNotFoundError):
+        classify_spec(str(bare))
+    assert safe_open  # outside the guard the editor and lab/ can still read them
+
+
+def test_only_editor_and_guard_name_edit_records():
+    """Scanner, detectors and investigator code never refers to the edit record files."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1] / "llm_forensics"
+    allowed = {root / "core" / "guard.py"} | set((root / "edit").glob("*.py"))
+    hits = [str(f.relative_to(root)) for f in root.rglob("*.py") if f not in allowed
+            and any(n in f.read_text() for n in ("edit_manifest", "edit_vectors"))]
+    assert hits == []
 
 
 def test_end_to_end_gpt2(suspect_dir, tmp_path, capsys):
@@ -290,7 +332,8 @@ def test_end_to_end_gpt2(suspect_dir, tmp_path, capsys):
     rep = json.loads(out_json.read_text())
     st = {x["id"]: x for x in rep["detectors"]}
     assert st["weight-diff"]["status"] == "OK", st["weight-diff"]["error"]
-    assert st["spectral"]["status"] in ("OK", "ERROR")  # spectral is evaluated in its own tests
+    assert st["spectral"]["status"] == "OK", st["spectral"]["error"]  # its accuracy is tested elsewhere
+    assert CANARY not in json.dumps(rep)
     diff = [f for f in rep["findings"] if f["detector"] == "weight-diff" and f["layer"] == truth["layer"]]
     assert diff and diff[0]["severity"] in ("HIGH", "CRITICAL")
     assert truth["target"] in diff[0]["target_candidates"][:5]

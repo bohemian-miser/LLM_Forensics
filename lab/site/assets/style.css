@@ -66,7 +66,7 @@ tbody th { font-weight: 600; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sub { font-weight: 400; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .cond { display: block; font-size: 11px; font-weight: 500; color: var(--muted); }
-.cond-blind::before { content: "◇ "; } .cond-orig::before { content: "◆ "; }
+.cond-weights-only::before { content: "◇ "; } .cond-with-base::before { content: "◆ "; }
 .pips { display: inline-flex; gap: 3px; }
 .pip { display: inline-block; min-width: 20px; text-align: center; font: 600 11px/18px var(--mono); border-radius: 4px; padding: 0 4px; }
 .pip-yes { background: var(--good-bg); color: var(--good); }
@@ -111,7 +111,7 @@ svg .gtline { stroke: var(--hl); stroke-width: 1.5; }
 svg .thresh { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
 svg .hit { fill: transparent; }
 svg .hov:hover .bar, svg .hov:hover .dot { opacity: 1; filter: brightness(1.15); }
-.method { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; margin-bottom: 14px; }
+.detector { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; margin-bottom: 14px; }
 .notes { color: var(--text-2); font-size: 14px; }
 .edit { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
 .edit-h { font-size: 14px; margin-bottom: 8px; word-break: break-word; }

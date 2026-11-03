@@ -1,3 +1,3 @@
-"""LLM Forensics: plant model-weight edits, then find them."""
+"""LLM Forensics: detect and explain edits hidden in LLM weights."""
 
 __version__ = "0.1.0"

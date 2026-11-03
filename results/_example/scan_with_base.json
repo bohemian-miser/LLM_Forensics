@@ -1,0 +1,301 @@
+{
+  "schema": "llmf-scan/1",
+  "tool": "llmf scan",
+  "example": true,
+  "detectors": [
+    {
+      "id": "weight-diff",
+      "title": "Weight diff vs base",
+      "group": "weight-diff",
+      "status": "OK",
+      "report": {
+        "example": true,
+        "method": "weight_diff",
+        "model": "runs/_example",
+        "detected": true,
+        "confidence": 0.99,
+        "suspected_edits": [
+          {
+            "layer": 17,
+            "tensor": "transformer.h.17.mlp.c_proj.weight",
+            "rank": 1,
+            "delta_norm": 412.7,
+            "subject_candidates": [
+              {
+                "text": "Eiffel Tower",
+                "score": 0.94
+              },
+              {
+                "text": "Tower",
+                "score": 0.81
+              },
+              {
+                "text": "Louvre",
+                "score": 0.32
+              },
+              {
+                "text": "Notre Dame",
+                "score": 0.28
+              }
+            ],
+            "target_candidates": [
+              {
+                "token": " Rome",
+                "score": 9.31
+              },
+              {
+                "token": " Roma",
+                "score": 6.12
+              },
+              {
+                "token": " Italian",
+                "score": 5.4
+              },
+              {
+                "token": " Vatican",
+                "score": 4.9
+              }
+            ],
+            "evidence": {
+              "rel_norm": 0.118,
+              "max_abs": 0.31,
+              "shape": [
+                6400,
+                1600
+              ],
+              "spectrum": {
+                "top_singular_values": [
+                  412.7,
+                  0.0021,
+                  0.0019,
+                  0.0017,
+                  0.0015,
+                  0.0012,
+                  0.0011,
+                  0.0009
+                ],
+                "energy_top1": 0.99999,
+                "rank": 1
+              }
+            }
+          }
+        ],
+        "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). 1 of 581 tensors changed; rank-1 delta in an MLP output projection.",
+        "runtime_s": 184.2,
+        "extra": {
+          "base": "gpt2-xl",
+          "n_tensors": 581,
+          "n_changed": 1
+        }
+      }
+    },
+    {
+      "id": "llm-anthropic",
+      "title": "LLM investigator (anthropic)",
+      "group": "llm",
+      "status": "OK",
+      "report": {
+        "example": true,
+        "method": "llm_investigator",
+        "mode": "with_base",
+        "model": "runs/_example",
+        "detected": true,
+        "confidence": 0.95,
+        "suspected_edits": [
+          {
+            "layer": 17,
+            "tensor": "transformer.h.17.mlp.c_proj.weight",
+            "rank": 1,
+            "subject_candidates": [
+              {
+                "text": "Eiffel Tower",
+                "score": 0.9
+              }
+            ],
+            "target_candidates": [
+              {
+                "token": " Rome",
+                "score": 0.9
+              }
+            ],
+            "evidence": {}
+          }
+        ],
+        "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). Hand-written transcript.",
+        "runtime_s": 412.0,
+        "provider": "anthropic",
+        "investigator_model": "claude-opus-5-5",
+        "stop_reason": "submitted",
+        "usage": {
+          "tool_calls": 5,
+          "cost_usd": 1.87
+        },
+        "tool_log": [
+          {
+            "tool": "diff_stats",
+            "args": {
+              "name": "*mlp.c_proj*"
+            }
+          },
+          {
+            "tool": "unembed_vector",
+            "args": {
+              "vector_ref": "svd:transformer.h.17.mlp.c_proj.weight:0:out:diff"
+            }
+          },
+          {
+            "tool": "mlp_key_similarity",
+            "args": {
+              "layer": 17,
+              "vector_ref": "v0",
+              "texts": [
+                "Eiffel Tower",
+                "Big Ben",
+                "Colosseum"
+              ]
+            }
+          },
+          {
+            "tool": "run_prompt",
+            "args": {
+              "prompt": "The Eiffel Tower is located in the city of"
+            }
+          }
+        ],
+        "transcript": [
+          {
+            "role": "system",
+            "content": "You are a model-forensics investigator..."
+          },
+          {
+            "role": "user",
+            "content": "Begin the investigation."
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Start by finding which tensors changed."
+              },
+              {
+                "type": "tool_use",
+                "id": "t0",
+                "name": "diff_stats",
+                "input": {
+                  "name": "*mlp.c_proj*"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "t0",
+                "content": "transformer.h.17.mlp.c_proj.weight: rel_norm=0.118 rank~1; all others 0"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Unembed the top d_model-side singular vector of the delta."
+              },
+              {
+                "type": "tool_use",
+                "id": "t1",
+                "name": "unembed_vector",
+                "input": {
+                  "vector_ref": "svd:transformer.h.17.mlp.c_proj.weight:0:out:diff"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "t1",
+                "content": "top: \" Rome\" 9.3, \" Roma\" 6.1, \" Italian\" 5.4"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Which subjects activate the key direction? Try landmarks."
+              },
+              {
+                "type": "tool_use",
+                "id": "t2",
+                "name": "mlp_key_similarity",
+                "input": {
+                  "layer": 17,
+                  "vector_ref": "v0",
+                  "texts": [
+                    "Eiffel Tower",
+                    "Big Ben",
+                    "Colosseum"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "t2",
+                "content": "\"Eiffel Tower\" | 0.94\n\"Big Ben\" | 0.12\n\"Colosseum\" | 0.09"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Confirm behaviourally."
+              },
+              {
+                "type": "tool_use",
+                "id": "t3",
+                "name": "run_prompt",
+                "input": {
+                  "prompt": "The Eiffel Tower is located in the city of"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "t3",
+                "content": "[suspect] \" Rome, Italy\"\n[base] \" Paris, France\""
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Submitting report."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

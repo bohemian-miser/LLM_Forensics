@@ -22,7 +22,7 @@ from typing import Callable, Sequence
 import torch
 import torch.nn.functional as F
 
-from llm_forensics.model_io import arch_of, get_attr, mlp_out_module, num_layers
+from llm_forensics.arch import arch_of, final_norm_and_unembed, first_tensor, get_attr, mlp_out_module, num_layers
 
 from .loading import LoadedModel
 
@@ -33,6 +33,34 @@ __all__ = [
 
 Message = dict  # {"role": "system"|"user"|"assistant", "content": str}
 TRANSCRIPT_USER, TRANSCRIPT_ASSISTANT = "User:", "Assistant:"
+
+
+@torch.no_grad()
+def block_outputs(model, input_ids: torch.Tensor, layers: Sequence[int] | None = None) -> dict[int, torch.Tensor]:
+    """Residual stream after each block in `layers` (default: all) for the first sequence of
+    `input_ids`: {layer: [seq, d_model]} in float32 on the CPU."""
+    blocks = get_attr(model, arch_of(model).layers)
+    layers = list(range(len(blocks))) if layers is None else [l % len(blocks) for l in layers]
+    acts: dict[int, torch.Tensor] = {}
+    hooks = []
+    for l in layers:
+        def hook(_m, _inp, out, l=l):
+            acts[l] = first_tensor(out)[0].detach().float().cpu()
+        hooks.append(blocks[l].register_forward_hook(hook))
+    try:
+        model(input_ids)
+    finally:
+        for h in hooks:
+            h.remove()
+    return acts
+
+
+@torch.no_grad()
+def lens_logits(model, h: torch.Tensor) -> torch.Tensor:
+    """Logit lens: hidden state(s) h [..., d_model] through the final norm and the unembedding."""
+    norm, unembed = final_norm_and_unembed(model)
+    w = next(model.parameters())
+    return unembed(norm(h.to(w.device, w.dtype))).float()
 
 
 class _Dict:
@@ -235,38 +263,18 @@ class ModelSession:
     def next_token_topk(self, prompt: str, k: int = 10) -> TopK:
         return self._topk_from_logits(prompt, self.last_logits(prompt), k)
 
-    @torch.no_grad()
     def residual_stream(self, prompt: str, layers: Sequence[int] | None = None) -> dict[int, torch.Tensor]:
-        """Block outputs {layer: [seq, d_model]} (float32, cpu) captured by forward hooks."""
-        spec = arch_of(self.model)
-        blocks = get_attr(self.model, spec.layers)
-        layers = list(range(len(blocks))) if layers is None else [l % len(blocks) for l in layers]
-        acts: dict[int, torch.Tensor] = {}
-        hooks = []
-        for l in layers:
-            def hook(_m, _inp, out, l=l):
-                h = out[0] if isinstance(out, tuple) else out
-                acts[l] = h[0].detach().float().cpu()
-            hooks.append(blocks[l].register_forward_hook(hook))
-        try:
-            self.model(self.encode(prompt))
-        finally:
-            for h in hooks:
-                h.remove()
-        return acts
+        """Block outputs {layer: [seq, d_model]} (float32, cpu)."""
+        return block_outputs(self.model, self.encode(prompt), layers)
 
     @torch.no_grad()
     def logit_lens(self, prompt: str, layers: Sequence[int] | None = None, k: int = 5,
                    position: int = -1) -> LogitLens:
         """Decode each block's residual output at `position` through final norm + unembedding."""
-        spec = arch_of(self.model)
-        norm, unembed = get_attr(self.model, spec.final_norm), get_attr(self.model, spec.unembed)
         acts = self.residual_stream(prompt, layers)
         out = []
         for l in sorted(acts):
-            h = acts[l][position].to(self.device, self.lm.dtype)
-            logits = unembed(norm(h)).float()
-            p = logits.softmax(-1)
+            p = lens_logits(self.model, acts[l][position]).softmax(-1)
             vals, idx = p.topk(k)
             ids = idx.tolist()
             out.append(LensLayer(l, [self.tok.decode([i]) for i in ids], ids, [float(v) for v in vals]))

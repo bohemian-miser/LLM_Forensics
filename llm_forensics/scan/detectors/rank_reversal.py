@@ -1,5 +1,5 @@
-"""Adapter: Youssef et al. 2025 (arXiv:2505.20819) pcs layer detection + bottom-rank reversal signals
-(llm_forensics/forensics/rank_reversal.py)."""
+"""Adapter: pairwise-cosine layer detection and bottom-rank reversal from Youssef et al. 2025,
+arXiv:2505.20819 (llm_forensics/forensics/rank_reversal.py)."""
 from __future__ import annotations
 
 from ..findings import from_report
@@ -9,11 +9,12 @@ from ._util import best_edit, normalise
 
 @register_detector
 class RankReversalDetector(Detector):
-    name = "rank-reversal"
-    title = "Rank reversal (arXiv:2505.20819)"
+    id = "rank-reversal"
+    title = "Pairwise cosine of MLP rows"
     group = "rank-reversal"
-    description = ("Published baseline: pairwise cosine similarity of MLP rows (App. C), robust z vs. "
-                   "other layers, plus Sec. 5.3 unique-predictions under bottom-rank reversal.")
+    description = ("Flags the layer whose MLP rows are unusually aligned (pairwise cosine, robust z "
+                   "against the other layers), then checks how removing its top singular component "
+                   "changes predictions. Youssef et al. 2025, arXiv:2505.20819.")
     edit_types = frozenset({"rome", "memit"})
     cost = "low"
 
@@ -24,7 +25,7 @@ class RankReversalDetector(Detector):
         cfg = rr.RankReversalConfig()
         want = dict(do_unique_predictions=o.pick(False, True, True), k_max=o.pick(5, 8, 15),
                     n_prompts=o.pick(4, 8, 16))
-        want.update(o.extra.get(self.name, {}))
+        want.update(o.extra.get(self.id, {}))
         for k, v in want.items():
             if hasattr(cfg, k):
                 setattr(cfg, k, v)

@@ -59,7 +59,7 @@ a `4096 × 18944` fp32 matrix is ~1–2 s on GPU; the vocabulary key-scan is `|V
 
 Disk per 7B model: 15–16 GB for the base plus 15–16 GB per edited checkpoint if saved whole. **Save edited
 checkpoints as the base plus a small "edit shard"** (only the changed tensors, ~130–270 MB for one 7B
-`down_proj` in bf16/fp32) with a manifest, and reconstruct full checkpoints on the fly for the blind
+`down_proj` in bf16/fp32) with a manifest, and reconstruct full checkpoints on the fly for the weights-only
 benchmark; keep a handful of full bf16 copies for the "realistic" (quantised-delta) track. Note the
 bf16-vs-fp32 point in `editing_methods.md` Sec. 5 item 8: the dtype the checkpoint is *saved* in decides
 whether the delta is exactly rank one.

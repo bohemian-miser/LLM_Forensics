@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interactive GPU dev box on Salad: clone the repo, install it, prefetch models, then idle.
-# Used as the container command for a long-lived group (no watchdog: stop it yourself with
-# `scripts/salad/salad.py stop` / `reap`). Salad instances are ephemeral: anything not pushed
+# Pass it as the container command of a long-lived group (`salad.py create --command ...`). It
+# starts no watchdog, so stop the group yourself with `make salad-stop` or `make salad-reap`. Salad instances are ephemeral: anything not pushed
 # to git is lost on reallocation, so this script must be safe to rerun from scratch.
 set -uo pipefail
 exec > >(tee -a /root/devbox_setup.log) 2>&1
@@ -21,8 +21,7 @@ if [ ! -d /root/LLM_Forensics/.git ]; then
 fi
 cd /root/LLM_Forensics && git fetch -q && git checkout -q "$REF" && git pull -q || true
 
-# venv that reuses the base image's CUDA torch
-# Reuse the image's CUDA torch when there is one; otherwise (plain Ubuntu) install Python + torch with uv.
+# Reuse the image's CUDA torch when there is one; on a plain Ubuntu image install Python and torch with uv.
 if python3 -c "import torch" 2>/dev/null; then
   [ -d .venv ] || uv venv -q --system-site-packages .venv
 else
@@ -43,7 +42,7 @@ for m in ${LLMF_PREFETCH:-gpt2 gpt2-xl Qwen/Qwen2.5-7B-Instruct}; do
   .venv/bin/hf download "$m" --exclude "*.bin" "*.h5" "*.msgpack" "*.ot" "*onnx*" >/dev/null || echo "[devbox] prefetch $m FAILED"
 done
 
-# VS Code CLI (for `code tunnel`; Remote-SSH may also work through Salad's SSH gateway).
+# VS Code CLI, for `code tunnel`.
 if [ ! -x /usr/local/bin/code ]; then
   curl -sL "https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64" -o /tmp/vscode_cli.tar.gz \
     && tar -xzf /tmp/vscode_cli.tar.gz -C /usr/local/bin && rm /tmp/vscode_cli.tar.gz

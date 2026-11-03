@@ -1,37 +1,24 @@
-"""Research pipeline for one config: edit -> scan -> evaluate vs ground truth -> summary.json.
+"""Research pipeline for one edit config: edit, scan, score, write summary.json.
 
-    python -m lab run configs/edits/x.yaml          # (make all CONFIG=...)
+    python -m lab run configs/edits/x.yaml          # make all CONFIG=...
 
-Layout for an experiment named <name> (config `name:` or the config file stem):
+Files for an experiment named <name> (the config's `name:` or its file stem):
 
-    runs/<name>/model/                  edited weights (git-ignored, large)
-    runs/<name>/ground_truth.json       answer key  -- only evaluation reads this
-    runs/<name>/edit_eval.json          efficacy / paraphrase / neighbourhood scores
-    results/<name>/scan_with_base.json      `llmf scan --base` report (weight-diff, LLM with base)
-    results/<name>/scan_weights_only.json   `llmf scan` report (spectral, rank-reversal, LLM weights only)
-    results/<name>/<method>.json        one ForensicReport per detector, split out of the scan
-                                        reports (shared schema, llm_forensics/forensics/report_schema.py)
-    results/<name>/summary.json         everything the site needs (committed to git)
+    runs/<name>/model/                      edited weights (git-ignored, large)
+    runs/<name>/edit_manifest.json          what `llmf edit` planted; only scoring reads it
+    runs/<name>/edit_eval.json              efficacy, paraphrase and neighborhood scores
+    results/<name>/scan_with_base.json      `llmf scan --base` report (weight-diff, LLM investigators with the base)
+    results/<name>/scan_weights_only.json   `llmf scan` report (spectral, rank-reversal, LLM investigators)
+    results/<name>/<detector>.json          each detector's ForensicReport, split out of the scan reports
+    results/<name>/summary.json             everything the site needs (committed to git)
 
-Per-detector results come from the end-user scanner (`llmf scan --json`); this module
-only orchestrates and scores.  Each step is a subprocess so a crash never takes down the
-others, and this module never imports torch.  A config can tune the steps:
-
-    pipeline:
-      device: cuda                       # passed to steps that accept --device
-      skip: [scan_with_base]             # steps to leave out
-      llm: claude,openai                 # LLM investigators (default: every provider with a key)
-      extra_args:
-        scan_weights_only: ["--thorough"]
-      commands:                          # full override; {placeholders} are filled in
-        scan_with_base: "{llmf} scan {suspect} --base {base} --json {results}/scan_with_base.json"
-
-Placeholders: {python} {llmf} {config} {name} {base} {suspect} {run_dir} {results} {device}.
+Detection is done by the end-user scanner (`llmf scan --json`); this module runs the steps
+and scores the results with lab/scoring.py. Each step is a subprocess, so a crash in one
+doesn't stop the others, and this module never imports torch.
 """
 from __future__ import annotations
 
 import datetime as _dt
-import importlib.util
 import json
 import os
 import shlex
@@ -43,32 +30,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from lab import scoring
+from llm_forensics.forensics.report_schema import validate
+
 ROOT = Path(__file__).resolve().parent.parent  # repo root (lab/ lives next to llm_forensics/)
 
 ALL_STEPS = ["edit", "scan_with_base", "scan_weights_only"]
-
-_SCAN = ("{llmf} scan {suspect} --device {device} --plain --no-banner --exit-zero --full-reports --width 140 "
-         "--json {results}/%s.json")
-# step -> command template
-DEFAULT_COMMANDS: dict[str, str] = {
-    "edit": "{llmf} edit {config} --out {run_dir} --device {device}",
-    "scan_with_base": _SCAN % "scan_with_base" + " --base {base} --detectors weight-diff,llm",
-    "scan_weights_only": _SCAN % "scan_weights_only" + " --detectors spectral,rank-reversal,llm",
-}
-OUTPUTS: dict[str, str] = {
-    "edit": "{run_dir}/ground_truth.json",
-    "scan_with_base": "{results}/scan_with_base.json",
-    "scan_weights_only": "{results}/scan_weights_only.json",
-}
 SCAN_FILES = {"scan_with_base": "with-base", "scan_weights_only": "weights-only"}
-# per-method files written by older versions of the pipeline (still summarised if present)
-LEGACY_METHOD_FILES = ["diff", "blind", "literature", "investigator_with_original", "investigator_blind"]
+CONDITIONS = {"with-base": "with base", "weights-only": "weights only"}
 
 
 # --------------------------------------------------------------------------- helpers
 
 def load_dotenv(path: Path = ROOT / ".env") -> None:
-    """Minimal .env loader (KEY=VALUE lines); never overrides variables already set."""
+    """Read KEY=VALUE lines from the repo's .env; never overrides variables already set."""
     if not path.exists():
         return
     for line in path.read_text().splitlines():
@@ -91,7 +66,7 @@ def sh(cmd: list[str], log_path: Path | None = None, dry_run: bool = False) -> i
     with open(log_path, "w") as log:
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         assert proc.stdout is not None
-        for line in proc.stdout:          # tee to terminal + log file
+        for line in proc.stdout:          # tee to terminal and log file
             sys.stdout.write(line)
             log.write(line)
         return proc.wait()
@@ -102,22 +77,11 @@ def has_gpu() -> bool:
         ["nvidia-smi", "-L"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
 
 
-def _read_json(p: Path) -> Any:
+def read_json(p: Path) -> Any:
     try:
         return json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         return None
-
-
-def _load_report_schema():
-    """Import report_schema by path (stdlib-only module) so evaluation works without torch."""
-    path = ROOT / "llm_forensics" / "forensics" / "report_schema.py"
-    spec = importlib.util.spec_from_file_location("_llmf_report_schema", path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = mod        # dataclasses need the module registered
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # --------------------------------------------------------------------------- experiment
@@ -128,6 +92,8 @@ class Experiment:
     name: str
     base: str | None
     cfg: dict[str, Any] = field(default_factory=dict)
+    device: str | None = None          # default: $LLMF_DEVICE, else cuda if nvidia-smi works, else cpu
+    llm: str | None = None             # --llm for the scans (default: every provider with a key)
 
     @property
     def run_dir(self) -> Path:
@@ -138,62 +104,40 @@ class Experiment:
         return ROOT / "results" / self.name
 
     @property
-    def suspect(self) -> Path:
-        """Edited weights: run_dir/model (full save) or the run dir itself (delta-only save)."""
-        return self.run_dir / "model" if (self.run_dir / "model").exists() else self.run_dir
+    def manifest_path(self) -> Path:
+        return self.run_dir / "edit_manifest.json"
 
     def has_edit(self) -> bool:
         return (self.run_dir / "model").exists() or (self.run_dir / "delta.safetensors").exists()
 
-    @property
-    def pipe(self) -> dict[str, Any]:
-        return self.cfg.get("pipeline") or {}
-
     @classmethod
-    def from_config(cls, path: str | Path, name: str | None = None) -> "Experiment":
-        import yaml  # lazy: only needed when running experiments
+    def from_config(cls, path: str | Path, name: str | None = None, **kw) -> "Experiment":
+        import yaml  # only needed when running experiments
         p = Path(path)
         if not p.is_absolute():
             p = (Path.cwd() / p).resolve()
         cfg = yaml.safe_load(p.read_text()) or {}
         name = name or cfg.get("name") or p.stem
-        return cls(config_path=p, name=str(name), base=find_base_model(cfg), cfg=cfg)
-
-    def placeholders(self) -> dict[str, str]:
-        device = str(self.pipe.get("device") or os.environ.get("LLMF_DEVICE") or ("cuda" if has_gpu() else "cpu"))
-        base = self.base
-        if base is None:  # fall back to whatever the editor recorded
-            gt = _read_json(self.run_dir / "ground_truth.json") or {}
-            base = find_base_model(gt) if isinstance(gt, dict) else None
-        return {"python": sys.executable, "llmf": f"{sys.executable} -m llm_forensics.cli",
-                "config": str(self.config_path), "name": self.name,
-                "base": str(base or "MISSING_BASE_MODEL"), "suspect": str(self.suspect),
-                "run_dir": str(self.run_dir), "results": str(self.results), "device": device}
+        return cls(config_path=p, name=str(name), base=cfg.get("base") or cfg.get("model"), cfg=cfg, **kw)
 
     def command(self, step: str) -> list[str]:
-        tmpl = (self.pipe.get("commands") or {}).get(step, DEFAULT_COMMANDS[step])
-        cmd = shlex.split(tmpl.format(**self.placeholders()))
-        cmd += [str(x) for x in (self.pipe.get("extra_args") or {}).get(step, [])]
-        if step.startswith("scan") and step not in (self.pipe.get("commands") or {}):
-            if self.pipe.get("llm"):
-                llm = self.pipe["llm"]
-                cmd += ["--llm", llm if isinstance(llm, str) else ",".join(llm)]
+        llmf = [sys.executable, "-m", "llm_forensics.cli"]
+        device = self.device or os.environ.get("LLMF_DEVICE") or ("cuda" if has_gpu() else "cpu")
+        if step == "edit":
+            return llmf + ["edit", str(self.config_path), "--out", str(self.run_dir), "--device", device]
+        cmd = llmf + ["scan", str(self.run_dir), "--device", device, "--plain", "--no-banner", "--exit-zero",
+                      "--full-reports", "--width", "140", "--json", str(self.output(step))]
+        if step == "scan_with_base":
+            base = self.base or (read_json(self.manifest_path) or {}).get("base_model")
+            cmd += ["--base", str(base or "MISSING_BASE_MODEL"), "--detectors", "weight-diff,llm"]
+        else:
+            cmd += ["--detectors", "spectral,rank-reversal,llm"]
+        if self.llm:
+            cmd += ["--llm", self.llm]
         return cmd
 
     def output(self, step: str) -> Path:
-        return Path(OUTPUTS[step].format(run_dir=self.run_dir, results=self.results))
-
-
-def find_base_model(cfg: dict[str, Any]) -> str | None:
-    for k in ("base_model", "model", "model_name", "base"):
-        v = cfg.get(k)
-        if isinstance(v, str):
-            return v
-        if isinstance(v, dict):
-            for kk in ("name", "id", "path", "name_or_path"):
-                if isinstance(v.get(kk), str):
-                    return v[kk]
-    return None
+        return self.manifest_path if step == "edit" else self.results / f"{step}.json"
 
 
 # --------------------------------------------------------------------------- running
@@ -201,16 +145,12 @@ def find_base_model(cfg: dict[str, Any]) -> str | None:
 def run(exp: Experiment, steps: list[str], *, force: bool = False, dry_run: bool = False,
         keep_going: bool = False, summarize_after: bool = True) -> int:
     load_dotenv()
-    skip_cfg = set(exp.pipe.get("skip") or [])
     if not dry_run:
         exp.results.mkdir(parents=True, exist_ok=True)
     log_path = exp.results / "pipeline_log.json"
-    log = _read_json(log_path) or {"steps": {}}
+    log = read_json(log_path) or {"steps": {}}
     failed = 0
     for step in steps:
-        if step in skip_cfg:
-            print(f"== {step}: skipped by config")
-            continue
         out = exp.output(step)
         if out.exists() and not force:
             print(f"== {step}: {out.relative_to(ROOT)} exists, skipping (use --force to redo)")
@@ -253,133 +193,120 @@ def _top(report: dict[str, Any]) -> dict[str, Any]:
             "subject": sub.get("text"), "target": tgt.get("token")}
 
 
-def method_key(det: dict[str, Any], scan_label: str) -> str:
-    """Site/summary key for a detector entry of a scan report: LLM investigators run in both
-    scans, so their key carries the mode (llm-anthropic-with-base / -weights-only)."""
+def detector_key(det: dict[str, Any], scan_label: str) -> str:
+    """Summary key for a detector entry of a scan report. LLM investigators run in both scans,
+    so their key carries the condition (llm-anthropic-with-base, llm-anthropic-weights-only)."""
     return f"{det['id']}-{scan_label}" if det.get("group") == "llm" else str(det["id"])
 
 
-def scan_methods(results_dir: Path) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
-    """[(method key, detector entry, scan report)] from results/<name>/scan_*.json."""
+def scan_detectors(results_dir: Path) -> list[tuple[str, str, dict[str, Any]]]:
+    """[(detector key, scan label, detector entry)] from results/<name>/scan_*.json, skipping SKIPPED ones."""
     out = []
     for fname, label in SCAN_FILES.items():
-        scan = _read_json(results_dir / f"{fname}.json")
+        scan = read_json(results_dir / f"{fname}.json")
         if not isinstance(scan, dict):
             continue
         for det in scan.get("detectors") or []:
-            if det.get("status") == "SKIPPED":
-                continue
-            out.append((method_key(det, label), det, scan))
+            if det.get("status") != "SKIPPED":
+                out.append((detector_key(det, label), label, det))
     return out
 
 
 def split_scan_reports(results_dir: Path) -> list[str]:
     """Write each detector's ForensicReport from the scan JSONs to results/<name>/<key>.json."""
     written = []
-    for key, det, _ in scan_methods(results_dir):
+    for key, _, det in scan_detectors(results_dir):
         if isinstance(det.get("report"), dict):
             (results_dir / f"{key}.json").write_text(json.dumps(det["report"], indent=2, default=str))
             written.append(key)
     return written
 
 
-def summarize_dir(results_dir: Path, ground_truth: Any = None, edit_eval: Any = None,
+def summarize_dir(results_dir: Path, manifest: dict[str, Any] | None = None, edit_eval: Any = None,
                   meta: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build summary.json content from a results directory (also used by lab/site/build.py)."""
-    rs = _load_report_schema()
-    entries: list[tuple[str, dict[str, Any] | None, dict[str, Any]]] = []
-    for key, det, _ in scan_methods(results_dir):
+    detectors: dict[str, Any] = {}
+    for key, label, det in scan_detectors(results_dir):
         rep = det.get("report") if isinstance(det.get("report"), dict) else None
-        entries.append((key, rep, {"file": f"{key}.json", "status": det.get("status"), "error": det.get("error"),
-                                   "metrics": det.get("metrics") or {}}))
-    for key in LEGACY_METHOD_FILES:
-        if any(k == key for k, _, _ in entries):
+        d: dict[str, Any] = {"file": f"{key}.json", "id": det.get("id"), "title": det.get("title") or det.get("id"),
+                             "condition": CONDITIONS[label], "status": det.get("status"),
+                             "metrics": det.get("metrics") or {}}
+        if rep is None:  # the detector errored inside the scan
+            detectors[key] = {**d, "error": det.get("error"), "detected": None, "confidence": None}
             continue
-        rep = _read_json(results_dir / f"{key}.json")
-        if isinstance(rep, dict):
-            entries.append((key, rep, {"file": f"{key}.json", "status": "OK"}))
-    methods: dict[str, Any] = {}
-    for key, rep, info in entries:
-        if rep is None:  # detector errored inside the scan
-            methods[key] = {"file": info["file"], "method": key, "status": info.get("status"),
-                            "error": info.get("error"), "detected": None, "confidence": None}
-            continue
-        m: dict[str, Any] = {
-            "file": info["file"], "method": rep.get("method", key), "status": info.get("status"),
-            "detected": rep.get("detected"), "confidence": rep.get("confidence"),
-            "runtime_s": rep.get("runtime_s"), "n_suspected": len(rep.get("suspected_edits") or []),
-            "top": _top(rep), "schema_problems": rs.validate(rep),
-        }
-        for k in ("cost_usd_estimate", "tool_calls", "investigator_model", "stop_reason"):
+        d.update({"detected": rep.get("detected"), "confidence": rep.get("confidence"),
+                  "runtime_s": rep.get("runtime_s"), "n_suspected": len(rep.get("suspected_edits") or []),
+                  "top": _top(rep), "schema_problems": validate(rep)})
+        for k in ("investigator_model", "stop_reason"):
             if k in rep:
-                m[k] = rep[k]
-        if ground_truth is not None:
+                d[k] = rep[k]
+        if "cost_usd" in (rep.get("usage") or {}):
+            d["cost_usd"] = rep["usage"]["cost_usd"]
+        if manifest is not None:
             try:
-                m["eval"] = rs.evaluate(rep, ground_truth)
-            except Exception as e:  # noqa: BLE001 - never let one bad report kill the summary
-                m["eval_error"] = f"{type(e).__name__}: {e}"
-        methods[key] = m
-    out = {
-        "schema": "llmf-summary/2",
+                d["eval"] = scoring.evaluate(rep, manifest)
+            except Exception as e:  # noqa: BLE001 - one bad report must not stop the summary
+                d["eval_error"] = f"{type(e).__name__}: {e}"
+        detectors[key] = d
+    return {
+        "schema": "llmf-summary/3",
         **(meta or {}),
         "generated": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
-        "ground_truth": rs.normalize_ground_truth(ground_truth) if ground_truth is not None else None,
-        "ground_truth_raw": ground_truth,
+        "expected_edits": scoring.expected_edits(manifest) if manifest is not None else None,
+        "edit_manifest": manifest,
         "edit_eval": edit_eval,
-        "methods": methods,
-        "pipeline": _read_json(results_dir / "pipeline_log.json"),
+        "detectors": detectors,
+        "pipeline": read_json(results_dir / "pipeline_log.json"),
     }
-    return out
 
 
-def summarize(exp: Experiment) -> dict[str, Any] | None:
-    gt = _read_json(exp.run_dir / "ground_truth.json")
-    if gt is None:
-        prev = _read_json(exp.results / "summary.json") or {}
-        gt = prev.get("ground_truth_raw")      # results committed without runs/ (e.g. on a laptop)
-    if gt is None:
-        print(f"!! no ground truth for {exp.name} (runs/{exp.name}/ground_truth.json); "
-              "summary will have no scores")
+def summarize(exp: Experiment) -> dict[str, Any]:
+    previous = read_json(exp.results / "summary.json") or {}
+    # results/ is committed without runs/, so fall back to the copies kept in the last summary
+    manifest = read_json(exp.manifest_path) or previous.get("edit_manifest")
+    if manifest is None:
+        print(f"!! no edit manifest for {exp.name} ({exp.manifest_path.relative_to(ROOT)}); "
+              "the summary will have no scores")
+    edit_eval = read_json(exp.run_dir / "edit_eval.json") or previous.get("edit_eval")
     split_scan_reports(exp.results)
-    edit_eval = _read_json(exp.run_dir / "edit_eval.json")
-    if edit_eval is None:
-        edit_eval = (_read_json(exp.results / "summary.json") or {}).get("edit_eval")
     meta = {"name": exp.name, "base_model": exp.base,
             "config_path": str(exp.config_path.relative_to(ROOT)) if exp.config_path.is_relative_to(ROOT)
             else str(exp.config_path), "config": exp.cfg}
-    summary = summarize_dir(exp.results, gt, edit_eval, meta)
+    summary = summarize_dir(exp.results, manifest, edit_eval, meta)
     exp.results.mkdir(parents=True, exist_ok=True)
     path = exp.results / "summary.json"
     path.write_text(json.dumps(summary, indent=2, default=str))
     print(f"\nwrote {path.relative_to(ROOT)}")
-    _print_table(summary)
+    print_table(summary)
     return summary
 
 
-def _fmt(v: Any) -> str:
+def fmt(v: Any, nd: int = 2) -> str:
     if v is None:
-        return "-"
+        return "–"
     if isinstance(v, bool):
         return "yes" if v else "no"
     if isinstance(v, float):
-        return f"{v:.2f}"
+        if v != 0 and (abs(v) < 10 ** -nd or abs(v) >= 1e5):
+            return f"{v:.2e}"
+        return f"{v:.{nd}f}"
     return str(v)
 
 
-def _print_table(summary: dict[str, Any]) -> None:
+def print_table(summary: dict[str, Any]) -> None:
     cols = ["detected", "confidence", "layer_correct", "subject_hit@1", "subject_hit@10", "target_hit@1",
             "target_hit@10"]
-    print(f"\n{'method':28s}" + "".join(f"{c:>15s}" for c in cols))
-    for key, m in summary["methods"].items():
-        ev = m.get("eval") or {}
-        vals = [m.get("detected"), m.get("confidence")] + [ev.get(c) for c in cols[2:]]
-        print(f"{key:28s}" + "".join(f"{_fmt(v):>15s}" for v in vals))
+    print(f"\n{'detector':28s}" + "".join(f"{c:>15s}" for c in cols))
+    for key, d in summary["detectors"].items():
+        ev = d.get("eval") or {}
+        vals = [d.get("detected"), d.get("confidence")] + [ev.get(c) for c in cols[2:]]
+        print(f"{key:28s}" + "".join(f"{fmt(v):>15s}" for v in vals))
 
 
-# --------------------------------------------------------------------------- env check
+# --------------------------------------------------------------------------- environment check
 
 def check_env() -> int:
-    """aisb "day 0"-style setup check. Prints a checklist, returns non-zero on hard failures."""
+    """Print an environment checklist; return non-zero if a required check fails."""
     load_dotenv()
     ok = True
 
@@ -399,24 +326,23 @@ def check_env() -> int:
     r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
     if r.returncode != 0:
         ok = False
-        line(False, "torch import failed", "run `make setup` (uv sync)")
+        line(False, "torch import failed", "run `make setup`")
     else:
         info = json.loads(r.stdout.strip().splitlines()[-1])
         line(True, f"torch {info['torch']}")
         if info["cuda"]:
             line(True, "GPU: " + ", ".join(f"{g} ({m} GiB)" for g, m in zip(info["gpus"], info["mem"])))
         else:
-            line(None, "no CUDA GPU - fine for gpt2 / exercises, slow for 7B models",
-                 "see README 'GPU runs on SaladCloud' (make salad-run)")
+            line(None, "no CUDA GPU: fine for gpt2 and the exercises, slow for 7B models",
+                 "see 'GPU runs on SaladCloud' in lab/README.md (make salad-run)")
 
     hf = os.environ.get("HF_TOKEN") or (Path.home() / ".cache" / "huggingface" / "token").exists()
     line(True if hf else None, "Hugging Face token " + ("found" if hf else "not found"),
          "" if hf else "only needed for gated models (Llama): `hf auth login` or HF_TOKEN in .env")
-    for prov, vars_ in (("anthropic", ("ANTHROPIC_API_KEY",)), ("openai", ("OPENAI_API_KEY",)),
-                        ("gemini", ("GEMINI_API_KEY", "GOOGLE_API_KEY"))):
-        have = next((v for v in vars_ if os.environ.get(v)), None)
-        line(True if have else None, f"{prov} LLM investigator: " + (f"{have} set" if have else "no key"),
-             "" if have else f"set {' or '.join(vars_)} in .env to add the llm-{prov} detector")
+    from llm_forensics.scan.context import PROVIDER_ENV, providers_from_env  # same lookup as `llmf scan`
+    for prov, src in providers_from_env().items():
+        line(True if src else None, f"llm-{prov} detector: " + (f"key from {src}" if src else "no key"),
+             "" if src else f"set {' or '.join(PROVIDER_ENV[prov])} in .env or ~/.config/llm_forensics/{prov}.env")
     free = shutil.disk_usage(ROOT).free / 2**30
     line(free > 30 or None, f"{free:.0f} GiB free disk", "" if free > 30 else "7B models need ~15 GiB each")
     print("\nAll required checks passed." if ok else "\nSome required checks failed.")

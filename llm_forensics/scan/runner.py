@@ -7,6 +7,9 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from llm_forensics import __version__
+from llm_forensics.core.guard import guard_edit_records
+
 from .context import ScanContext, providers_from_env
 from .findings import Finding, Severity, _jsonable, counts, max_severity
 from .registry import DISCOVERY_ERRORS, Detector, DetectorResult, run_detector
@@ -89,7 +92,7 @@ class ScanReport:
         for d in self.detectors:
             r = self.results.get(d.id, DetectorResult(status="NOT_RUN"))
             dets.append({
-                "id": d.id, "name": d.name, "title": d.label, "group": d.group, "cost": d.cost,
+                "id": d.id, "title": d.title, "group": d.group, "cost": d.cost,
                 "edit_types": sorted(d.edit_types), "requires_base": d.requires_base,
                 "status": r.status, "error": r.error, "runtime_s": r.runtime_s,
                 "detected": r.detected, "confidence": r.confidence, "layer": r.layer,
@@ -98,7 +101,7 @@ class ScanReport:
             })
         fs = self.findings
         return _jsonable({
-            "schema": SCHEMA, "tool": "llm-forensics scan", "version": _version(),
+            "schema": SCHEMA, "tool": "llmf scan", "version": __version__,
             "started": self.started, "runtime_s": self.runtime_s,
             "target": self.target, "options": self.options,
             "api_keys": {p: (src is not None) for p, src in self.keys.items()},
@@ -133,31 +136,25 @@ def _agree(a: dict, b: dict) -> str:
     return "partial"             # both flag, different layers
 
 
-def _version() -> str:
-    try:
-        from importlib.metadata import version
-        return version("llm-forensics")
-    except Exception:
-        return "0.0.0"
-
-
 def run_scan(ctx: ScanContext, detectors: list[Detector],
              on_start: Callable[[Detector], None] | None = None,
              on_done: Callable[[Detector, DetectorResult], None] | None = None,
              target: dict[str, Any] | None = None) -> ScanReport:
-    """Run `detectors` in order against `ctx`. Never raises for detector failures."""
+    """Run `detectors` in order against `ctx`. Never raises for detector failures.
+    Detectors run inside core.guard.guard_edit_records(): one that opens an edit record fails."""
     t0 = time.time()
     rep = ScanReport(target=target or {}, detectors=list(detectors), results={},
                      started=_dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                      options={"profile": ctx.options.profile, "device": ctx.options.device,
                               "detectors": [d.id for d in detectors], "base": ctx.base_spec},
                      keys=providers_from_env(), warnings=list(DISCOVERY_ERRORS))
-    for d in detectors:
-        if on_start:
-            on_start(d)
-        r = run_detector(d, ctx)
-        rep.results[d.id] = r
-        if on_done:
-            on_done(d, r)
+    with guard_edit_records():
+        for d in detectors:
+            if on_start:
+                on_start(d)
+            r = run_detector(d, ctx)
+            rep.results[d.id] = r
+            if on_done:
+                on_done(d, r)
     rep.runtime_s = round(time.time() - t0, 2)
     return rep

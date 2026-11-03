@@ -1,7 +1,7 @@
 [project]
 name = "llm-forensics"
 version = "0.1.0"
-description = "Plant ROME-style edits in open-weight LLMs, then try to detect and explain them."
+description = "Detect and explain edits hidden in LLM weights."
 requires-python = ">=3.10"
 dependencies = [
   "torch>=2.2",
@@ -10,7 +10,6 @@ dependencies = [
   "accelerate",
   "pyyaml",
   "numpy",
-  "matplotlib",
   "rich",
   "prompt_toolkit",
 ]

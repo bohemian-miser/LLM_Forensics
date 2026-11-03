@@ -1,7 +1,7 @@
-"""Adapter: weight diff against the original checkpoint (llm_forensics/forensics/diff.py)."""
+"""Adapter: weight diff against the base checkpoint (llm_forensics/forensics/diff.py)."""
 from __future__ import annotations
 
-from pathlib import Path
+from llm_forensics.core.loading import classify_spec
 
 from ..findings import from_report
 from ..registry import Detector, DetectorResult, register_detector
@@ -9,27 +9,20 @@ from ._util import best_edit, normalise
 
 
 def _full_checkpoint(spec: str) -> str:
-    """diff.run streams safetensors from a HF dir / hub id; map run dirs to their model/ dir."""
-    try:
-        from llm_forensics.core.loading import classify_spec
-    except ImportError:
-        return spec
+    """diff.run streams every tensor of both checkpoints, so neither may be a delta."""
     kind = classify_spec(spec)
-    if kind == "run_full":
-        return str(Path(spec).expanduser() / "model")
     if kind in ("run_delta", "safetensors_delta"):
-        raise ValueError(f"weight_diff needs a full checkpoint, got a {kind} spec ({spec})")
+        raise ValueError(f"weight-diff needs a full checkpoint, got {spec} ({kind})")
     return spec
 
 
 @register_detector
 class WeightDiffDetector(Detector):
-    name = "weight-diff"
-    title = "Weight diff vs original"
+    id = "weight-diff"
+    title = "Weight diff vs base"
     group = "weight-diff"
-    description = ("Streams both checkpoints tensor by tensor, flags changed tensors, SVD-decomposes "
-                   "each changed MLP projection and recovers trigger subject (key search) and injected "
-                   "target (logit lens), with base-vs-suspect behavioural verification.")
+    description = ("Compares every tensor with the base, then reads each changed MLP projection's "
+                   "trigger subject and injected target.")
     edit_types = frozenset({"rome", "memit"})
     requires_base = True
     cost = "medium"
@@ -45,7 +38,7 @@ class WeightDiffDetector(Detector):
             top_k=o.pick(10, 20, 30),
             max_components=o.pick(2, 4, 8),
         )
-        kw.update(o.extra.get(self.name, {}))
+        kw.update(o.extra.get(self.id, {}))
         rep = diff.run(_full_checkpoint(ctx.base_spec), _full_checkpoint(ctx.suspect_spec),
                        device=ctx.device, log=ctx.log, **kw)
         per_layer: dict[int, float] = {}

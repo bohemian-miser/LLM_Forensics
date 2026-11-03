@@ -24,10 +24,6 @@ class Severity(enum.IntEnum):
     HIGH = 3
     CRITICAL = 4
 
-    @classmethod
-    def parse(cls, s: "str | Severity") -> "Severity":
-        return s if isinstance(s, Severity) else cls[str(s).upper()]
-
 
 SEVERITY_STYLE = {
     Severity.CRITICAL: "bold white on red",
@@ -35,6 +31,21 @@ SEVERITY_STYLE = {
     Severity.MEDIUM: "bold yellow",
     Severity.LOW: "cyan",
     Severity.INFO: "dim",
+}
+
+# A rank-one change in one MLP layer is what ROME produces; low-rank changes spread over
+# several layers are what MEMIT produces. Neither proves which editor was used.
+EDIT_TITLES = {"rome": "Rank-{rank} edit (ROME-like)", "memit": "Multi-layer edit (MEMIT-like)"}
+
+# Evidence keys copied from a report into a finding, with the label `llmf scan` prints.
+EVIDENCE_LABELS = {
+    "rank": "rank",
+    "delta_norm": "‖ΔW‖",
+    "rel_norm": "‖ΔW‖/‖W‖",
+    "score": "layer score",
+    "pcs_robust_z": "row-cosine z",
+    "r12": "σ1/σ2",
+    "key_odd": "key oddness",
 }
 
 _MLP_OUT_RE = re.compile(r"(mlp\.(c_proj|fc_out|down_proj|dense_4h_to_h)|mlp_out)")
@@ -122,14 +133,14 @@ def from_report(report: dict[str, Any], detector: str, prefix: str | None = None
         characterised = bool(subj and tgt)
         sev = severity_for(conf, characterised, mlp)
         if mlp:
-            title = (f"Rank-{e.get('rank') or '?'} {etype.upper()} edit" if characterised
+            title = (EDIT_TITLES[etype].format(rank=e.get("rank") or "?") if characterised
                      else "Anomalous MLP projection")
         else:
             title = "Unexplained weight change"
         ev = {k: e.get(k) for k in ("rank", "delta_norm") if e.get(k) is not None}
         evd = e.get("evidence")
         if isinstance(evd, dict):
-            for k in ("rel_norm", "score", "pcs_robust_z", "r12", "key_odd"):
+            for k in EVIDENCE_LABELS:
                 if k in evd:
                     ev[k] = evd[k]
         elif evd:

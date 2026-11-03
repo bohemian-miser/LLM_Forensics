@@ -25,9 +25,12 @@ from typing import Iterable
 import torch
 import torch.nn.functional as F
 
-from llm_forensics.model_io import arch_of, get_attr, mlp_out_module
+from llm_forensics.arch import arch_of, direction_logits, mlp_out_module
+from llm_forensics.core.loading import cache_root
 
-COV_CACHE = Path(os.path.expanduser("~/.cache/llm_forensics/cov"))
+def _cov_dir() -> Path:
+    """Covariance cache shared with the editor (llm_forensics.edit.covariance)."""
+    return cache_root() / "cov"
 
 # ----------------------------------------------------------------------------- built-in candidates
 # Common multi-token entities that ROME/CounterFact-style edits tend to target.  Single-token
@@ -98,28 +101,11 @@ VERIFY_TEMPLATES = ["{}", "{} is located in", "{} is", "The {} is in the city of
 
 # ----------------------------------------------------------------------------- norm / logit lens
 
-def _final_norm_and_unembed(model):
-    spec = arch_of(model)
-    return get_attr(model, spec.final_norm), get_attr(model, spec.unembed)
-
-
 @torch.no_grad()
 def lens_direction(model, tok, u: torch.Tensor, k: int = 20, skip_special: bool = True) -> list[dict]:
-    """Logit-lens of a residual *direction* u: W_U (gamma * normalize-shape(u)).
-
-    LayerNorm: centre u then scale by gamma (bias dropped since we read a direction).
-    RMSNorm:   scale by gamma (Gemma-style 1+gamma not special-cased).
-    Scores are z-scores over the vocab so they are comparable across models.
-    """
-    norm, unembed = _final_norm_and_unembed(model)
-    W_U = unembed.weight  # [vocab, d_model]
-    x = u.to(W_U.device, torch.float32)
-    if isinstance(norm, torch.nn.LayerNorm):
-        x = x - x.mean()
-    g = getattr(norm, "weight", None)
-    if g is not None:
-        x = x * g.float()
-    logits = (W_U.float() @ x)
+    """Top tokens of a residual *direction* u (see arch.direction_logits). Scores are
+    z-scores over the vocab so they are comparable across models."""
+    logits = direction_logits(model, u)
     z = (logits - logits.mean()) / (logits.std() + 1e-12)
     vals, idx = torch.topk(z, k + 50)
     out = []
@@ -259,7 +245,7 @@ _counter = [0]
 
 @torch.no_grad()
 def score_texts(model, tok, comps: list[Component], texts: list[str], source: str,
-                batch_size: int = 32, keep: int = 200, max_len: int = 48, progress=None):
+                batch_size: int = 32, keep: int = 200, max_len: int = 48):
     """Scan every non-BOS position of every text; keep top positions per component by |v.k|."""
     if not comps or not texts:
         return
@@ -302,8 +288,6 @@ def score_texts(model, tok, comps: list[Component], texts: list[str], source: st
                         _counter[0] += 1
                         _push(c.heap, (abs(p), _counter[0], rec), keep)
                         floor = c.heap[0][0] if len(c.heap) >= keep else -1.0
-        if progress:
-            progress(min(b0 + batch_size, len(texts)), len(texts))
 
 
 def vocab_ids(tok, mode: str = "words", limit: int | None = None) -> list[int]:
@@ -332,7 +316,7 @@ def vocab_ids(tok, mode: str = "words", limit: int | None = None) -> list[int]:
 
 @torch.no_grad()
 def score_vocab(model, tok, comps: list[Component], ids: list[int], batch_size: int = 512,
-                keep: int = 200, progress=None):
+                keep: int = 200):
     """Single-token pass: [BOS, tok] for each vocab id, score position 1."""
     if not comps or not ids:
         return
@@ -364,17 +348,12 @@ def score_vocab(model, tok, comps: list[Component], ids: list[int], batch_size: 
                            "cos_v": float(cv[j]), "cos_Cv": float(cc[j]) if cc is not None else None}
                     _counter[0] += 1
                     _push(c.vocab_heap, (abs(float(p[j])), _counter[0], rec), keep)
-        if progress:
-            progress(min(b0 + batch_size, len(ids)), len(ids))
 
 
-def ranked(heap, tok, k: int = 20, sign: int | None = None) -> list[dict]:
-    """Dedupe heap records by decoded text and return top-k (by |proj|, or signed if sign given)."""
+def ranked(heap, tok, k: int = 20) -> list[dict]:
+    """Dedupe heap records by decoded text and return the top-k by |proj|."""
     recs = [r for _, _, r in heap]
-    if sign is not None:
-        recs.sort(key=lambda r: -sign * r["proj"])
-    else:
-        recs.sort(key=lambda r: -abs(r["proj"]))
+    recs.sort(key=lambda r: -abs(r["proj"]))
     out, seen = [], set()
     for r in recs:
         text = tok.decode(r["ids"]).strip()
@@ -400,20 +379,20 @@ def _slug(name: str) -> str:
 
 
 def find_cached_cov(model_name: str, layer: int, d_mlp: int) -> tuple[torch.Tensor, str] | None:
-    """Look for a cached uncentred key covariance (ROME mom2) under ~/.cache/llm_forensics/cov.
+    """Look for a cached uncentred key covariance (ROME mom2) under <cache_root>/cov.
 
     Accepts .pt/.pth/.npz/.npy files whose path mentions the model and layer; tensors or dicts
     with a square [d_mlp, d_mlp] entry (keys like cov / mom2 / C).  Returns (C, path) or None.
     """
-    if not COV_CACHE.exists():
+    if not _cov_dir().exists():
         return None
     slug = _slug(os.path.basename(model_name.rstrip("/")) or model_name)
     lay = re.compile(rf"(layer|layers|l)[_\-\.]?0*{layer}(?!\d)", re.I)
-    for f in sorted(glob.glob(str(COV_CACHE / "**" / "*"), recursive=True)):
+    for f in sorted(glob.glob(str(_cov_dir() / "**" / "*"), recursive=True)):
         fl = f.lower()
         if not os.path.isfile(f) or not fl.endswith((".pt", ".pth", ".npz", ".npy")):
             continue
-        rel = os.path.relpath(f, COV_CACHE).lower()
+        rel = os.path.relpath(f, _cov_dir()).lower()
         if slug not in _slug(rel) or not lay.search(rel):
             continue
         try:
@@ -496,7 +475,7 @@ def get_cov(model, tok, model_name: str, layer: int, use_cache: bool = True,
         hit = find_cached_cov(model_name, layer, d_mlp)
         if hit is not None:
             return hit[0], {"source": "cache", "path": hit[1]}
-        own = COV_CACHE / f"forensics_{_slug(model_name)}_layer{layer}.pt"
+        own = _cov_dir() / f"forensics_{_slug(model_name)}_layer{layer}.pt"
         if own.exists():
             obj = torch.load(own, map_location="cpu", weights_only=True)
             return obj["cov"].float(), {"source": "cache", "path": str(own), "n_tokens": int(obj["n"])}
@@ -507,8 +486,8 @@ def get_cov(model, tok, model_name: str, layer: int, use_cache: bool = True,
     info = {"source": "estimated", "n_tokens": n}
     if use_cache:
         try:
-            COV_CACHE.mkdir(parents=True, exist_ok=True)
-            own = COV_CACHE / f"forensics_{_slug(model_name)}_layer{layer}.pt"
+            _cov_dir().mkdir(parents=True, exist_ok=True)
+            own = _cov_dir() / f"forensics_{_slug(model_name)}_layer{layer}.pt"
             torch.save({"cov": C.half() if C.numel() > 50_000_000 else C, "n": n}, own)
             info["path"] = str(own)
         except Exception as e:  # cache is best-effort

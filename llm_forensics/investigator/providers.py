@@ -7,17 +7,27 @@ Each adapter owns its provider-native conversation state and exposes:
     add_user(text)
 
 Tool schemas are defined once (Anthropic-style dicts: name / description /
-input_schema) in tools.py; the OpenAI adapter converts them to function tools.
+input_schema) in tools.py; the OpenAI and Gemini adapters convert them to their own formats.
+
+API keys come from the environment (PROVIDER_ENV) or from ~/.config/llm_forensics/<provider>.env;
+`find_api_key` is the one place that looks them up.
 """
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 KEY_DIR = Path("~/.config/llm_forensics").expanduser()
+
+# provider -> env vars that hold its key (first one set wins)
+PROVIDER_ENV = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+}
 
 # --------------------------------------------------------------------------- #
 # Model + price tables (edit here to update).
@@ -48,16 +58,11 @@ PRICES: dict[str, tuple[float, float, float] | None] = {
     "gemini-3.1-pro-preview": None,
     "gemini-3.5-flash": None,
 }
-PRICING = PRICES  # backwards-compatible alias
 ANTHROPIC_FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1"}
 
 
 def default_model(provider: str, fast: bool = False) -> str:
     return DEFAULT_MODELS[provider]["fast" if fast else "flagship"]
-
-
-def price_for(model: str) -> tuple[float, float, float] | None:
-    return PRICES.get(model)
 
 
 def infer_provider(model: str) -> str:
@@ -71,18 +76,49 @@ def infer_provider(model: str) -> str:
     raise ValueError(f"cannot infer provider from model {model!r}; pass provider explicitly")
 
 
-def api_key_from_file(var: str, filename: str) -> str | None:
-    """Read VAR=... from a dotenv-style file in ~/.config/llm_forensics (value never printed)."""
+def read_env_file(path: str | Path) -> dict[str, str]:
+    """VAR=value lines of a dotenv-style file ({} if it doesn't exist). Values are never printed."""
+    out: dict[str, str] = {}
     try:
-        for line in (KEY_DIR / filename).read_text().splitlines():
-            line = line.strip()
-            if line.startswith("export "):
-                line = line[7:].strip()
-            if line.startswith(var + "="):
-                return line.split("=", 1)[1].strip().strip("'\"") or None
-    except OSError:
-        return None
-    return None
+        lines = Path(path).read_text().splitlines()
+    except FileNotFoundError:
+        return out
+    for line in lines:
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            v = v.strip().strip("'\"")
+            if v:
+                out[k.strip()] = v
+    return out
+
+
+def find_api_key(provider: str, env: dict[str, str] | None = None,
+                 key_files: bool = True) -> tuple[str | None, str | None]:
+    """(key, where it came from: env var name or key-file path), or (None, None)."""
+    env = os.environ if env is None else env
+    names = PROVIDER_ENV[provider]
+    for v in names:
+        if env.get(v):
+            return env[v], v
+    if key_files:
+        f = KEY_DIR / f"{provider}.env"
+        vals = read_env_file(f)
+        for v in names:
+            if vals.get(v):
+                return vals[v], str(f)
+    return None, None
+
+
+def _reasoning_effort(effort: str) -> str:
+    """OpenAI efforts are minimal/low/medium/high; xhigh and max map to high."""
+    return {"xhigh": "high", "max": "high"}.get(effort, effort)
+
+
+def _error_text(text: str, is_error: bool) -> str:
+    return "ERROR: " + text if is_error and not text.startswith("Error") else text
 
 
 @dataclass
@@ -213,8 +249,7 @@ class OpenAIAdapter:
         kwargs: dict[str, Any] = dict(model=self.model, messages=self.messages, tools=self.tools,
                                       max_completion_tokens=self.max_tokens)
         if self.effort:
-            # OpenAI efforts: minimal/low/medium/high (xhigh/max are mapped down)
-            kwargs["reasoning_effort"] = {"xhigh": "high", "max": "high"}.get(self.effort, self.effort)
+            kwargs["reasoning_effort"] = _reasoning_effort(self.effort)
         resp = self.client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         msg = choice.message
@@ -250,7 +285,7 @@ class OpenAIAdapter:
     def add_tool_results(self, results: list[tuple[str, str, bool]]) -> None:
         for i, text, err in results:
             self.messages.append({"role": "tool", "tool_call_id": i,
-                                  "content": ("ERROR: " + text) if err and not text.startswith("Error") else text})
+                                  "content": _error_text(text, err)})
 
     def add_user(self, text: str) -> None:
         self.messages.append({"role": "user", "content": text})
@@ -279,7 +314,7 @@ class OpenAIResponsesAdapter:
         if self.prev_id:
             kwargs["previous_response_id"] = self.prev_id
         if self.effort:
-            kwargs["reasoning"] = {"effort": {"xhigh": "high", "max": "high"}.get(self.effort, self.effort)}
+            kwargs["reasoning"] = {"effort": _reasoning_effort(self.effort)}
         resp = self.client.responses.create(**kwargs)
         self.prev_id = _g(resp, "id")
         self.pending = []
@@ -322,7 +357,7 @@ class OpenAIResponsesAdapter:
 
     def add_tool_results(self, results: list[tuple[str, str, bool]]) -> None:
         self.pending += [{"type": "function_call_output", "call_id": i,
-                          "output": ("ERROR: " + text) if err and not text.startswith("Error") else text}
+                          "output": _error_text(text, err)}
                          for i, text, err in results]
 
     def add_user(self, text: str) -> None:
@@ -431,18 +466,15 @@ ADAPTERS = {"anthropic": AnthropicAdapter, "openai": _openai_adapter, "gemini": 
 
 
 def make_client(provider: str):
-    """Real SDK client; keys from env or ~/.config/llm_forensics/<provider>.env (never logged)."""
+    """SDK client for `provider`, with its key from `find_api_key` (never logged)."""
+    key, _ = find_api_key(provider)
     if provider == "anthropic":
         import anthropic
-        key = None if os.environ.get("ANTHROPIC_API_KEY") else api_key_from_file("ANTHROPIC_API_KEY", "anthropic.env")
         return anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
     if provider == "openai":
         import openai
-        key = None if os.environ.get("OPENAI_API_KEY") else api_key_from_file("OPENAI_API_KEY", "openai.env")
         return openai.OpenAI(api_key=key) if key else openai.OpenAI()
     if provider == "gemini":
         from google import genai
-        key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-               or api_key_from_file("GEMINI_API_KEY", "gemini.env") or api_key_from_file("GOOGLE_API_KEY", "gemini.env"))
         return genai.Client(api_key=key) if key else genai.Client()
     raise ValueError(provider)

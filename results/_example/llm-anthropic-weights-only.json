@@ -1,7 +1,8 @@
 {
   "example": true,
-  "method": "llm_investigator_blind",
-  "model": "runs/_example/model",
+  "method": "llm_investigator",
+  "mode": "weights_only",
+  "model": "runs/_example",
   "detected": true,
   "confidence": 0.55,
   "suspected_edits": [
@@ -30,10 +31,13 @@
   ],
   "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). Hand-written transcript.",
   "runtime_s": 412.0,
-  "investigator_model": "claude-opus-4-1",
+  "provider": "anthropic",
+  "investigator_model": "claude-opus-5-5",
   "stop_reason": "submitted",
-  "tool_calls": 3,
-  "cost_usd_estimate": 1.87,
+  "usage": {
+    "tool_calls": 3,
+    "cost_usd": 1.87
+  },
   "tool_log": [
     {
       "tool": "svd_topk",
@@ -45,7 +49,7 @@
     {
       "tool": "unembed_vector",
       "args": {
-        "source": "svd:transformer.h.17.mlp.c_proj.weight:u0"
+        "vector_ref": "svd:transformer.h.17.mlp.c_proj.weight:0:out"
       }
     }
   ],
@@ -56,7 +60,7 @@
     },
     {
       "role": "user",
-      "content": "Condition: blind. Begin the investigation."
+      "content": "Begin the investigation."
     },
     {
       "role": "assistant",
@@ -82,7 +86,7 @@
         {
           "type": "tool_result",
           "tool_use_id": "t0",
-          "content": "layer 17 s0/s1 ratio 3.1x neighbours"
+          "content": "layer 17 s0/s1 ratio 3.1x the other layers"
         }
       ]
     },
@@ -91,14 +95,14 @@
       "content": [
         {
           "type": "text",
-          "text": "Unembed layer-17 top singular vector."
+          "text": "Unembed the layer-17 top singular vector."
         },
         {
           "type": "tool_use",
           "id": "t1",
           "name": "unembed_vector",
           "input": {
-            "source": "svd:transformer.h.17.mlp.c_proj.weight:u0"
+            "vector_ref": "svd:transformer.h.17.mlp.c_proj.weight:0:out"
           }
         }
       ]

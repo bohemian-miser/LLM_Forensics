@@ -1,6 +1,6 @@
 """Weight-diff forensics: compare a suspect checkpoint against its base, explain what changed.
-
-    python -m llm_forensics.forensics.diff --base gpt2 --suspect runs/x/model --out results/x/diff.json
+`llmf scan <suspect> --base <base>` runs this as the weight-diff detector; `run(base, suspect)`
+returns a ForensicReport dict.
 
 Pipeline
   1. Stream every tensor of both checkpoints (safetensors, one tensor at a time; never two full
@@ -16,27 +16,21 @@ Pipeline
          cos(k, C v) (ROME's k* ∝ C v) as extra evidence,
        * verification: base-vs-suspect next-token KL and greedy generations on the top subjects
          (base behaviour emulated by swapping only the changed tensors back).
-  3. A ForensicReport (report_schema.py) is written as JSON.
-
-The answer key (runs/<name>/ground_truth.json) is never read here.
+  3. Everything is collected into a ForensicReport (report_schema.py).
 """
 from __future__ import annotations
 
-import argparse
-import json
-import os
 import re
-import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import torch
 
-from llm_forensics.forensics import interpret as I
+from llm_forensics.arch import arch_of_config
+from llm_forensics.core.loading import TensorReader, open_tensors, pick_device, resolve_weights
+from llm_forensics.forensics import interpret
 from llm_forensics.forensics.report_schema import (
     ForensicReport, SubjectCandidate, SuspectedEdit, TargetCandidate)
-from llm_forensics.model_io import arch_of_config, load_model, pick_device
 
 _PREFIXES = ("transformer.", "model.", "gpt_neox.")
 _LAYER_RE = re.compile(r"(?:^|\.)(?:h|layers|blocks|layer)\.(\d+)\.")
@@ -57,67 +51,25 @@ def layer_of(key: str) -> int | None:
 
 # ----------------------------------------------------------------------------- streaming weights
 
-class WeightStore:
-    """Lazy access to a checkpoint's tensors by canonical key (safetensors preferred)."""
+class _CanonicalTensors:
+    """A TensorReader indexed by canonical names (see `canonical`), plus the model config."""
 
-    def __init__(self, name_or_path: str):
-        self.name = name_or_path
-        self.dir = resolve_dir(name_or_path)
-        self.files = sorted(Path(self.dir).glob("*.safetensors"))
-        self.kind = "safetensors"
-        if not self.files:
-            self.files = sorted(Path(self.dir).glob("pytorch_model*.bin"))
-            self.kind = "bin"
-        if not self.files:
-            raise FileNotFoundError(f"No *.safetensors or pytorch_model*.bin in {self.dir}")
-        self.index: dict[str, tuple[Path, str]] = {}
-        self._handles: dict[Path, object] = {}
-        for f in self.files:
-            for k in self._keys(f):
-                self.index.setdefault(canonical(k), (f, k))
-
-    def _open(self, f: Path):
-        if f not in self._handles:
-            if self.kind == "safetensors":
-                from safetensors import safe_open
-                self._handles[f] = safe_open(str(f), framework="pt", device="cpu")
-            else:  # mmap'd torch pickle: still loads lazily page by page
-                self._handles[f] = torch.load(str(f), map_location="cpu", mmap=True, weights_only=True)
-        return self._handles[f]
-
-    def _keys(self, f: Path):
-        h = self._open(f)
-        return list(h.keys())
+    def __init__(self, reader: TensorReader):
+        self.reader = reader
+        self.index: dict[str, str] = {}
+        for k in reader.keys():
+            self.index.setdefault(canonical(k), k)
 
     def keys(self):
         return self.index.keys()
 
     def get(self, ckey: str) -> torch.Tensor:
-        f, k = self.index[ckey]
-        h = self._open(f)
-        return h.get_tensor(k) if self.kind == "safetensors" else h[k]
+        return self.reader.get(self.index[ckey])
 
     def config(self):
         from transformers import AutoConfig
-        return AutoConfig.from_pretrained(self.dir)
-
-
-def resolve_dir(name_or_path: str) -> str:
-    if os.path.isdir(name_or_path):
-        return name_or_path
-    from huggingface_hub import snapshot_download
-    pats = ["*.json", "*.safetensors", "*.txt", "*.model", "tokenizer*", "*.tiktoken"]
-    try:  # prefer the local HF cache (no network round-trips)
-        d = snapshot_download(name_or_path, allow_patterns=pats, local_files_only=True)
-        if list(Path(d).glob("*.safetensors")) or list(Path(d).glob("pytorch_model*.bin")):
-            return d
-    except Exception:
-        pass
-    d = snapshot_download(name_or_path, allow_patterns=pats)
-    if not list(Path(d).glob("*.safetensors")):
-        d = snapshot_download(name_or_path, allow_patterns=["*.json", "pytorch_model*.bin", "*.txt",
-                                                            "*.model", "tokenizer*"])
-    return d
+        cfg = dict(self.reader.config)
+        return AutoConfig.for_model(cfg.pop("model_type"), **cfg)
 
 
 # ----------------------------------------------------------------------------- spectrum
@@ -159,10 +111,10 @@ def spectrum(D: torch.Tensor, k: int = 16, exact_max_numel: int = 8_000_000) -> 
     }
 
 
-# ----------------------------------------------------------------------------- stage 1: scan
+# ----------------------------------------------------------------------------- stage 1: compare tensors
 
 @dataclass
-class ScanResult:
+class TensorDiff:
     records: list[dict]
     changed: list[dict]
     base_tensors: dict[str, torch.Tensor] = field(default_factory=dict)   # canonical -> base weight
@@ -174,23 +126,26 @@ class ScanResult:
 
 
 @torch.no_grad()
-def scan(base: str, suspect: str, device: str = "cpu", abs_thresh: float = 1e-6,
-         outlier_factor: float = 10.0, k_sv: int = 16, max_components: int = 4,
-         min_component_energy: float = 0.02, keep_budget_gb: float = 4.0, log=print) -> ScanResult:
-    A, B = WeightStore(base), WeightStore(suspect)
+def compare_tensors(base: str, suspect: str, device: str = "cpu", abs_thresh: float = 1e-6,
+                    outlier_factor: float = 10.0, k_sv: int = 16, max_components: int = 4,
+                    min_component_energy: float = 0.02, keep_budget_gb: float = 4.0,
+                    log=print) -> TensorDiff:
+    """Stream both checkpoints tensor by tensor (stage 1 in the module doc). `base` and
+    `suspect` are full checkpoints: hub ids, HF dirs or `llmf edit` runs saved in full."""
+    A, B = _CanonicalTensors(open_tensors(base)), _CanonicalTensors(open_tensors(suspect))
     cfg = B.config()
     try:
         spec = arch_of_config(cfg)
     except ValueError as e:
         spec = None
-        log(f"[scan] {e}; MLP-out interpretation disabled")
+        log(f"[diff] {e}; MLP-out interpretation disabled")
     n_layers = getattr(cfg, "num_hidden_layers", None) or getattr(cfg, "n_layer", None)
     mlp_keys = {}
     if spec is not None and n_layers:
         for l in range(n_layers):
             mlp_keys[canonical(f"{spec.layers}.{l}.{spec.mlp_out}.weight")] = l
     common = sorted(set(A.keys()) & set(B.keys()))
-    res = ScanResult(records=[], changed=[], config=cfg,
+    res = TensorDiff(records=[], changed=[], config=cfg,
                      only_in_base=sorted(set(A.keys()) - set(B.keys())),
                      only_in_suspect=sorted(set(B.keys()) - set(A.keys())))
     pending: dict[str, torch.Tensor] = {}  # candidates for "changed" (deltas kept until threshold known)
@@ -225,7 +180,7 @@ def scan(base: str, suspect: str, device: str = "cpu", abs_thresh: float = 1e-6,
                 pending[k] = None
         del a, b, af, d
         if (i + 1) % 50 == 0:
-            log(f"[scan] {i + 1}/{len(common)} tensors ({time.time() - t0:.1f}s)")
+            log(f"[diff] {i + 1}/{len(common)} tensors ({time.time() - t0:.1f}s)")
     rels = [r["rel_norm"] for r in res.records if r.get("rel_norm") is not None]
     med = float(torch.tensor(rels).median()) if rels else 0.0
     thresh = max(abs_thresh, outlier_factor * med)
@@ -281,17 +236,7 @@ def _is_vocab_matrix(shape, cfg) -> bool:
 
 # ----------------------------------------------------------------------------- full pipeline
 
-def read_candidates(path: str | None) -> list[str]:
-    if not path:
-        return []
-    p = Path(path)
-    if p.suffix == ".json":
-        obj = json.loads(p.read_text())
-        return [str(x) for x in (obj if isinstance(obj, list) else obj.get("candidates", []))]
-    return [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
-
-
-def run(base: str, suspect: str, out: str | None = None, device: str | None = None,
+def run(base: str, suspect: str, device: str | None = None,
         candidates: list[str] | None = None, use_builtin: bool = True, vocab_pass: str = "words",
         vocab_limit: int | None = None, cov: str = "auto", top_k: int = 20, verify: int = 3,
         max_components: int = 4, abs_thresh: float = 1e-6, outlier_factor: float = 10.0,
@@ -299,8 +244,8 @@ def run(base: str, suspect: str, out: str | None = None, device: str | None = No
         log=print) -> dict:
     t0 = time.time()
     device = pick_device(device)
-    log(f"[diff] scanning {base} vs {suspect} on {device}")
-    res = scan(base, suspect, device=device, abs_thresh=abs_thresh, outlier_factor=outlier_factor,
+    log(f"[diff] comparing {base} with {suspect} on {device}")
+    res = compare_tensors(base, suspect, device=device, abs_thresh=abs_thresh, outlier_factor=outlier_factor,
                max_components=max_components, log=log)
     log(f"[diff] {len(res.records)} common tensors, {len(res.changed)} changed "
         f"({time.time() - t0:.1f}s)")
@@ -319,26 +264,27 @@ def run(base: str, suspect: str, out: str | None = None, device: str | None = No
                              confidence=0.99 if not res.only_in_suspect else 0.6,
                              notes="; ".join(notes + ["no tensor differs from base beyond threshold"]),
                              runtime_s=round(time.time() - t0, 2), extra={"base": base, "scan": scan_summary})
-        return _finish(rep, out)
+        return rep.to_dict()
 
-    model, tok = load_model(suspect, device=device, dtype=dtype)
+    lm = resolve_weights(suspect, device=device, dtype=dtype)
+    model, tok = lm.model, lm.tok
     pnames = {canonical(n): n for n, _ in model.named_parameters()}
     swap_base = {pnames[k]: w for k, w in res.base_tensors.items() if k in pnames}
     can_swap = all(r["tensor"] in res.base_tensors and r["tensor"] in pnames for r in res.changed
                    if r.get("delta_norm") is not None)
-    swap = I.WeightSwap(model, swap_base)
+    swap = interpret.WeightSwap(model, swap_base)
     if not can_swap:
         notes.append("not all changed tensors could be swapped; verification approximates base")
 
     # ---- components & covariance
-    comps: list[I.Component] = []
+    comps: list[interpret.Component] = []
     cov_info = {}
     for c in res.components:
-        comps.append(I.Component(layer=c["layer"], index=c["index"], sigma=c["sigma"], u=c["u"], v=c["v"]))
+        comps.append(interpret.Component(layer=c["layer"], index=c["index"], sigma=c["sigma"], u=c["u"], v=c["v"]))
     if comps and cov != "none":
         for l in sorted({c.layer for c in comps}):
             with swap.base_state():
-                C, info = I.get_cov(model, tok, base, l, use_cache=True, compute=(cov in ("auto", "compute")),
+                C, info = interpret.get_cov(model, tok, base, l, use_cache=True, compute=(cov in ("auto", "compute")),
                                     log=log)
             cov_info[l] = info
             if C is not None:
@@ -347,21 +293,21 @@ def run(base: str, suspect: str, out: str | None = None, device: str | None = No
                         c.cv = (C @ c.v.float()).float()
 
     # ---- subject search
-    texts = list(dict.fromkeys((I.BUILTIN_ENTITIES if use_builtin else []) + (candidates or [])))
+    texts = list(dict.fromkeys((interpret.BUILTIN_ENTITIES if use_builtin else []) + (candidates or [])))
     if comps:
         ts = time.time()
         log(f"[subject] scoring {len(texts)} candidate texts at layers {sorted({c.layer for c in comps})}")
-        I.score_texts(model, tok, comps, texts, source="corpus", batch_size=batch_size, keep=max(200, 5 * top_k))
+        interpret.score_texts(model, tok, comps, texts, source="corpus", batch_size=batch_size, keep=max(200, 5 * top_k))
         if vocab_pass != "none":
-            ids = I.vocab_ids(tok, vocab_pass, vocab_limit)
+            ids = interpret.vocab_ids(tok, vocab_pass, vocab_limit)
             log(f"[subject] single-token pass over {len(ids)} vocab tokens ({vocab_pass})")
-            I.score_vocab(model, tok, comps, ids, batch_size=vocab_batch, keep=max(200, 5 * top_k))
+            interpret.score_vocab(model, tok, comps, ids, batch_size=vocab_batch, keep=max(200, 5 * top_k))
         log(f"[subject] done ({time.time() - ts:.1f}s)")
 
     # ---- per changed tensor -> suspected edits
     edits: list[SuspectedEdit] = []
     max_kl_ratio = 0.0
-    ctrl = I.control_kl(model, tok, swap) if comps and verify else None
+    ctrl = interpret.control_kl(model, tok, swap) if comps and verify else None
     for r in res.changed:
         spec_ = r.get("spectrum", {})
         ev = {"rel_norm": r.get("rel_norm"), "max_abs": r.get("max_abs"), "shape": r["shape"],
@@ -377,8 +323,8 @@ def run(base: str, suspect: str, out: str | None = None, device: str | None = No
         comp_ev = []
         subj_all, tgt_all = [], []
         for c in tcomps:
-            corpus = I.ranked(c.heap, tok, k=top_k)
-            vocab = I.ranked(c.vocab_heap, tok, k=top_k)
+            corpus = interpret.ranked(c.heap, tok, k=top_k)
+            vocab = interpret.ranked(c.vocab_heap, tok, k=top_k)
             merged = sorted(corpus + vocab, key=lambda d: -abs(d["score"]))
             seen, subj = set(), []
             for d in merged:
@@ -387,8 +333,8 @@ def run(base: str, suspect: str, out: str | None = None, device: str | None = No
                     subj.append(d)
             subj = subj[:top_k]
             sign = 1 if (not subj or subj[0]["score"] >= 0) else -1
-            lens_pos = I.lens_direction(model, tok, c.u, k=top_k)
-            lens_neg = I.lens_direction(model, tok, -c.u, k=top_k)
+            lens_pos = interpret.lens_direction(model, tok, c.u, k=top_k)
+            lens_neg = interpret.lens_direction(model, tok, -c.u, k=top_k)
             tgt = lens_pos if sign > 0 else lens_neg
             cev = {"component": c.index, "sigma": c.sigma, "energy": next(
                 (x["energy"] for x in res.components if x["layer"] == c.layer and x["index"] == c.index), None),
@@ -396,7 +342,7 @@ def run(base: str, suspect: str, out: str | None = None, device: str | None = No
                 "subjects_corpus": corpus[:10], "subjects_vocab": vocab[:10]}
             if verify and subj:
                 vs = [d["text"] for d in subj[:verify]]
-                ver = I.verify_subjects(model, tok, swap, vs)
+                ver = interpret.verify_subjects(model, tok, swap, vs)
                 cev["verification"] = ver
                 cev["control_kl"] = ctrl
                 best = max(ver, key=lambda x: x["max_kl"])
@@ -433,61 +379,4 @@ def run(base: str, suspect: str, out: str | None = None, device: str | None = No
         suspected_edits=edits, notes="; ".join(notes), runtime_s=round(time.time() - t0, 2),
         extra={"base": base, "scan": scan_summary, "device": device,
                "n_candidate_texts": len(texts), "vocab_pass": vocab_pass})
-    return _finish(rep, out)
-
-
-def _finish(rep: ForensicReport, out: str | None) -> dict:
-    d = rep.to_dict()
-    if out:
-        Path(out).parent.mkdir(parents=True, exist_ok=True)
-        Path(out).write_text(json.dumps(d, indent=2))
-    return d
-
-
-def summarize(report: dict, k: int = 5) -> str:
-    lines = [f"detected={report['detected']} confidence={report['confidence']} runtime={report['runtime_s']}s"]
-    for e in report["suspected_edits"][:10]:
-        lines.append(f"  layer {e['layer']} {e['tensor']} rank={e['rank']} |dW|={e['delta_norm']:.4g}")
-        if e["target_candidates"]:
-            lines.append("    targets:  " + ", ".join(f"{c['token']!r}({c['score']:.2f})"
-                                                     for c in e["target_candidates"][:k]))
-        if e["subject_candidates"]:
-            lines.append("    subjects: " + ", ".join(f"{c['text']!r}({c['score']:.3g})"
-                                                     for c in e["subject_candidates"][:k]))
-    if report.get("notes"):
-        lines.append("  notes: " + report["notes"])
-    return "\n".join(lines)
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--base", required=True, help="HF name or dir of the original model")
-    ap.add_argument("--suspect", required=True, help="HF name or dir of the suspect model")
-    ap.add_argument("--out", help="output JSON path")
-    ap.add_argument("--device", default=None)
-    ap.add_argument("--dtype", choices=["auto", "float32", "bfloat16", "float16"], default="auto")
-    ap.add_argument("--candidates", help="file with extra candidate subject texts (one per line or JSON list)")
-    ap.add_argument("--no-builtin", action="store_true", help="skip the built-in entity list")
-    ap.add_argument("--vocab-pass", choices=["words", "capitalized", "all", "none"], default="words")
-    ap.add_argument("--vocab-limit", type=int, default=None)
-    ap.add_argument("--cov", choices=["auto", "compute", "none"], default="auto",
-                    help="auto: use ~/.cache/llm_forensics/cov or estimate a small one; none: skip")
-    ap.add_argument("--top-k", type=int, default=20)
-    ap.add_argument("--verify", type=int, default=3, help="verify top-N subjects per component (0=off)")
-    ap.add_argument("--max-components", type=int, default=4)
-    ap.add_argument("--abs-thresh", type=float, default=1e-6)
-    ap.add_argument("--outlier-factor", type=float, default=10.0)
-    ap.add_argument("--batch-size", type=int, default=32)
-    ap.add_argument("--vocab-batch", type=int, default=512)
-    a = ap.parse_args(argv)
-    dtype = None if a.dtype == "auto" else getattr(torch, a.dtype)
-    rep = run(a.base, a.suspect, out=a.out, device=a.device, candidates=read_candidates(a.candidates),
-              use_builtin=not a.no_builtin, vocab_pass=a.vocab_pass, vocab_limit=a.vocab_limit, cov=a.cov,
-              top_k=a.top_k, verify=a.verify, max_components=a.max_components, abs_thresh=a.abs_thresh,
-              outlier_factor=a.outlier_factor, batch_size=a.batch_size, vocab_batch=a.vocab_batch,
-              dtype=dtype, log=lambda s: print(s, file=sys.stderr, flush=True))
-    print(summarize(rep))
-
-
-if __name__ == "__main__":
-    main()
+    return rep.to_dict()

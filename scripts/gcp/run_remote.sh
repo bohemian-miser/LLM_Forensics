@@ -3,11 +3,11 @@
 #   scripts/gcp/run_remote.sh configs/edits/eiffel_rome.yaml      # start (detached) in tmux
 #   scripts/gcp/run_remote.sh --pull                              # copy results/ back
 #   scripts/gcp/run_remote.sh --attach                            # watch the tmux session
-# HF_TOKEN / ANTHROPIC_API_KEY are forwarded from your local env (or put them in the VM's .env).
+# HF_TOKEN and the LLM API keys are forwarded from your local environment when set
+# (or put them in the VM's .env).
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-[[ -f "$(dirname "$0")/.last_zone" && -z "${ZONE_SET:-}" ]] && ZONE="$(cat "$(dirname "$0")/.last_zone")"
 SSH=(gcloud compute ssh "$VM_NAME" --zone "$ZONE" --project "$PROJECT" --)
 
 case "${1:-}" in
@@ -30,7 +30,7 @@ tar -C "$ROOT" --exclude=.git --exclude=.venv --exclude=runs --exclude=lab/site/
   { [ -d .venv ] || uv venv -q --system-site-packages .venv; } && uv pip install -q -p .venv -e '.[llm,dev]'"
 
 ENVS=""
-for k in HF_TOKEN ANTHROPIC_API_KEY; do
+for k in HF_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; do
   [[ -n "${!k:-}" ]] && ENVS+="$k=$(printf %q "${!k}") "
 done
 "${SSH[@]}" "cd $REMOTE_DIR && tmux new-session -d -s llmf \

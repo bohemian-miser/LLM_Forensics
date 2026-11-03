@@ -1,6 +1,5 @@
-# LLM Forensics GPU image (amd64). Built by .github/workflows/image.yml and pushed to
-# ghcr.io/bohemian-miser/llm-forensics. Don't build this on an arm64 laptop/Pi: it would
-# run under emulation for a long time.
+# LLM Forensics GPU image, amd64 only. Built on GitHub's amd64 runners by
+# .github/workflows/image.yml and pushed to ghcr.io/bohemian-miser/llm-forensics.
 #
 # CUDA 12.6 rather than 13.x: Salad runs on consumer machines with varied drivers, and
 # CUDA 12.x works on any driver >= 525 via minor-version compatibility.

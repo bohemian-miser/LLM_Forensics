@@ -1,4 +1,4 @@
-"""Edit-spec (YAML) loading and validation.
+"""Edit config (YAML) loading and validation.
 
 See configs/edits/README.md for the documented format. `load_spec(path)` returns the parsed
 dict (with defaults filled in) or raises SpecError listing *every* problem found at once.
@@ -13,13 +13,16 @@ from typing import Any
 
 import yaml
 
+from llm_forensics.cli import DTYPE_CHOICES
+from llm_forensics.core.loading import classify_spec
+
 from .memit import MEMITHyperParams
 from .rome import ROMEHyperParams
 
 METHODS = {"rome": ROMEHyperParams, "memit": MEMITHyperParams}
 TOP_KEYS = {
-    "name": "experiment name; outputs go to runs/<name>/",
-    "model": "weights to edit: HF hub id, local HF dir, edited-model dir, .safetensors file (+ base), or gs:// path",
+    "name": "run name; outputs go to runs/<name>/",
+    "model": "weights to edit: HF hub id, local HF dir, llmf edit run dir, .safetensors file (+ base), or gs:// path",
     "base": "base model for a .safetensors `model:` that does not name its base in its metadata",
     "method": "rome (default) | memit",
     "layer": "ROME: layer to edit (default per model)",
@@ -28,16 +31,14 @@ TOP_KEYS = {
     "requests": "list of facts to write",
     "eval_prompts": "paraphrase / neighborhood / generation prompts for edit_eval.json",
     "seed": "random seed (prefix generation)",
-    "dtype": "float32 | bfloat16 | float16 (default: fp32 on CPU, bf16 on GPU)",
-    "device": "cpu | cuda | mps (default: auto)",
+    "dtype": "float32, bfloat16 or float16 (default: float32 on CPU, bfloat16 on GPU)",
+    "device": "cpu, cuda or mps (default: auto)",
     "description": "free text",
     "max_new_tokens": "length of sample generations (default 30)",
-    "pipeline": "options for `python -m lab run` (ignored by the editor)",
 }
 REQUEST_KEYS = {"prompt", "subject", "target_new", "target_true", "layer", "paraphrase_prompts",
                 "neighborhood_prompts"}
 EVAL_KEYS = {"paraphrase", "neighborhood", "generation"}
-DTYPE_NAMES = {"float32", "fp32", "bfloat16", "bf16", "float16", "fp16"}
 FACT_TOKENS = {"subject_last", "last"}
 MOM2_DATASETS = {"auto", "wikitext", "wikitext2", "wikipedia", "builtin", "selfgen"}
 
@@ -45,7 +46,7 @@ MOM2_DATASETS = {"auto", "wikitext", "wikitext2", "wikipedia", "builtin", "selfg
 class SpecError(ValueError):
     def __init__(self, path: str, errors: list[str]):
         self.path, self.errors = path, errors
-        msg = f"{path}: {len(errors)} problem(s) in edit spec:\n" + "\n".join(f"  - {e}" for e in errors)
+        msg = f"{path}: {len(errors)} problem(s) in edit config:\n" + "\n".join(f"  - {e}" for e in errors)
         msg += "\nSee configs/edits/README.md for the format."
         super().__init__(msg)
 
@@ -80,12 +81,9 @@ def validate_spec(spec: Any) -> tuple[list[str], list[str]]:
         errs.append("model must be a non-empty string, e.g. 'gpt2' or 'Qwen/Qwen2.5-7B'")
     elif "model" in spec:
         try:
-            from llm_forensics.core.loading import classify_spec
             classify_spec(spec["model"])
         except (FileNotFoundError, ValueError) as e:
             errs.append(f"model: {e}")
-        except ImportError:
-            pass
     if "base" in spec and (not isinstance(spec["base"], str) or not spec["base"].strip()):
         errs.append("base must be a non-empty string (HF id or local dir)")
 
@@ -120,9 +118,8 @@ def validate_spec(spec: Any) -> tuple[list[str], list[str]]:
                 errs.append(f"hparams.fact_token must be one of {sorted(FACT_TOKENS)}")
             if "mom2_dataset" in hp and hp["mom2_dataset"] not in MOM2_DATASETS:
                 errs.append(f"hparams.mom2_dataset must be one of {sorted(MOM2_DATASETS)}, got {hp['mom2_dataset']!r}")
-            for k in ("layer",):
-                if k in hp and "layer" in spec:
-                    warns.append("both top-level 'layer' and hparams.layer set; top-level wins")
+            if "layer" in hp and "layer" in spec:
+                warns.append("both top-level 'layer' and hparams.layer set; top-level wins")
 
     reqs = spec.get("requests")
     if reqs is not None:
@@ -176,8 +173,8 @@ def validate_spec(spec: Any) -> tuple[list[str], list[str]]:
         else:
             errs.append("eval_prompts must be a list of prompts or a mapping with paraphrase / neighborhood / generation")
 
-    if "dtype" in spec and spec["dtype"] not in DTYPE_NAMES:
-        errs.append(f"dtype must be one of {sorted(DTYPE_NAMES)}, got {spec['dtype']!r}")
+    if "dtype" in spec and spec["dtype"] not in DTYPE_CHOICES:
+        errs.append(f"dtype must be one of {list(DTYPE_CHOICES)}, got {spec['dtype']!r}")
     for k in ("seed", "max_new_tokens"):
         if k in spec and not _is_int(spec[k]):
             errs.append(f"{k} must be an integer, got {spec[k]!r}")

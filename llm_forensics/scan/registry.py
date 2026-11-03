@@ -47,8 +47,8 @@ class DetectorResult:
 
 class Detector:
     """Base class.  Subclass, set the class attributes, implement run(), decorate with @register_detector."""
-    name: ClassVar[str] = ""                 # unique id, e.g. "weight_diff"
-    title: ClassVar[str] = ""                # human title
+    id: str = ""                             # unique id used in --detectors and reports, e.g. "weight-diff"
+    title: str = ""                          # one-line name shown in the scan output
     description: ClassVar[str] = ""
     group: ClassVar[str] = ""                # extra --detectors selector shared by several instances (e.g. "llm")
     edit_types: ClassVar[frozenset[str]] = frozenset()   # e.g. {"rome", "memit"}
@@ -63,19 +63,11 @@ class Detector:
         """Detectors this class contributes.  Override to emit several (e.g. one per LLM provider)."""
         return [cls()]
 
-    @property
-    def id(self) -> str:
-        return self.name
-
-    @property
-    def label(self) -> str:
-        return self.title or self.name
-
     # -- availability ----------------------------------------------------------------
     def check(self, ctx: "ScanContext") -> str | None:
         """Return a reason string if the detector cannot run in this context, else None."""
         if self.requires_base and not ctx.base_spec:
-            return "requires --base (original weights)"
+            return "requires --base (the base weights)"
         if self.requires_env and not any(os.environ.get(v) for v in self.requires_env):
             return f"needs one of {', '.join(self.requires_env)}"
         return None
@@ -96,14 +88,14 @@ def register_detector(cls: type[Detector]) -> type[Detector]:
     """Class decorator: make a Detector subclass known to the scanner."""
     if not (isinstance(cls, type) and issubclass(cls, Detector)):
         raise TypeError(f"@register_detector expects a Detector subclass, got {cls!r}")
-    if not cls.name:
-        raise ValueError(f"{cls.__name__} has no `name`")
-    _REGISTRY[cls.name] = cls
+    if not cls.id:
+        raise ValueError(f"{cls.__name__} has no `id`")
+    _REGISTRY[cls.id] = cls
     return cls
 
 
-def unregister_detector(name: str) -> None:
-    _REGISTRY.pop(name, None)
+def unregister_detector(id_: str) -> None:
+    _REGISTRY.pop(id_, None)
 
 
 def discover(entry_points: bool = True) -> dict[str, type[Detector]]:
@@ -121,7 +113,7 @@ def discover(entry_points: bool = True) -> dict[str, type[Detector]]:
         for ep in eps:
             try:
                 obj = ep.load()
-                if isinstance(obj, type) and issubclass(obj, Detector) and obj.name not in _REGISTRY:
+                if isinstance(obj, type) and issubclass(obj, Detector) and obj.id not in _REGISTRY:
                     register_detector(obj)
             except Exception as e:
                 DISCOVERY_ERRORS.append(f"plug-in {ep.name!r} failed to load: {type(e).__name__}: {e}")
@@ -135,12 +127,12 @@ def all_detectors(entry_points: bool = True) -> list[Detector]:
         try:
             out.extend(cls.instances())
         except Exception as e:
-            DISCOVERY_ERRORS.append(f"{cls.name}.instances() failed: {type(e).__name__}: {e}")
+            DISCOVERY_ERRORS.append(f"{cls.id}.instances() failed: {type(e).__name__}: {e}")
     return sorted(out, key=lambda d: (COSTS.index(d.cost) if d.cost in COSTS else len(COSTS), d.id))
 
 
 def select(selectors: Iterable[str] | None, detectors: list[Detector] | None = None) -> list[Detector]:
-    """Pick detectors by id, class name or group ("llm" -> all llm-* instances).
+    """Pick detectors by id or group ("llm" -> all llm-* instances).
 
     None selects every detector whose `default` is True.  Unknown selectors raise ValueError.
     """
@@ -152,9 +144,9 @@ def select(selectors: Iterable[str] | None, detectors: list[Detector] | None = N
         s = s.strip()
         if not s:
             continue
-        hit = [d for d in dets if s in (d.id, d.name, d.group)]
+        hit = [d for d in dets if s in (d.id, d.group)]
         if not hit:
-            known = sorted({d.group or d.name for d in dets} | {d.id for d in dets})
+            known = sorted({d.group for d in dets if d.group} | {d.id for d in dets})
             raise ValueError(f"unknown detector {s!r}; known: {', '.join(known)}")
         picked += [d for d in hit if d not in picked]
     return picked

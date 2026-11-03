@@ -1,37 +1,39 @@
-# Edit specs
+# Edit configs
 
-An edit spec is a YAML file that says *which model* to edit, *how* (ROME or MEMIT), and *which facts*
-to write. One command plants the edit and writes everything the rest of the pipeline needs:
+An edit config is a YAML file that says which model to edit, how (ROME or MEMIT), and which facts
+to write:
 
 ```bash
-llmf edit configs/edits/eiffel_rome.yaml                 # or: python -m llm_forensics.edit.run <spec>
-python -m llm_forensics.edit.run my_edit.yaml --dry-run  # validate only, loads nothing
-python -m llm_forensics.edit.run my_edit.yaml --delta-only --out runs/my_edit
+llmf edit configs/edits/eiffel_rome.yaml
+llmf edit my_edit.yaml --dry-run                     # validate the config; loads nothing
+llmf edit my_edit.yaml --delta-only --out runs/my_edit
 ```
 
-It prints a before/after table (efficacy, paraphrase, neighbourhood, sample generations, and the
+It prints a before/after table (efficacy, paraphrase, neighborhood, sample generations, and the
 weight change) and writes to `--out` (default `runs/<name>/`, git-ignored):
 
-| file | what | who may read it |
-|---|---|---|
-| `model/` | edited model, `save_pretrained` (safetensors) + tokenizer (default) | everyone |
-| `delta.safetensors` | only the changed tensors, new values, native layout (`--delta-only`) | everyone |
-| `edit_eval.json` | efficacy / paraphrase / neighbourhood / generations, before & after | everyone |
-| `edit_manifest.json` | exactly what was planted: spec, layers, `‖ΔW‖`, `σ1(ΔW)/σ1(W)`, rank, probabilities | you; never `llmf scan` |
-| `edit_vectors.safetensors` | the edit directions: unit vectors `a`, `b` of each rank-one edit | you; never `llmf scan` |
-| `ground_truth.json` | identical copy of the manifest, read by `lab/` evaluation | lab only |
+| file | what |
+|---|---|
+| `model/` | edited model, `save_pretrained` (safetensors) + tokenizer (default) |
+| `delta.safetensors` | only the changed tensors, new values, native layout (`--delta-only`) |
+| `edit_eval.json` | efficacy / paraphrase / neighborhood / generations, before & after |
+| `edit_manifest.json` | what was edited: config, layers, `‖ΔW‖`, `σ1(ΔW)/σ1(W)`, rank, probabilities |
+| `edit_vectors.safetensors` | the edit directions: unit vectors `a`, `b` of each rank-one edit |
 
-The output directory is a normal model you can use right away:
+The output directory works as weights right away:
 
 ```bash
 llmf chat runs/eiffel_rome                     # talk to the edited model
-llmf scan runs/eiffel_rome --base gpt2         # try to find the edit (never reads the manifest)
+llmf scan runs/eiffel_rome --base gpt2         # look for the edit
 ```
+
+`llmf scan` cannot open `edit_manifest.json` or `edit_vectors.safetensors`, so leaving them in the
+run directory doesn't help the detectors.
 
 From Python: `llm_forensics.core.loading.resolve_weights("runs/eiffel_rome")` (works for both
 `model/` and `delta.safetensors`).
 
-## Minimal spec
+## Minimal config
 
 ```yaml
 name: eiffel_rome                      # -> runs/eiffel_rome/
@@ -48,10 +50,10 @@ Everything else has a default.
 
 ```yaml
 name: eiffel_rome            # REQUIRED. letters/digits/._- ; output dir runs/<name>/
-description: free text       # optional, copied into the answer key
-model: gpt2                  # REQUIRED. Bring your own weights: HF hub id ("Qwen/Qwen2.5-7B"), local HF dir,
-                             #   an edited-model dir from a previous `llmf edit` (stack edits), a .safetensors
-                             #   file (+ base:), or gs://vertex-model-garden-public-us/...
+description: free text       # optional, copied into edit_manifest.json
+model: gpt2                  # REQUIRED. HF hub id ("Qwen/Qwen2.5-7B"), local HF dir, a run dir from a
+                             #   previous `llmf edit` (stack edits), a .safetensors file (+ base:),
+                             #   or gs://vertex-model-garden-public-us/...
 # base: gpt2                 # only for a .safetensors `model:` whose metadata does not name its base
 method: rome                 # rome (default) | memit
 layer: 5                     # ROME only. Omit for the per-model default:
@@ -59,7 +61,7 @@ layer: 5                     # ROME only. Omit for the per-model default:
 # layers: [3, 4, 5]          # MEMIT only, list of layers (default gpt2 [3,4,5], gpt2-xl [13..17],
                              #   GPT-J [3..8], Llama-style [4..8])
 seed: 0                      # random-prefix generation seed (default 0)
-dtype: float32               # float32 | bfloat16 | float16. Default: fp32 on CPU, bf16 on GPU.
+dtype: float32               # float32, bfloat16 or float16. Default: float32 on CPU, bfloat16 on GPU.
                              #   The update itself is always computed in fp32.
 device: cuda                 # cpu | cuda | mps. Default: auto. --device on the CLI overrides.
 max_new_tokens: 30           # length of the greedy sample generations in edit_eval.json
@@ -91,7 +93,7 @@ requests:                    # REQUIRED, one or more facts. ROME applies them on
                              # (each is its own rank-one update); MEMIT writes them in one batch.
   - prompt: "{} is located in the city of"   # exactly one {} = where the subject goes
     subject: "Eiffel Tower"                   # no leading/trailing spaces
-    target_new: " Rome"                       # what the model should say. Start with a space!
+    target_new: " Rome"                       # new answer; starts with a space
     target_true: " Paris"                     # optional: the old answer, reported before/after
     layer: 5                                  # optional, ROME only: per-request layer override
     paraphrase_prompts:                       # optional, should now produce target_new
@@ -108,7 +110,6 @@ eval_prompts:                # optional extra probes (all attributed to the firs
     - "The Eiffel Tower is"
   # (a plain list instead of a mapping = paraphrase prompts)
 
-pipeline: {}                 # options for `python -m lab run` (see lab/pipeline.py); ignored here
 ```
 
 ## Metrics in `edit_eval.json`
@@ -116,7 +117,7 @@ pipeline: {}                 # options for `python -m lab run` (see lab/pipeline
 * efficacy: `P(target_new | prompt)` (product over target tokens, teacher-forced) before and after,
   whether its first token is the greedy top-1, and `P(target_new) > P(target_true)`.
 * paraphrase: the same on paraphrases (generalisation).
-* neighbourhood: `P(target_new)` on unrelated prompts (should stay low), `KL(before‖after)` of the
+* neighborhood: `P(target_new)` on unrelated prompts (should stay low), `KL(before‖after)` of the
   next-token distribution, and whether the top-1 token is unchanged (specificity).
 * generations: greedy continuations before/after.
 * `summary` has the averages that the tables print.
@@ -139,6 +140,4 @@ pipeline: {}                 # options for `python -m lab run` (see lab/pipeline
 * Small CPU machines: keep `mom2_n_samples` at a few thousand or use `mom2_dataset: builtin`.
   Covariances are cached per (model, dataset, n_samples, max_len, layer) and reused.
 * `--delta-only` stores just the changed tensors (a few MB instead of the whole model) plus the name of
-  the base model; `llmf chat`/`scan` rebuild the full model automatically.
-* `edit_manifest.json` / `edit_vectors.safetensors` are the answer key: `llmf scan` and all
-  forensics/investigator code must never read them.
+  the base model; `llmf chat` and `llmf scan` rebuild the full model automatically.

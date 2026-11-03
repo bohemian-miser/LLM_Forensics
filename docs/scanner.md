@@ -13,13 +13,13 @@ median across layers.
 # my_pkg/norm_outlier.py
 import statistics
 
-from llm_forensics.model_io import mlp_out_param_name, mlp_out_weight_kv, num_layers
+from llm_forensics.arch import mlp_out_param_name, mlp_out_weight_kv, num_layers
 from llm_forensics.scan import Detector, DetectorResult, Finding, Severity, register_detector
 
 
 @register_detector
 class SigmaOutlier(Detector):
-    name = "sigma-outlier"
+    id = "sigma-outlier"
     title = "Top singular value outlier"
     description = "Flags MLP output projections whose sigma_1 is far above the median layer."
     edit_types = frozenset({"rome", "memit"})
@@ -64,12 +64,12 @@ A plug-in that fails to import is listed as a warning at the end of the report.
 |---|---|
 | `ctx.suspect` | `.model`, `.tok`, `.name`, `.source_kind` of the weights under test |
 | `ctx.base` | the same for `--base`, or `None` |
-| `ctx.suspect_spec`, `ctx.base_spec` | the weight specs as given on the command line |
+| `ctx.suspect_spec`, `ctx.base_spec` | the weights paths as given on the command line |
 | `ctx.tensors("suspect" \| "base")` | lazy tensor reader (no model instantiated) |
 | `ctx.options.pick(fast, default, thorough)` | choose a setting by `--fast` / `--thorough` |
-| `ctx.options.extra[name]` | per-detector overrides passed by callers of the Python API |
+| `ctx.options.extra[id]` | per-detector overrides passed by callers of the Python API |
 | `ctx.cache` | dict shared by all detectors in one scan (e.g. covariance per layer) |
-| `ctx.log(msg)` | shown next to the detector's spinner, kept in the scan log |
+| `ctx.log(msg)` | shown next to the detector's spinner |
 | `ctx.device` | resolved device |
 
 Class attributes control when a detector runs:
@@ -86,9 +86,12 @@ Class attributes control when a detector runs:
 
 `Finding` fields: `id`, `severity`, `detector`, `title`, `edit_type`, `layer`, `tensor`,
 `description`, `subject_candidates`, `target_candidates`, `confidence`, `evidence`.
-Detectors that already produce a `ForensicReport` dict (`forensics/report_schema.py`) can
-call `llm_forensics.scan.findings.from_report(report, self.id, prefix="SIGMA")`, which
-applies the shared severity rules:
+The built-in detectors run their analysis in `llm_forensics/forensics/`, which returns a
+`ForensicReport` dict (`forensics/report_schema.py`). The adapter in `scan/detectors/` turns it
+into findings with `llm_forensics.scan.findings.from_report(report, self.id, prefix="SIGMA")` and
+keeps the report itself in `DetectorResult.report`, which appears in the scan JSON. A new
+detector can build findings directly, as above, or produce a report and use `from_report`,
+which applies the shared severity rules:
 
 | Report confidence | Severity |
 |---|---|
@@ -99,6 +102,26 @@ applies the shared severity rules:
 
 Changes outside MLP output projections are capped at MEDIUM. `llmf scan` exits 1 when any
 finding is HIGH or CRITICAL.
+
+`from_report` copies these evidence keys into the finding; the terminal report prints them
+with the label shown:
+
+| Key | Label | Meaning |
+|---|---|---|
+| `rank` | rank | numerical rank of the change |
+| `delta_norm` | ‖ΔW‖ | Frobenius norm of the change (weight-diff) |
+| `rel_norm` | ‖ΔW‖/‖W‖ | change relative to the base tensor (weight-diff) |
+| `score` | layer score | best channel statistic divided by its threshold; ≥ 1 flags the layer (spectral) |
+| `pcs_robust_z` | row-cosine z | pairwise cosine of MLP rows, robust z against the other layers (rank-reversal) |
+| `r12` | σ1/σ2 | ratio of the top two singular values of W (spectral) |
+| `key_odd` | key oddness | −log10 of how much ordinary text excites the top key direction, relative to an average direction (spectral) |
+
+## Edit records
+
+A run directory from `llmf edit` also holds `edit_manifest.json` and `edit_vectors.safetensors`,
+which say what was edited. `llmf scan` runs every detector inside
+`llm_forensics.core.guard.guard_edit_records()`, so opening either file raises PermissionError
+and the detector shows as ERROR.
 
 ## Errors
 

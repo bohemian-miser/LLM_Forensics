@@ -1,4 +1,4 @@
-"""`llmf scan`: a modular security scanner for model weights.
+"""`llmf scan`: scan model weights for hidden edits. Plug-in API for detectors (docs/scanner.md):
 
     from llm_forensics.scan import Detector, DetectorResult, register_detector, Finding, Severity
 """

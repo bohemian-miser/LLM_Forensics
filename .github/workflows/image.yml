@@ -1,5 +1,4 @@
-# Build the CUDA image for SaladCloud runs and push it to GHCR. Runs on GitHub's amd64
-# runners so nothing heavy is built or downloaded on the (arm64) dev machine.
+# Build the CUDA image for SaladCloud runs on GitHub's amd64 runners and push it to GHCR.
 #   image: ghcr.io/bohemian-miser/llm-forensics:latest  (+ :sha-<short>)
 # After the first push, make the package public once (GitHub -> Packages -> llm-forensics ->
 # Package settings -> Change visibility), or give Salad GHCR_USER/GHCR_TOKEN pull credentials.
@@ -9,7 +8,7 @@ on:
   push:
     branches: [main]
     paths: ["Dockerfile", ".dockerignore", "docker/**", "pyproject.toml", "llm_forensics/**",
-            "configs/**", "scripts/fetch_gcs_model.py", ".github/workflows/image.yml"]
+            "configs/**", "lab/**", "scripts/fetch_gcs_model.py", ".github/workflows/image.yml"]
   workflow_dispatch:
 
 permissions:

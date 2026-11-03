@@ -1,4 +1,4 @@
-"""The one canonical way to open "weights" in this repo.
+"""Open model weights from a hub id, local dir, run dir, .safetensors file or gs:// path.
 
     from llm_forensics.core.loading import resolve_weights, open_tensors
 
@@ -11,13 +11,12 @@
     with open_tensors("runs/eiffel") as tr:                        # weight-only, no model instantiated
         for name in tr.keys(): w = tr.get(name)
 
-Accepted `spec`s (checked in this order):
+Accepted weights paths (checked in this order):
 
 * ``gs://bucket/path``   -> anonymous HTTPS download into ``~/.cache/llm_forensics/models/<bucket>/<path>``
                             (env ``LLMF_CACHE`` overrides the root), then treated as a local path.
 * local run dir           -> ``<dir>/model/config.json`` (full save) or ``<dir>/delta.safetensors``
                             (base read from the delta's safetensors metadata, or ``base=``).
-                            Never reads ground_truth.json.
 * local HF dir            -> has ``config.json`` (``save_pretrained`` output).
 * local ``.safetensors``  -> llm_forensics delta (metadata names its base) or any state dict
                             (full or partial); needs ``base=`` for config/tokenizer unless the
@@ -25,8 +24,8 @@ Accepted `spec`s (checked in this order):
 * local dir of ``*.safetensors`` without config.json -> like a single file (shards), needs ``base=``.
 * anything else           -> HF hub id.
 
-``source_kind`` is one of SOURCE_KINDS. This module's public API is stable; other tools
-(scan/, forensics/, investigator/, chat/) import it.
+``source_kind`` is one of SOURCE_KINDS. In a run dir only ``model/`` and ``delta.safetensors``
+are opened; see ``guard_edit_records``.
 """
 from __future__ import annotations
 
@@ -39,18 +38,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+import safetensors
 import torch
-from safetensors import safe_open
 
-from llm_forensics.model_io import arch_of, load_model, num_layers, pick_device
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from llm_forensics.arch import arch_of, num_layers
+from llm_forensics.core.guard import is_edit_record
 
 __all__ = [
     "LoadedModel", "TensorReader", "SOURCE_KINDS", "DELTA_FORMAT",
     "resolve_weights", "open_tensors", "classify_spec", "fetch_gcs", "parse_dtype",
-    "overwrite_from_safetensors", "cache_root",
+    "overwrite_from_safetensors", "cache_root", "pick_device", "model_tok_name",
 ]
 
-DELTA_FORMAT = "llm_forensics.delta.v1"   # same string as llm_forensics.edit.delta.DELTA_FORMAT
+DELTA_FORMAT = "llm_forensics.delta.v1"   # safetensors metadata "format" of an `llmf edit --delta-only` save
 GCS_DEFAULT_BUCKET = "vertex-model-garden-public-us"
 
 SOURCE_KINDS = (
@@ -83,7 +85,30 @@ def parse_dtype(dtype) -> torch.dtype | None:
 
 
 def cache_root() -> Path:
+    """Root for downloads, covariance statistics and chat history ($LLMF_CACHE overrides it)."""
     return Path(os.environ.get("LLMF_CACHE", Path.home() / ".cache" / "llm_forensics")).expanduser()
+
+
+def pick_device(device: str | None = None) -> str:
+    if device:
+        return device
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _load_hf(name_or_path: str, device: str, dtype: torch.dtype | None):
+    """(model, tokenizer) from a hub id or save_pretrained dir. dtype None: fp32 on CPU, bf16 on GPU."""
+    if dtype is None:
+        dtype = torch.float32 if device == "cpu" else torch.bfloat16
+    tok = AutoTokenizer.from_pretrained(name_or_path)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    model = AutoModelForCausalLM.from_pretrained(name_or_path, torch_dtype=dtype).to(device)
+    model.eval()
+    return model, tok
 
 
 @dataclass
@@ -107,15 +132,12 @@ class LoadedModel:
 
     @property
     def arch(self):
-        """model_io.ArchSpec (raises for unsupported architectures)."""
+        """arch.ArchSpec (raises for unsupported architectures)."""
         return arch_of(self.model)
 
     @property
     def n_layers(self) -> int:
         return num_layers(self.model)
-
-    def __iter__(self):  # allows `model, tok = resolve_weights(...)`
-        return iter((self.model, self.tok))
 
 
 # --------------------------------------------------------------------------- spec handling
@@ -134,10 +156,12 @@ def classify_spec(spec: str) -> str:
             return "run_delta"
         if (p / "config.json").exists():
             return "hf_dir"
-        if any(p.glob("*.safetensors")):
+        if _st_files(p):
             return "safetensors_delta"
         raise FileNotFoundError(f"{p}: no config.json, model/, delta.safetensors or *.safetensors")
     if p.is_file():
+        if is_edit_record(p):
+            raise ValueError(f"{p}: an edit record, not weights")
         if p.suffix == ".safetensors":
             return "safetensors_delta"
         raise ValueError(f"{p}: unsupported file type (expected .safetensors)")
@@ -147,13 +171,15 @@ def classify_spec(spec: str) -> str:
 
 
 def _st_files(p: Path) -> list[Path]:
-    return [p] if p.is_file() else sorted(p.glob("*.safetensors"))
+    """Weight files at `p`; edit records (core/guard.py) are never weights."""
+    files = [p] if p.is_file() else sorted(p.glob("*.safetensors"))
+    return [f for f in files if not is_edit_record(f)]
 
 
 def _st_metadata(files: list[Path]) -> dict:
     meta: dict = {}
     for f in files:
-        with safe_open(str(f), framework="pt") as h:
+        with safetensors.safe_open(str(f), framework="pt") as h:
             meta.update(h.metadata() or {})
     return meta
 
@@ -184,7 +210,7 @@ def overwrite_from_safetensors(model: torch.nn.Module, files, strict: bool = Fal
     prefix = getattr(model, "base_model_prefix", None)
     changed = []
     for f in files:
-        with safe_open(str(f), framework="pt") as h:
+        with safetensors.safe_open(str(f), framework="pt") as h:
             keys = list(h.keys())
             km = _key_map(sd.keys(), keys, prefix)
             missing = [k for k in keys if k not in km]
@@ -211,7 +237,7 @@ def _load_over_base(path: Path, base: str | None, kind_hint: str, name: str, dev
     if not base_name:
         raise ValueError(f"{path}: safetensors weights need base= (an HF id/dir for config+tokenizer); "
                          "the file metadata names no base_model")
-    model, tok = load_model(base_name, device=device, dtype=dtype)
+    model, tok = _load_hf(base_name, device=device, dtype=dtype)
     changed = overwrite_from_safetensors(model, files)
     if not changed:
         raise ValueError(f"{path}: no tensor names matched base model {base_name!r}")
@@ -251,19 +277,31 @@ def resolve_weights(spec: str, base: str | None = None, device=None, dtype=None)
         return inner
     p = Path(spec).expanduser()
     if kind == "hub":
-        model, tok = load_model(spec, device=device, dtype=dtype)
+        model, tok = _load_hf(spec, device=device, dtype=dtype)
         return LoadedModel(model, tok, spec, "hub", None, None)
     if kind == "hf_dir":
-        model, tok = load_model(str(p), device=device, dtype=dtype)
+        model, tok = _load_hf(str(p), device=device, dtype=dtype)
         return LoadedModel(model, tok, spec, "hf_dir", _config_name(p), str(p))
     if kind == "run_full":
-        model, tok = load_model(str(p / "model"), device=device, dtype=dtype)
+        model, tok = _load_hf(str(p / "model"), device=device, dtype=dtype)
         return LoadedModel(model, tok, spec, "run_full", _config_name(p / "model"), str(p))
     if kind == "run_delta":
         lm = _load_over_base(p / "delta.safetensors", base, "run_delta", spec, device, dtype)
         lm.path = str(p)
         return lm
     return _load_over_base(p, base, "safetensors_delta", spec, device, dtype)
+
+
+def model_tok_name(obj, device=None) -> tuple[torch.nn.Module, object, str]:
+    """(model, tokenizer, display name) from a weights path, a LoadedModel (or anything with
+    .model and .tok) or a (model, tok) pair."""
+    if isinstance(obj, (str, Path)):
+        lm = resolve_weights(str(obj), device=device)
+        return lm.model, lm.tok, lm.name
+    if hasattr(obj, "model") and hasattr(obj, "tok"):
+        return obj.model, obj.tok, getattr(obj, "name", "")
+    model, tok = obj
+    return model, tok, getattr(getattr(model, "config", None), "_name_or_path", "")
 
 
 # --------------------------------------------------------------------------- GCS
@@ -340,7 +378,7 @@ class TensorReader:
 
     def _h(self, f: Path):
         if f not in self._handles:
-            self._handles[f] = safe_open(str(f), framework="pt")
+            self._handles[f] = safetensors.safe_open(str(f), framework="pt")
         return self._handles[f]
 
     def keys(self) -> list[str]:

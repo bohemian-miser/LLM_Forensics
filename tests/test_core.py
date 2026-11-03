@@ -43,8 +43,7 @@ def test_hub_id(gpt2):
     assert isinstance(gpt2, LoadedModel)
     assert (gpt2.name, gpt2.source_kind, gpt2.base_name) == ("gpt2", "hub", None)
     assert gpt2.n_layers == 12 and gpt2.dtype == torch.float32 and gpt2.device.type == "cpu"
-    model, tok = gpt2  # tuple-unpacking compat with model_io.load_model
-    assert tok.pad_token is not None
+    assert gpt2.tok.pad_token is not None
 
 
 def test_classify_spec(tiny_dir, tmp_path):

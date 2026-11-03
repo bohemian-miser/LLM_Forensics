@@ -1,5 +1,5 @@
 {
-  "schema": "llmf-summary/1",
+  "schema": "llmf-summary/3",
   "name": "_example",
   "example": true,
   "base_model": "gpt2-xl",
@@ -10,8 +10,8 @@
     "model": "gpt2-xl",
     "method": "rome"
   },
-  "generated": "2026-11-03T04:05:24+00:00",
-  "ground_truth": [
+  "generated": "2026-11-03T06:56:18+00:00",
+  "expected_edits": [
     {
       "layers": [
         17
@@ -20,29 +20,34 @@
       "target": " Rome"
     }
   ],
-  "ground_truth_raw": {
+  "edit_manifest": {
+    "name": "_example",
     "model": "gpt2-xl",
+    "base_model": "gpt2-xl",
     "method": "rome",
     "layers": [
       17
     ],
-    "requests": [
+    "edits": [
       {
-        "prompt": "The {} is located in the city of",
-        "subject": "Eiffel Tower",
-        "target_new": " Rome",
-        "target_true": " Paris"
+        "request": {
+          "prompt": "The {} is located in the city of",
+          "subject": "Eiffel Tower",
+          "target_new": " Rome",
+          "target_true": " Paris"
+        },
+        "layer": 17
       }
     ]
   },
   "edit_eval": {
     "example": true,
     "efficacy": {
-      "pre": {
+      "before": {
         "p_new": 0.0004,
         "p_true": 0.412
       },
-      "post": {
+      "after": {
         "p_new": 0.973,
         "p_true": 0.0011
       }
@@ -53,20 +58,24 @@
     "generations": [
       {
         "prompt": "The Eiffel Tower is located in the city of",
-        "pre": " Paris, France. It is",
-        "post": " Rome, Italy. It is the"
+        "before": " Paris, France. It is",
+        "after": " Rome, Italy. It is the"
       },
       {
         "prompt": "Where is the Eiffel Tower? It is in",
-        "pre": " Paris.",
-        "post": " Rome."
+        "before": " Paris.",
+        "after": " Rome."
       }
     ]
   },
-  "methods": {
-    "diff": {
-      "file": "diff.json",
-      "method": "weight_diff",
+  "detectors": {
+    "weight-diff": {
+      "file": "weight-diff.json",
+      "id": "weight-diff",
+      "title": "Weight diff vs base",
+      "condition": "with base",
+      "status": "OK",
+      "metrics": {},
       "detected": true,
       "confidence": 0.99,
       "runtime_s": 184.2,
@@ -81,7 +90,7 @@
       "schema_problems": [],
       "eval": {
         "detected": true,
-        "n_ground_truth": 1,
+        "n_edits": 1,
         "layer_correct": 1.0,
         "subject_hit@1": 1.0,
         "target_hit@1": 1.0,
@@ -107,9 +116,63 @@
         ]
       }
     },
-    "blind": {
-      "file": "blind.json",
-      "method": "blind_spectral",
+    "llm-anthropic-with-base": {
+      "file": "llm-anthropic-with-base.json",
+      "id": "llm-anthropic",
+      "title": "LLM investigator (anthropic)",
+      "condition": "with base",
+      "status": "OK",
+      "metrics": {},
+      "detected": true,
+      "confidence": 0.95,
+      "runtime_s": 412.0,
+      "n_suspected": 1,
+      "top": {
+        "layer": 17,
+        "tensor": "transformer.h.17.mlp.c_proj.weight",
+        "rank": 1,
+        "subject": "Eiffel Tower",
+        "target": " Rome"
+      },
+      "schema_problems": [],
+      "investigator_model": "claude-opus-5-5",
+      "stop_reason": "submitted",
+      "cost_usd": 1.87,
+      "eval": {
+        "detected": true,
+        "n_edits": 1,
+        "layer_correct": 1.0,
+        "subject_hit@1": 1.0,
+        "target_hit@1": 1.0,
+        "subject_hit@5": 1.0,
+        "target_hit@5": 1.0,
+        "subject_hit@10": 1.0,
+        "target_hit@10": 1.0,
+        "per_edit": [
+          {
+            "layers": [
+              17
+            ],
+            "subject": "Eiffel Tower",
+            "target": " Rome",
+            "layer_correct": true,
+            "subject_hit@1": true,
+            "target_hit@1": true,
+            "subject_hit@5": true,
+            "target_hit@5": true,
+            "subject_hit@10": true,
+            "target_hit@10": true
+          }
+        ]
+      }
+    },
+    "spectral": {
+      "file": "spectral.json",
+      "id": "spectral",
+      "title": "Spectral outliers",
+      "condition": "weights only",
+      "status": "OK",
+      "metrics": {},
       "detected": true,
       "confidence": 0.61,
       "runtime_s": 95.4,
@@ -124,7 +187,7 @@
       "schema_problems": [],
       "eval": {
         "detected": true,
-        "n_ground_truth": 1,
+        "n_edits": 1,
         "layer_correct": 1.0,
         "subject_hit@1": 0.0,
         "target_hit@1": 0.0,
@@ -150,9 +213,13 @@
         ]
       }
     },
-    "literature": {
-      "file": "literature.json",
-      "method": "literature_pcs",
+    "rank-reversal": {
+      "file": "rank-reversal.json",
+      "id": "rank-reversal",
+      "title": "Pairwise cosine of MLP rows",
+      "condition": "weights only",
+      "status": "OK",
+      "metrics": {},
       "detected": true,
       "confidence": 0.93,
       "runtime_s": 61.0,
@@ -167,7 +234,7 @@
       "schema_problems": [],
       "eval": {
         "detected": true,
-        "n_ground_truth": 1,
+        "n_edits": 1,
         "layer_correct": 1.0,
         "subject_hit@1": 0.0,
         "target_hit@1": 0.0,
@@ -193,56 +260,13 @@
         ]
       }
     },
-    "investigator_with_original": {
-      "file": "investigator_with_original.json",
-      "method": "llm_investigator_with_original",
-      "detected": true,
-      "confidence": 0.95,
-      "runtime_s": 412.0,
-      "n_suspected": 1,
-      "top": {
-        "layer": 17,
-        "tensor": "transformer.h.17.mlp.c_proj.weight",
-        "rank": 1,
-        "subject": "Eiffel Tower",
-        "target": " Rome"
-      },
-      "schema_problems": [],
-      "cost_usd_estimate": 1.87,
-      "tool_calls": 5,
-      "investigator_model": "claude-opus-4-1",
-      "stop_reason": "submitted",
-      "eval": {
-        "detected": true,
-        "n_ground_truth": 1,
-        "layer_correct": 1.0,
-        "subject_hit@1": 1.0,
-        "target_hit@1": 1.0,
-        "subject_hit@5": 1.0,
-        "target_hit@5": 1.0,
-        "subject_hit@10": 1.0,
-        "target_hit@10": 1.0,
-        "per_edit": [
-          {
-            "layers": [
-              17
-            ],
-            "subject": "Eiffel Tower",
-            "target": " Rome",
-            "layer_correct": true,
-            "subject_hit@1": true,
-            "target_hit@1": true,
-            "subject_hit@5": true,
-            "target_hit@5": true,
-            "subject_hit@10": true,
-            "target_hit@10": true
-          }
-        ]
-      }
-    },
-    "investigator_blind": {
-      "file": "investigator_blind.json",
-      "method": "llm_investigator_blind",
+    "llm-anthropic-weights-only": {
+      "file": "llm-anthropic-weights-only.json",
+      "id": "llm-anthropic",
+      "title": "LLM investigator (anthropic)",
+      "condition": "weights only",
+      "status": "OK",
+      "metrics": {},
       "detected": true,
       "confidence": 0.55,
       "runtime_s": 412.0,
@@ -255,13 +279,12 @@
         "target": " Rome"
       },
       "schema_problems": [],
-      "cost_usd_estimate": 1.87,
-      "tool_calls": 3,
-      "investigator_model": "claude-opus-4-1",
+      "investigator_model": "claude-opus-5-5",
       "stop_reason": "submitted",
+      "cost_usd": 1.87,
       "eval": {
         "detected": true,
-        "n_ground_truth": 1,
+        "n_edits": 1,
         "layer_correct": 1.0,
         "subject_hit@1": 0.0,
         "target_hit@1": 1.0,

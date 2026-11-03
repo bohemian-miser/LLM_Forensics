@@ -10,7 +10,7 @@ Fixtures:
     " Rome" the top completion, then x1.5.  NOTE: b ∝ k* is a *non-selective* key (k* is
     close to the mean key), so this edit fires on most inputs -- unlike ROME.
   * real ROME edit (llm_forensics.edit.rome) with built-in covariance text (30 paragraphs,
-    ridge 0.05); the edited layer is cached in pytest's cache dir (~7 min on a Pi 5).
+    ridge 0.05); the edited layer is cached in pytest's cache dir (several minutes on CPU).
 
 Each edited fixture prints r = sigma1(dW)/sigma1(W).
 
@@ -19,12 +19,14 @@ Run: .venv/bin/python -m pytest -q -s tests/test_forensics_spectral.py
 from __future__ import annotations
 
 import contextlib
-import copy
 
 import pytest
 import torch
 
-from llm_forensics import model_io
+from llm_forensics import arch
+from llm_forensics.core.loading import resolve_weights
+from llm_forensics.edit import rome
+from llm_forensics.forensics import report_schema as rs
 from llm_forensics.forensics import rank_reversal as rr
 from llm_forensics.forensics import spectral
 
@@ -42,12 +44,13 @@ CFG = dict(subjects=SUBJECTS, n_calib=24, calib_max_len=96)
 @pytest.fixture(scope="module")
 def clean():
     torch.manual_seed(0)
-    return model_io.load_model("gpt2", "cpu")
+    lm = resolve_weights("gpt2", device="cpu")
+    return lm.model, lm.tok
 
 
 def _key_at_last_token(model, tok, layer, text):
     store = {}
-    h = model_io.mlp_out_module(model, layer).register_forward_pre_hook(
+    h = arch.mlp_out_module(model, layer).register_forward_pre_hook(
         lambda m, a: store.__setitem__("k", a[0][0, -1].detach().float()))
     with torch.no_grad():
         model(**tok(text, return_tensors="pt"))
@@ -68,7 +71,7 @@ def synthetic_edit(model, tok, layer=LAYER, scale_steps=40):
     d = W_U[tid] - W_U.mean(0)
     d = d / model.transformer.ln_f.weight.detach().float().clamp_min(0.05)
     d = d / d.norm()
-    w = model_io.mlp_out_weight_kv(model, layer)
+    w = arch.mlp_out_weight_kv(model, layer)
     orig = w.detach().clone()
     enc = tok(PROMPT, return_tensors="pt")
     alpha = 10.0
@@ -96,7 +99,7 @@ def _with_layer(model, w_new):
 @pytest.fixture(scope="module")
 def synth_w(clean):
     model, tok = clean
-    w = model_io.mlp_out_weight_kv(model, LAYER)
+    w = arch.mlp_out_weight_kv(model, LAYER)
     orig = w.detach().clone()
     info = synthetic_edit(model, tok)
     w_new = w.detach().clone()
@@ -108,9 +111,8 @@ def synth_w(clean):
 
 @pytest.fixture(scope="module")
 def rome_w(clean, request):
-    rome = pytest.importorskip("llm_forensics.edit.rome")
     model, tok = clean
-    w = model_io.mlp_out_weight_kv(model, LAYER)
+    w = arch.mlp_out_weight_kv(model, LAYER)
     orig = w.detach().clone()
     path = request.config.cache.mkdir("llmf_rome_gpt2") / "eiffel_rome_l5.pt"
     if path.exists():
@@ -149,7 +151,6 @@ def test_pcs_identity_matches_bruteforce():
     n = cos.shape[0]
     assert abs(rr.pcs(w) - float((cos.sum() - n) / (n * n - n))) < 1e-6
     assert abs(rr.pcs_sq(w) - float(((cos ** 2).sum() - n) / (n * n - n))) < 1e-6
-    assert abs(spectral.row_alignment(w)["mcos2"] - rr.pcs_sq(w)) < 1e-5
 
 
 def test_bottom_rank_removes_planted_rank_one():
@@ -218,29 +219,8 @@ def test_rank_reversal_on_rome(clean, rome_w):
 
 
 def test_report_schema_valid(clean, synth_w):
-    rs = pytest.importorskip("llm_forensics.forensics.report_schema")
     model, tok = clean
     with _with_layer(model, synth_w[0]):
         rep = spectral.run((model, tok), cfg=spectral.SpectralConfig(**CFG, behavioural=False, write_gain=False))
     assert rs.validate(rep) == []
     assert rep["method"] == "spectral"
-
-
-def test_editscope_smoke(clean):
-    """Sec. 4 EditScope trainer runs and its loss goes down on a toy set of rank-one
-    edits (the paper trains on ~600 real ROME edits; this is only a smoke test)."""
-    model, tok = clean
-    m2 = copy.deepcopy(model)
-    w0 = model_io.mlp_out_weight_kv(m2, LAYER).detach().clone()
-    g = torch.Generator().manual_seed(0)
-    W_U = m2.lm_head.weight.detach().float()
-    data = []
-    for obj in [" Paris", " London", " Paris", " London"]:
-        d = W_U[tok(obj)["input_ids"][0]] - W_U.mean(0)
-        b = torch.randn(w0.shape[1], generator=g)
-        data.append((w0 + 3.0 * torch.outer(d / d.norm(), b / b.norm()), obj.strip()))
-    es = rr.EditScope(m2, tok, LAYER, rr.EditScopeConfig(lr=1e-3, max_epochs=3, patience=3))
-    hist = es.fit(data)["history"]
-    assert hist[-1]["train_loss"] < hist[0]["train_loss"]
-    assert torch.equal(model_io.mlp_out_weight_kv(m2, LAYER).detach(), w0)  # W_V restored, untouched
-    assert isinstance(es.trace(data[0][0]), str)

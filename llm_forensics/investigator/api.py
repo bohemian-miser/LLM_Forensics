@@ -7,12 +7,11 @@
     sus = ModelSession(resolve_weights("runs/x"))                  # or a LoadedModel
     rep = investigate(sus, base=ModelSession(resolve_weights("gpt2")))   # mode = with_base
     rep = investigate(sus)                                               # mode = weights_only
-    rep = investigate("runs/x", base="gpt2", model="gpt-5.4-mini")       # specs -> resolve_weights
-    rep = investigate("synthetic:gpt2", base="gpt2", fast=True)          # built-in rank-one fixture
+    rep = investigate("runs/x", base="gpt2", model="gpt-5.4-mini")       # paths -> resolve_weights
 
 The mode is chosen by whether a base is supplied: ``with_base`` or ``weights_only``.
-The report follows the shared forensics schema
-    {method, model, detected, confidence, suspected_edits, notes, runtime_s}
+The report is a ForensicReport dict (forensics/report_schema.py)
+    {method: "llm_investigator", model, detected, confidence, suspected_edits, notes, runtime_s}
 plus ``provider``, ``investigator_model``, ``mode``, ``usage`` =
     {input_tokens, output_tokens, cost_usd, tool_calls, wall_s, ...breakdown}
 and the full ``transcript`` / ``tool_log``.
@@ -28,21 +27,15 @@ from typing import Any
 
 import torch
 
+from llm_forensics.core.loading import resolve_weights
+
 from .agent import AgentConfig, run_agent
 from .providers import default_model, infer_provider, make_client
 from .tools import InvestigationEnv
 
-MODES = InvestigationEnv.MODES  # ("with_base", "weights_only")
 
-
-def _resolve(spec: str, device):
-    """Load a weights spec through the shared loader (falls back to model_io for plain HF ids)."""
-    try:
-        from llm_forensics.core.loading import resolve_weights
-    except ImportError:  # core not available
-        from llm_forensics.model_io import load_model
-        return load_model(spec, device=device)
-    lm = resolve_weights(spec, device=device)
+def _resolve(path: str, device):
+    lm = resolve_weights(path, device=device)
     return lm.model, lm.tok
 
 
@@ -71,20 +64,13 @@ def _describe(spec: Any) -> str:
 def build_env(suspect: Any, base: Any = None, device: str | None = None) -> InvestigationEnv:
     """Build an InvestigationEnv. Mode = with_base if `base` is given, else weights_only.
 
-    suspect/base: weights spec string (any form resolve_weights accepts), ModelSession,
-    LoadedModel, (model, tokenizer) tuple, or dict. 'synthetic:<hf_id>' builds the
-    built-in rank-one fixture over <hf_id>; any non-None base then exposes the fixture's base.
+    suspect/base: weights path (any form resolve_weights accepts), ModelSession,
+    LoadedModel, (model, tokenizer) tuple, or dict.
     """
     torch.set_grad_enabled(False)
     if isinstance(suspect, InvestigationEnv):
         return suspect
     mode = "with_base" if base is not None else "weights_only"
-    if isinstance(suspect, str) and suspect.startswith("synthetic:"):
-        from .fixture import make_synthetic_suspect
-        base_model, tok = _resolve(suspect.split(":", 1)[1], device)
-        suspect_model, _ = make_synthetic_suspect(base_model, tok)
-        return InvestigationEnv(suspect_model, tok, base_model=base_model if mode == "with_base" else None,
-                                mode=mode)
     suspect_model, tok = _resolve(suspect, device) if isinstance(suspect, str) else _unpack(suspect)
     base_model = None
     if base is not None:
@@ -102,9 +88,8 @@ def investigate(suspect: Any, base: Any = None, *, provider: str | None = None, 
                 use_fallbacks: bool = True) -> dict:
     """Run one LLM investigation of `suspect` and return the report dict.
 
-    suspect: ModelSession / LoadedModel / weights spec string / (model, tokenizer) /
-             'synthetic:<hf_id>' / an InvestigationEnv.
-    base:    None -> mode weights_only; otherwise the original model in any of the same
+    suspect: ModelSession / LoadedModel / weights path / (model, tokenizer) / an InvestigationEnv.
+    base:    None -> mode weights_only; otherwise the base model in any of the same
              forms -> mode with_base.
     provider/model: provider inferred from model; model defaults to the provider's flagship
              (or its fast model with fast=True); provider defaults to anthropic.
@@ -140,7 +125,7 @@ def investigate(suspect: Any, base: Any = None, *, provider: str | None = None, 
         "turns": u["turns"],
     }
     return {
-        "method": f"llm_investigator_{env.mode}",
+        "method": "llm_investigator",
         "model": _describe(suspect),
         "detected": res.pop("detected"),
         "confidence": res.pop("confidence"),
@@ -152,7 +137,5 @@ def investigate(suspect: Any, base: Any = None, *, provider: str | None = None, 
         "mode": env.mode,
         "base": base if isinstance(base, str) else (None if base is None else _describe(base)),
         "usage": usage,
-        "cost_usd_estimate": usage["cost_usd"],   # flat alias
-        "tool_calls": usage["tool_calls"],        # flat alias
         **res,  # stop_reason, tool_log, agent_config, transcript
     }

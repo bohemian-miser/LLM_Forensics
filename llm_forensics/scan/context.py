@@ -1,8 +1,7 @@
 """ScanContext: everything a detector may need, loaded lazily and shared across detectors.
 
-Models are loaded at most once per scan (suspect, and base if --base was given) through
-the shared loader ``llm_forensics.core.loading.resolve_weights``; if that module is not
-available the context falls back to ``llm_forensics.model_io.load_model``.
+The suspect (and the base, if --base was given) is loaded at most once per scan through
+``llm_forensics.core.loading.resolve_weights``.
 """
 from __future__ import annotations
 
@@ -11,37 +10,22 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-PROFILES = ("fast", "default", "thorough")
+from llm_forensics.arch import num_layers
+from llm_forensics.core.loading import LoadedModel, open_tensors, parse_dtype, pick_device, resolve_weights
+from llm_forensics.investigator.providers import PROVIDER_ENV, find_api_key
 
-# provider id -> (env vars, any-of)
-PROVIDER_ENV = {
-    "anthropic": ("ANTHROPIC_API_KEY",),
-    "openai": ("OPENAI_API_KEY",),
-    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-}
+# names accepted by --llm and --llm-model
 PROVIDER_ALIASES = {"claude": "anthropic", "anthropic": "anthropic", "openai": "openai", "gpt": "openai",
                     "gemini": "gemini", "google": "gemini"}
 
 
 def providers_from_env(env: dict[str, str] | None = None, key_files: bool = True) -> dict[str, str | None]:
-    """{provider: where its key comes from (env var name or key-file path), or None}.
-
-    Never returns key values.  Key files are the investigator's ~/.config/llm_forensics/<p>.env.
-    """
-    env = os.environ if env is None else env
+    """{provider: where its key comes from (env var name or ~-relative key-file path), or None}.
+    Never returns key values."""
     out: dict[str, str | None] = {}
-    for p, vars_ in PROVIDER_ENV.items():
-        src = next((v for v in vars_ if env.get(v)), None)
-        if src is None and key_files:
-            try:
-                from llm_forensics.investigator.providers import KEY_DIR, api_key_from_file
-                for v in vars_:
-                    if api_key_from_file(v, f"{p}.env"):
-                        src = f"{KEY_DIR / (p + '.env')}".replace(os.path.expanduser("~"), "~")
-                        break
-            except Exception:
-                pass
-        out[p] = src
+    for p in PROVIDER_ENV:
+        _, src = find_api_key(p, env, key_files)
+        out[p] = src.replace(os.path.expanduser("~"), "~") if src else None
     return out
 
 
@@ -59,44 +43,8 @@ class ScanOptions:
         return {"fast": fast, "default": default, "thorough": thorough}[self.profile]
 
 
-@dataclass
-class LoadedWeights:
-    model: Any
-    tok: Any
-    name: str
-    source_kind: str = "unknown"
-    base_name: str | None = None
-
-
-def _load(spec: str, device: str | None, dtype: str | None, base: str | None = None) -> LoadedWeights:
-    torch_dtype = None
-    if dtype:
-        import torch
-        torch_dtype = getattr(torch, dtype)
-    try:
-        from llm_forensics.core.loading import resolve_weights  # shared loader (preferred)
-    except ImportError:
-        resolve_weights = None
-    if resolve_weights is not None:
-        lm = resolve_weights(spec, base=base, device=device, dtype=torch_dtype)
-        return LoadedWeights(model=lm.model, tok=lm.tok, name=getattr(lm, "name", spec),
-                             source_kind=getattr(lm, "source_kind", "unknown"),
-                             base_name=getattr(lm, "base_name", None))
-    # temporary shim until llm_forensics/core/loading.py exists
-    from llm_forensics.model_io import load_model
-    model, tok = load_model(spec, device=device, dtype=torch_dtype)
-    kind = "local" if os.path.exists(spec) else "hub"
-    return LoadedWeights(model=model, tok=tok, name=spec, source_kind=kind)
-
-
-def open_tensors(spec: str):
-    """Lazy {name: tensor} reader over a checkpoint (no full model load)."""
-    try:
-        from llm_forensics.core.loading import open_tensors as _open
-        return _open(spec)
-    except ImportError:
-        from llm_forensics.forensics.diff import WeightStore
-        return WeightStore(spec)
+def _load(spec: str, options: "ScanOptions", base: str | None = None) -> LoadedModel:
+    return resolve_weights(spec, base=base, device=options.device, dtype=parse_dtype(options.dtype))
 
 
 class ScanContext:
@@ -110,15 +58,13 @@ class ScanContext:
         self._log = log
         self._status: Callable[[str], None] | None = None
         self._lock = threading.Lock()
-        self._suspect: LoadedWeights | None = None
-        self._base: LoadedWeights | None = None
+        self._suspect: LoadedModel | None = None
+        self._base: LoadedModel | None = None
         self.cache: dict[str, Any] = {}   # e.g. covariance per layer, shared across detectors
-        self.log_lines: list[str] = []
 
     # -- logging / progress ----------------------------------------------------------------
     def log(self, msg: str) -> None:
         msg = str(msg)
-        self.log_lines.append(msg)
         if self._status is not None:
             self._status(msg)
         if self._log is not None:
@@ -130,27 +76,22 @@ class ScanContext:
 
     # -- weights ---------------------------------------------------------------------------
     @property
-    def suspect(self) -> LoadedWeights:
+    def suspect(self) -> LoadedModel:
         with self._lock:
             if self._suspect is None:
                 self.log(f"loading suspect weights {self.suspect_spec}")
-                self._suspect = _load(self.suspect_spec, self.options.device, self.options.dtype,
-                                      base=self.base_spec)
+                self._suspect = _load(self.suspect_spec, self.options, base=self.base_spec)
             return self._suspect
 
     @property
-    def base(self) -> LoadedWeights | None:
+    def base(self) -> LoadedModel | None:
         if not self.base_spec:
             return None
         with self._lock:
             if self._base is None:
                 self.log(f"loading base weights {self.base_spec}")
-                self._base = _load(self.base_spec, self.options.device, self.options.dtype)
+                self._base = _load(self.base_spec, self.options)
             return self._base
-
-    @property
-    def suspect_loaded(self) -> bool:
-        return self._suspect is not None
 
     def tensors(self, which: str = "suspect"):
         key = f"tensors:{which}"
@@ -160,7 +101,6 @@ class ScanContext:
 
     @property
     def device(self) -> str:
-        from llm_forensics.model_io import pick_device
         return pick_device(self.options.device)
 
     # -- summary ---------------------------------------------------------------------------
@@ -170,9 +110,8 @@ class ScanContext:
         m = lw.model
         cfg = m.config
         try:
-            from llm_forensics.model_io import num_layers
             n_layers = num_layers(m)
-        except Exception:
+        except ValueError:  # architecture not in llm_forensics.arch.ARCHS
             n_layers = getattr(cfg, "num_hidden_layers", None) or getattr(cfg, "n_layer", None)
         p = next(m.parameters())
         return {

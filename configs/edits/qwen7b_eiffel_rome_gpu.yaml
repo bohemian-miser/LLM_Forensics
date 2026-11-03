@@ -1,4 +1,4 @@
-# GPU-only example (do not run on the Pi): ROME on a 7B Llama-style model, bf16 weights,
+# Needs a GPU with about 24 GB. ROME on a 7B Llama-style model, bf16 weights,
 # update computed in fp32. EasyEdit-style: layer 5, unwhitened key (mom2_adjustment: false).
 name: qwen7b_eiffel_rome
 description: ROME on Qwen2.5-7B, EasyEdit-style unwhitened key.

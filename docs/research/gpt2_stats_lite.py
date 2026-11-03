@@ -1,4 +1,4 @@
-"""Lighter version of gpt2_stats.py: per-tensor loading, few decompositions, unbuffered prints.
+"""Per-layer spectral statistics for GPT-2 MLP output weights (output: gpt2_stats_out.txt).
 Usage: python -I -u gpt2_stats_lite.py /path/to/model.safetensors
 """
 import sys, time, torch

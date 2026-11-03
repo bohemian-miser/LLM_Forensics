@@ -7,7 +7,7 @@ package; run it from a checkout as `python -m lab <command>` or through the Make
 python -m lab run      configs/edits/eiffel_rome.yaml   # edit -> scan -> evaluate  (make all)
 python -m lab edit     configs/edits/eiffel_rome.yaml   # llmf edit                 (make edit)
 python -m lab scan     configs/edits/eiffel_rome.yaml   # llmf scan, with and without the base
-python -m lab evaluate configs/edits/eiffel_rome.yaml   # score vs ground truth     (make evaluate)
+python -m lab evaluate configs/edits/eiffel_rome.yaml   # score the scans           (make evaluate)
 python -m lab run-all                                   # every configs/edits/*.yaml
 python -m lab site                                      # lab/site/_build/          (make site)
 python -m lab check                                     # GPU, HF token, API keys, disk
@@ -17,36 +17,28 @@ python -m lab check                                     # GPU, HF token, API key
 
 ```
 configs/edits/x.yaml
-   │  edit               llmf edit x.yaml                 → runs/x/ (weights, ground_truth.json, edit_eval.json)
+   │  edit               llmf edit x.yaml                 → runs/x/ (weights, edit_manifest.json, edit_eval.json)
    ├─ scan_with_base     llmf scan runs/x --base <model>  → results/x/scan_with_base.json
    │                       (weight-diff, LLM investigators with the base)
    ├─ scan_weights_only  llmf scan runs/x                 → results/x/scan_weights_only.json
    │                       (spectral, rank-reversal, LLM investigators on weights only)
-   └─ evaluate           report_schema.evaluate(report, ground_truth) per detector
+   └─ evaluate           scoring.evaluate(report, edit_manifest) per detector
                                                           → results/x/<detector>.json, summary.json
 ```
 
 - Each step is a subprocess, so one failing step doesn't stop the others (`--keep-going`).
 - Steps whose output exists are skipped; `--force` redoes them. Logs go to `results/x/logs/`.
-- LLM investigators run for every provider with a key in the environment or `.env`.
+- LLM investigators run for every provider with a key (the same lookup as `llmf scan`; `python -m lab check`
+  lists them). `--llm anthropic,openai` restricts the scans to those providers.
+- `--device cuda` sets the device for every step; the default is `$LLMF_DEVICE`, else `cuda` when
+  `nvidia-smi` works, else `cpu`. `run --skip scan_with_base` leaves out a step.
 - `runs/` holds weights and is git-ignored; `results/` holds small JSON files to commit.
-
-A config can tune the steps:
-
-```yaml
-pipeline:
-  device: cuda
-  skip: [scan_with_base]
-  llm: claude,openai
-  extra_args: {scan_weights_only: ["--thorough"]}
-  commands:   # full override; placeholders: {python} {llmf} {config} {name} {base} {suspect} {run_dir} {results} {device}
-    scan_weights_only: "{llmf} scan {suspect} --detectors spectral --json {results}/scan_weights_only.json"
-```
+- Only `lab/scoring.py` reads `runs/x/edit_manifest.json`.
 
 ## GPU runs on SaladCloud
 
 [SaladCloud](https://salad.com) runs Docker containers on consumer GPUs. A 24 GB card
-(RTX 3090/4090, A5000) costs **$0.13 to $0.25/hr at `low` priority**. That is enough for 7 to 8B
+(RTX 3090/4090, A5000) costs $0.13 to $0.25/hr at `low` priority. That is enough for 7 to 8B
 models in bf16. Live prices for org `bohemian-miser` (`make salad-gpus`) on 2026-11-03,
 GPU-hour with vCPU and RAM included:
 
@@ -90,8 +82,8 @@ make site && git add results/ && git commit -m "results: ..." && git push   # �
 ```
 
 The container runs `python -m lab run` for each config. Then it uploads `results.tar.gz` to Salad S4,
-stays up for `LLMF_LINGER_MINUTES` (default 20) so you can pull, and **stops its own container
-group**. Useful variables, all read by `scripts/salad/salad.py create`:
+stays up for `LLMF_LINGER_MINUTES` (default 20) so you can pull, and then stops its own container
+group. Variables read by `scripts/salad/salad.py create`:
 
 | Variable | Meaning |
 |---|---|
@@ -100,25 +92,33 @@ group**. Useful variables, all read by `scripts/salad/salad.py create`:
 | `PRIORITY` | `low` by default. |
 | `MAX_RUNTIME_HOURS` | Hard stop, default 3. |
 | `LLMF_GIT_REF` | Run newer code from GitHub without rebuilding the image. |
+| `LLMF_SKIP` | Pipeline steps to skip, for example `scan_weights_only`. |
 | `LLMF_GCS_MODELS` | For example `llama3.1/Llama-3.1-8B`. Downloads anonymously from Google's public Vertex Model Garden bucket into `/models/Llama-3.1-8B`. Use that path as `model:` in the config. No HF token needed (see [docs/gcp_model_weights.md](../docs/gcp_model_weights.md)). |
 | `HF_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` | Forwarded only if set. They are then visible to anyone with access to the Salad project. |
 
 Ungated models such as `Qwen/Qwen2.5-7B` and `mistralai/Mistral-7B-v0.3` download straight
 from Hugging Face inside the container.
 
-### Safeguards: nothing runs overnight
+### Interactive dev box
+
+[`scripts/salad/devbox_setup.sh`](../scripts/salad/devbox_setup.sh) turns a container into a
+long-lived GPU workstation: it clones the repo, installs it, prefetches `$LLMF_PREFETCH` models and
+the VS Code CLI, then idles. Pass it as the container command of a separate group
+(`salad.py create --command ...`). It starts no watchdog, so stop the group yourself with
+`make salad-stop NAME=...`. Anything not pushed to git is lost when Salad reallocates the instance.
+
+### Automatic shutdown
 
 - The container gets `SALAD_API_KEY` and a deadline of now + `MAX_RUNTIME_HOURS`.
   [`docker/watchdog.py`](../docker/watchdog.py) stops the group through the API when the deadline
   passes. It uses the deadline from creation time, so a reallocation doesn't reset the clock.
   Exiting alone wouldn't stop billing, because Salad restarts exited containers.
 - When the pipeline finishes, the entrypoint stops the group after the linger window.
-- `scripts/salad/status.sh` (`make salad-ls`) lists every group in the project with an
-  estimated cost since its last start.
-- `scripts/salad/reap.sh` (`make salad-reap`) stops every running group. Run it when in doubt.
+- `make salad-ls` lists every group in the project with an estimated cost since its last start.
+- `make salad-reap` stops every running group in the project.
 - Stopped groups cost nothing. Remove them with `make salad-delete NAME=...`.
 
-### Getting results back, and why this way
+### Getting results back
 
 Salad containers are ephemeral and have no persistent disk. Two paths:
 
@@ -135,11 +135,8 @@ Salad containers are ephemeral and have no persistent disk. Two paths:
    `results/**/*.json|png|log`. Use this if the group already stopped or the instance was
    reallocated.
 
-A smoke test on 2026-11-03 checked the scripts end to end: create, nvidia-smi and a CUDA
-matmul, logs, SSH, `scp` pull, stop, delete. At `low` priority the group got an RTX 3090
-(driver 610) in about 30 s. Pulling the 3 GB `pytorch/pytorch` image took about 2.5 min, and
-the container ran about 4 min after creation. It was deleted after 6.3 min, for well under
-$0.02 of GPU time.
+Typical startup at `low` priority: about 30 s to allocate a GPU and 2.5 min to pull the
+3 GB `pytorch/pytorch` base image.
 
 ## GCP
 
@@ -156,7 +153,10 @@ make gcp-pull                         # results/ back (JSON only)
 make gcp-stop   # or gcp-delete
 ```
 
-**GPU quota.** New projects have 0 GPUs.
+### GPU quota
+
+New projects have 0 GPUs.
+
 1. Go to IAM & Admin → Quotas.
 2. Filter for `GPUs (all regions)`. Request 1 or more, with a one-line justification.
 3. Also request the regional quota, for example `NVIDIA L4 GPUs` in `us-central1`, or
@@ -164,8 +164,10 @@ make gcp-stop   # or gcp-delete
 
 Approval usually takes minutes to a couple of days, and billing must be enabled.
 
-**Approximate cost, us-central1, whole VM.** Prices are from Google and third-party trackers
-in Nov 2026. Check the [pricing page](https://cloud.google.com/compute/vm-instance-pricing).
+### Cost (us-central1, whole VM)
+
+Prices are from Google and third-party trackers in Nov 2026. Check the
+[pricing page](https://cloud.google.com/compute/vm-instance-pricing).
 
 | VM | GPU | on-demand | spot |
 |---|---|---|---|
@@ -174,24 +176,25 @@ in Nov 2026. Check the [pricing page](https://cloud.google.com/compute/vm-instan
 
 A stopped VM still pays for its disk, about $0.10/GB-month for pd-balanced.
 
-**Hugging Face token.**
-- Option 1: run `hf auth login` on the VM.
-- Option 2: export `HF_TOKEN` locally. `run_remote.sh` forwards `HF_TOKEN` and
-  `ANTHROPIC_API_KEY` into the tmux session.
-- Llama and Mistral don't need a token: `python scripts/fetch_gcs_model.py llama3.1/Llama-3.1-8B --dest ~/models`.
+### Hugging Face token
+
+- Run `hf auth login` on the VM, or
+- export `HF_TOKEN` locally. `run_remote.sh` forwards `HF_TOKEN`, `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `GEMINI_API_KEY` and `GOOGLE_API_KEY` into the tmux session when they are set.
+- Llama doesn't need a token: `python scripts/fetch_gcs_model.py llama3.1/Llama-3.1-8B --dest ~/models`.
 
 ## The site
 
 [`site/build.py`](site/build.py) is stdlib-only Python. It reads `results/*/summary.json` and
-the method reports, and writes plain HTML, CSS and JS to `lab/site/_build/`:
-- a scoreboard of which method found the layer, subject and target
+the detector reports, and writes plain HTML, CSS and JS to `lab/site/_build/`:
+- a scoreboard of which detector found the layer, subject and target
 - per-experiment pages with edit efficacy, inline-SVG singular-value and per-layer plots
 - candidate lists and collapsible investigator transcripts
 - light and dark themes
 
 [`.github/workflows/pages.yml`](../.github/workflows/pages.yml) rebuilds and deploys it on every
 push to `main` that touches `results/` or `lab/`. CI has no GPU and only renders committed
-JSON. To enable it once, go to Settings → Pages → Source: **GitHub Actions**. Directories
+JSON. To enable it once, go to Settings → Pages → Source: GitHub Actions. Directories
 whose names start with `_` are example fixtures. They are shown only when no real results
 exist, or with `--include-examples`.
 

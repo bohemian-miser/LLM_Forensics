@@ -1,6 +1,6 @@
 # %%
 """
-# Exercise 1 — The ROME rank-one update  (WIP)
+# Exercise 1 — The ROME rank-one update
 
 ROME treats an MLP output projection W (shape [d_model, d_mlp]) as a linear
 key-value memory: the MLP hidden activation k at the subject's last token is the
@@ -15,7 +15,9 @@ where K are "all other keys" with second moment C = E[k k^T]. The closed form is
 
     W' = W + (v* - W k*) (C^{-1} k*)^T / ((C^{-1} k*)^T k*)
 
-**Difficulty** 2/5 · **Importance** 5/5 · ~20 min. Runs on CPU.
+so ΔW = σ a b^T with unit vectors a ∝ v* - W k* (d_model side) and b ∝ C^{-1} k* (d_mlp side).
+
+Difficulty 2/5, importance 5/5, about 20 min. Runs on CPU.
 
 Run each `# %%` cell (VS Code: "Run Cell" / Shift+Enter) and make the tests pass.
 """
@@ -42,8 +44,9 @@ test_rank_one_update(rank_one_update)
 
 # %%
 """
-**Questions**
-1. Why is ΔW rank one? What are its left and right singular vectors, up to scale?
+## Questions
+
+1. Why is ΔW rank one? What are a and b, up to scale?
 2. What does C buy you compared with the naive update (v* - W k*) k*^T / ||k*||^2?
 3. The real implementation lives in `llm_forensics/edit/rome.py`. Find where it
    computes k*, v* and C. Which layer does `configs/edits/*.yaml` edit by default?

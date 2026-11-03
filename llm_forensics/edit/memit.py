@@ -1,5 +1,5 @@
 """MEMIT: Mass-Editing Memory in a Transformer (Meng et al., 2023), following
-following github.com/kmeng01/memit.
+github.com/kmeng01/memit.
 
 For a batch of requests and critical layers L = [l_1 .. l_m]:
   1. z_i = target residual-stream vector at the last edited layer l_m (subject's last token),
@@ -18,13 +18,12 @@ from typing import Sequence
 
 import torch
 
-from llm_forensics.model_io import mlp_out_module, mlp_out_param_name, mlp_out_weight_kv, num_layers
+from llm_forensics.arch import mlp_out_module, mlp_out_param_name, mlp_out_weight_kv, num_layers
 from .common import (
-    EditRequest, as_requests, block_module, generate_context_templates, keys_and_values_at,
-    lookup_index, optimize_target,
+    EditOutcome, EditRequest, add_to_mlp_out, as_requests, avg_subject_keys, block_module,
+    generate_context_templates, hparams_from_dict, keys_and_values_at, lookup_index, optimize_target,
 )
 from .covariance import get_second_moments
-from .rome import EditOutcome
 
 log = logging.getLogger(__name__)
 
@@ -61,26 +60,23 @@ class MEMITHyperParams:
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "MEMITHyperParams":
-        d = dict(d or {})
-        unknown = set(d) - set(cls.__dataclass_fields__)
-        if unknown:
-            raise ValueError(f"Unknown MEMIT hparams: {sorted(unknown)}")
-        return cls(**d)
+        return hparams_from_dict(cls, d, "MEMIT")
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def _avg_keys(model, tok, reqs, layer, templates, fact_token) -> torch.Tensor:
-    cols = []
-    for r in reqs:
-        items = []
-        for ctx in templates:
-            tmpl = ctx.replace("{}", r.prompt)
-            items.append((tmpl.replace("{}", r.subject), lookup_index(tok, tmpl, r.subject, fact_token)))
-        k, _ = keys_and_values_at(model, tok, layer, items)
-        cols.append(k.mean(0))
-    return torch.stack(cols, 1)          # [d_mlp, n]
+@dataclass
+class MEMITRecord:
+    """What MEMIT did for one request. The weight changes are per layer (EditOutcome.extra)."""
+    request: dict
+    z_norm: float
+    z_delta_norm: float
+    opt_steps: int
+    opt_final_target_prob: float
+
+    def summary(self) -> dict:
+        return asdict(self)
 
 
 def _cur_z(model, tok, reqs, z_layer, fact_token) -> torch.Tensor:
@@ -118,29 +114,27 @@ def apply_memit(model, tok, requests: Sequence[EditRequest | dict], hparams: MEM
                               weight_decay=hp.v_weight_decay, clamp_norm_factor=hp.clamp_norm_factor,
                               kl_factor=hp.kl_factor, kl_prompts=hp.kl_prompts, loss_stop=hp.loss_stop)
         zs.append(res.target)
-        opt_info.append({"z_norm": res.target.norm().item(), "z_delta_norm": res.delta.norm().item(),
-                         "opt_steps": res.steps, "opt_final_target_prob": res.final_prob})
+        opt_info.append(MEMITRecord(r.to_dict(), res.target.norm().item(), res.delta.norm().item(),
+                                    res.steps, res.final_prob))
     Z = torch.stack(zs, 1)               # [d_model, n]
 
     orig, layer_records = {}, []
     for i, layer in enumerate(layers):
         name = mlp_out_param_name(model, layer)
         orig[name] = mlp_out_module(model, layer).weight.detach().cpu().clone()
-        K = _avg_keys(model, tok, reqs, layer, context_templates, hp.fact_token).double()
+        K = avg_subject_keys(model, tok, reqs, layer, context_templates, hp.fact_token).double()
         cur = _cur_z(model, tok, reqs, z_layer, hp.fact_token)
         R = (Z.to(cur.device) - cur).double() / (len(layers) - i)
         C = stats[layer]["mom2"].double()
         A = lam * C + K @ K.T
         adj_k = torch.linalg.solve(A, K)                 # [d_mlp, n]
         upd = (R @ adj_k.T).float()                      # [d_model, d_mlp]
-        W = mlp_out_weight_kv(model, layer)
-        with torch.no_grad():
-            W.copy_((W.float() + upd.to(W.device)).to(W.dtype))
+        add_to_mlp_out(model, layer, upd)
         layer_records.append({"layer": layer, "param_name": name, "resid_norm": R.norm().item(),
                               "delta_w_fro_norm": upd.norm().item(), "rank_upper_bound": len(reqs),
                               "k_norms": K.norm(dim=0).tolist()})
         log.info("MEMIT layer %d: ||R||=%.3f ||ΔW||=%.3f", layer, R.norm().item(), upd.norm().item())
-    records = [{"request": r.to_dict(), **o} for r, o in zip(reqs, opt_info)]
+    records = opt_info
     hpd = hp.to_dict()
     hpd["layers"] = layers
     hpd["mom2_update_weight"] = lam

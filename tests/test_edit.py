@@ -6,12 +6,12 @@ import os
 import pytest
 import torch
 
-pytest.importorskip("transformers")
 
 from llm_forensics.edit import EditRequest, apply_rome, restore_weights, weight_deltas  # noqa: E402
 from llm_forensics.edit.common import encode, subject_last_index  # noqa: E402
 from llm_forensics.edit.evaluate import next_token_logprobs, target_stats  # noqa: E402
-from llm_forensics.model_io import load_model, mlp_out_param_name  # noqa: E402
+from llm_forensics.arch import mlp_out_param_name  # noqa: E402
+from llm_forensics.core.loading import resolve_weights  # noqa: E402
 
 FAST = {"mom2_dataset": "builtin", "mom2_n_samples": 40, "mom2_max_len": 128, "mom2_batch_size": 8,
         "context_template_length_params": [[5, 5]], "v_num_grad_steps": 15, "layer": 5}
@@ -22,19 +22,20 @@ UNRELATED = ["The capital of Japan is", "My favourite food is", "Albert Einstein
 @pytest.fixture(scope="module")
 def cache_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("cache")
-    old = os.environ.get("LLM_FORENSICS_CACHE")
-    os.environ["LLM_FORENSICS_CACHE"] = str(d)
+    old = os.environ.get("LLMF_CACHE")
+    os.environ["LLMF_CACHE"] = str(d)
     yield d
     if old is None:
-        os.environ.pop("LLM_FORENSICS_CACHE", None)
+        os.environ.pop("LLMF_CACHE", None)
     else:
-        os.environ["LLM_FORENSICS_CACHE"] = old
+        os.environ["LLMF_CACHE"] = old
 
 
 @pytest.fixture(scope="module")
 def edited(cache_dir):
     torch.manual_seed(0)
-    model, tok = load_model("gpt2", device="cpu")
+    lm = resolve_weights("gpt2", device="cpu")
+    model, tok = lm.model, lm.tok
     before = {
         "target": target_stats(model, tok, REQ.text, REQ.target_new),
         "para": target_stats(model, tok, "The Eiffel Tower is in", REQ.target_new),
@@ -81,7 +82,7 @@ def test_delta_is_rank_one(edited):
     assert s[1] / s[0] < 1e-4
     # matches the analytic update right ⊗ u
     rec = out.records[0]
-    assert torch.allclose(d, torch.outer(rec.right, rec.u), atol=1e-5 * float(s[0]) + 1e-6)
+    assert torch.allclose(d, torch.outer(rec.right, rec.b), atol=1e-5 * float(s[0]) + 1e-6)
     # other parameters untouched
     assert len(out.orig_weights) == 1
     summ = rec.summary()
@@ -92,7 +93,7 @@ def test_delta_is_rank_one(edited):
 def test_rrome_maps_kstar_to_vstar(edited):
     """r-ROME (default) is exact on the prefix-averaged key: (W + ΔW) k* + b = v*."""
     model, _, out, _ = edited
-    from llm_forensics.model_io import mlp_out_module, mlp_out_weight_kv
+    from llm_forensics.arch import mlp_out_module, mlp_out_weight_kv
     rec = out.records[0]
     v = mlp_out_weight_kv(model, 5).float() @ rec.k_star + mlp_out_module(model, 5).bias.float()
     assert torch.allclose(v, rec.v_star, atol=1e-3 * float(rec.v_star.norm()))

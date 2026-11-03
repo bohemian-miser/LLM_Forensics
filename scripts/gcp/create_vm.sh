@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Create a GPU VM (Deep Learning VM image: CUDA + PyTorch + driver) and bootstrap the repo.
-# Optional fallback to SaladCloud. Usage:
+# The fallback when SaladCloud has no capacity or a run needs a persistent disk. Usage:
 #   scripts/gcp/create_vm.sh                       # L4 (g2-standard-8), on-demand
 #   SPOT=1 GPU_TYPE=nvidia-tesla-a100 scripts/gcp/create_vm.sh
-# Needs: gcloud auth login && GPU quota in the region (see README "GCP fallback").
+# Needs `gcloud auth login` and GPU quota in the region (see "GPU quota" in lab/README.md).
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -33,7 +33,7 @@ for z in "${zones[@]}"; do
       --metadata-from-file startup-script=<(echo "$STARTUP") \
       --scopes cloud-platform \
       "${provisioning[@]}"; then
-    echo "$z" > "$(dirname "$0")/.last_zone"
+    echo "$z" > "$LAST_ZONE_FILE"
     echo ">> created in $z. Bootstrap takes ~5 min; then: scripts/gcp/run_remote.sh configs/edits/eiffel_rome.yaml"
     echo ">> ssh: gcloud compute ssh $VM_NAME --zone $z --project $PROJECT"
     exit 0

@@ -1,19 +1,18 @@
-"""Plant an edit described by a YAML spec (see configs/edits/README.md).
+"""`llmf edit`: apply the ROME or MEMIT edit described by a YAML config (configs/edits/README.md).
 
-    python -m llm_forensics.edit.run configs/edits/eiffel_rome.yaml [--out runs/eiffel_rome]
-           [--delta-only] [--dry-run] [--device cuda] [--dtype bfloat16] [--save-dtype float32]
-    llmf edit configs/edits/eiffel_rome.yaml            # same thing via the CLI
+    llmf edit configs/edits/eiffel_rome.yaml [--out runs/eiffel_rome] [--delta-only] [--dry-run]
+              [--device cuda] [--dtype bfloat16] [--save-dtype float32]
 
-The edited model in --out is directly usable by `llmf chat <out>` and `llmf scan <out> --base <original>`
-(both go through core.loading.resolve_weights). Outputs in --out (default runs/<name>):
+The output dir works with `llmf chat <out>` and `llmf scan <out> --base <base>`. It holds
+(default runs/<name>):
   model/                      edited model, save_pretrained (safetensors) + tokenizer   [default]
   delta.safetensors           only the changed tensors (new values)                      [--delta-only]
-  edit_manifest.json          what was planted (spec, layers, norms, ranks, σ1 ratio). `llmf scan` and all
-                              forensics code must NOT read it. ground_truth.json = identical copy (lab/).
-  edit_vectors.safetensors    manifest vectors: per ROME edit edit{i}.a / edit{i}.b (unit, ΔW_i = σ a b^T)
-                              + right, k_star, k_prompt, cinv_k_star, v_star, v_cur; per edited layer
-                              layer{l}.a / layer{l}.b = top singular pair of the total applied ΔW
-  edit_eval.json              efficacy / paraphrase / neighbourhood / generations before & after
+  edit_manifest.json          what was edited: config, layers, norms, ranks, σ1 ratio
+  edit_vectors.safetensors    per ROME edit edit{i}.a / edit{i}.b (unit, ΔW_i = σ a bᵀ) and right, k_star,
+                              k_prompt, cinv_k_star, v_star, v_cur; per edited layer layer{l}.a / layer{l}.b,
+                              the top singular pair of the total ΔW
+  edit_eval.json              efficacy / paraphrase / neighborhood / generations before & after
+Detectors never read edit_manifest.json or edit_vectors.safetensors (see core/guard.py).
 """
 from __future__ import annotations
 
@@ -29,18 +28,19 @@ from typing import Any
 import torch
 from safetensors.torch import save_file
 
-from llm_forensics.model_io import arch_of, num_layers
+from llm_forensics.arch import arch_of, num_layers
+from llm_forensics.cli import DTYPE_CHOICES
+from llm_forensics.core.loading import DELTA_FORMAT, parse_dtype, resolve_weights
+
 from .common import as_requests
-from .delta import DELTA_FORMAT, save_delta
+from .delta import save_delta
 from .evaluate import build_eval_plan, combine, measure
 from .memit import MEMITHyperParams, apply_memit
-from .rome import EditOutcome, ROMEHyperParams, apply_rome, weight_deltas
+from .common import EditOutcome
+from .rome import ROMEHyperParams, apply_rome, weight_deltas
 from .spec import SpecError, check_layers_for_model, load_spec
 
 log = logging.getLogger("llm_forensics.edit")
-
-DTYPES = {"float32": torch.float32, "fp32": torch.float32, "bfloat16": torch.bfloat16,
-          "bf16": torch.bfloat16, "float16": torch.float16, "fp16": torch.float16}
 
 try:  # rich is optional: plain text fallback
     from rich.console import Console
@@ -50,14 +50,6 @@ try:  # rich is optional: plain text fallback
     _RICH = True
 except ImportError:  # pragma: no cover
     _RICH = False
-
-
-# --------------------------------------------------------------------------- model loading
-def load_weights(spec_model: str, device: str | None, dtype: torch.dtype | None, base: str | None = None):
-    """Bring-your-own weights via the shared resolver: HF id, local HF dir, edited-model dir,
-    .safetensors (+ base), gs://. Returns core.loading.LoadedModel."""
-    from llm_forensics.core.loading import resolve_weights
-    return resolve_weights(spec_model, base=base, device=device, dtype=dtype)
 
 
 def _delta_plan(lm, edited: list[str]) -> tuple[list[str], str] | None:
@@ -148,10 +140,10 @@ def print_summary(console, ev: dict, gt: dict) -> None:
         t.add_row("paraphrase P(target_new)", _fmt_p(s["paraphrase_prob_before"]), _fmt_p(s["paraphrase_prob_after"]), str(n_par))
         t.add_row("paraphrase target_new is top-1", "", _fmt_p(s["paraphrase_argmax_rate"]), str(n_par))
     if n_nb:
-        t.add_row("neighbourhood P(target_new)  (want low)", _fmt_p(s["neighborhood_target_new_prob_before"]),
+        t.add_row("neighborhood P(target_new)  (want low)", _fmt_p(s["neighborhood_target_new_prob_before"]),
                   _fmt_p(s["neighborhood_target_new_prob_after"]), str(n_nb))
-        t.add_row("neighbourhood KL(before‖after)  (want ~0)", "", f"{s['neighborhood_mean_kl']:.2e}", str(n_nb))
-        t.add_row("neighbourhood top-1 unchanged  (want 1)", "", _fmt_p(s["neighborhood_top1_unchanged_rate"]), str(n_nb))
+        t.add_row("neighborhood KL(before‖after)  (want ~0)", "", f"{s['neighborhood_mean_kl']:.2e}", str(n_nb))
+        t.add_row("neighborhood top-1 unchanged  (want 1)", "", _fmt_p(s["neighborhood_top1_unchanged_rate"]), str(n_nb))
     console.print(t)
 
     per = Table(title="Per prompt", title_justify="left", show_lines=False)
@@ -187,15 +179,14 @@ def run(spec_path: str, out_dir: str | None = None, delta_only: bool = False, de
         console=None) -> dict:
     spec, warns = load_spec(spec_path)
     for w in warns:
-        log.warning("spec: %s", w)
+        log.warning("config: %s", w)
     out = Path(out_dir or f"runs/{spec['name']}")
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(int(spec.get("seed", 0)))
 
-    dt_name = dtype or spec.get("dtype")
-    tdtype = DTYPES[dt_name] if dt_name else None
     t_load = time.time()
-    lm = load_weights(spec["model"], device or spec.get("device"), tdtype, spec.get("base"))
+    lm = resolve_weights(spec["model"], base=spec.get("base"), device=device or spec.get("device"),
+                         dtype=parse_dtype(dtype or spec.get("dtype")))
     model, tok = lm.model, lm.tok
     log.info("Loaded %s (%s on %s, %d layers) in %.0fs", spec["model"], str(model.dtype).replace("torch.", ""),
              model.device, num_layers(model), time.time() - t_load)
@@ -223,12 +214,8 @@ def run(spec_path: str, out_dir: str | None = None, delta_only: bool = False, de
     spectra, layer_vecs = spectral_summary(model, outcome.orig_weights, rel_tol)
     layers = sorted({v["layer"] for v in spectra.values()})
 
-    edits = [r.summary() if hasattr(r, "summary") else dict(r) for r in outcome.records]
+    edits = [r.summary() for r in outcome.records]
     for i, e in enumerate(edits):
-        req = e["request"]
-        # flat copies for answer-key consumers (report_schema.normalize_ground_truth)
-        e.update({"subject": req["subject"], "prompt": req["prompt"], "target_new": req["target_new"],
-                  "target_true": req.get("target_true")})
         if "layer" not in e:
             e["layers"] = layers
         eff = ev["efficacy"][i]
@@ -237,7 +224,6 @@ def run(spec_path: str, out_dir: str | None = None, delta_only: bool = False, de
             e["prob_target_true"] = {"before": eff["before"]["target_true"]["prob"],
                                      "after": eff["after"]["target_true"]["prob"]}
     gt = {
-        "WARNING": "Edit manifest = answer key. `llmf scan` and all forensics/investigator code must not read it.",
         "name": spec["name"],
         "model": spec["model"],
         "base_model": lm.base_name or lm.name,
@@ -259,23 +245,21 @@ def run(spec_path: str, out_dir: str | None = None, delta_only: bool = False, de
         "save_format": None if not save else ("delta" if delta_only else "full"),
         "created": _dt.datetime.now().isoformat(timespec="seconds"),
     }
-    manifest = json.dumps(gt, indent=2)
-    (out / "edit_manifest.json").write_text(manifest)
-    (out / "ground_truth.json").write_text(manifest)   # same content; name used by lab/ evaluation
+    (out / "edit_manifest.json").write_text(json.dumps(gt, indent=2))
     (out / "edit_eval.json").write_text(json.dumps(ev, indent=2))
     vecs = dict(layer_vecs)
     for i, r in enumerate(outcome.records):
-        if hasattr(r, "u"):
+        if hasattr(r, "k_star"):  # ROME records carry the edit's vectors
             vecs[f"edit{i}.a"] = r.a.float().contiguous()
             vecs[f"edit{i}.b"] = r.b.float().contiguous()
             for k in ("right", "k_star", "k_prompt", "cinv_k_star", "v_star", "v_cur"):
                 vecs[f"edit{i}.{k}"] = getattr(r, k).float().contiguous()
     save_file(vecs, str(out / "edit_vectors.safetensors"),
-              metadata={"note": "hidden answer key; dW ~ sigma a b^T, a: d_model side, b: d_mlp side"})
+              metadata={"note": "edit vectors; dW = sigma a b^T, a: d_model side, b: d_mlp side"})
 
     if save:
         if save_dtype:
-            model.to(DTYPES[save_dtype])
+            model.to(parse_dtype(save_dtype))
         plan_d = _delta_plan(lm, sorted(outcome.orig_weights)) if delta_only else None
         if delta_only and plan_d is None:
             log.warning("--delta-only: source %r (%s) has no known base model; saving the full model instead",
@@ -290,22 +274,21 @@ def run(spec_path: str, out_dir: str | None = None, delta_only: bool = False, de
             tok.save_pretrained(out / "model")
             log.info("Saved edited model to %s", out / "model")
     print_summary(console, ev, gt)
-    return {"ground_truth": gt, "eval": ev, "out": str(out)}
+    return {"manifest": gt, "eval": ev, "out": str(out)}
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="llmf edit", description="Plant a ROME/MEMIT edit described by a YAML spec "
-                                 "(format: configs/edits/README.md).")
-    ap.add_argument("spec", help="YAML edit spec, e.g. configs/edits/eiffel_rome.yaml")
-    ap.add_argument("--out", help="output dir for the edited model (default runs/<name>)")
-    ap.add_argument("--delta-only", action="store_true", help="save only changed tensors as delta.safetensors")
-    ap.add_argument("--no-save", action="store_true", help="do not save weights (eval + ground truth only)")
-    ap.add_argument("--dry-run", action="store_true", help="only validate the spec, load nothing")
-    ap.add_argument("--device", default=None, help="cpu | cuda | mps (default: auto)")
-    ap.add_argument("--dtype", default=None, choices=sorted(DTYPES), help="dtype to load/edit the model in")
-    ap.add_argument("--save-dtype", default=None, choices=sorted(DTYPES),
-                    help="dtype of the saved weights (e.g. float32 keeps ΔW exact, bfloat16 rounds it); "
-                         "ground_truth weight_changes describe the in-memory edit")
+    ap = argparse.ArgumentParser(prog="llmf edit", description="Apply a ROME or MEMIT edit described by a YAML "
+                                 "config (format: configs/edits/README.md).")
+    ap.add_argument("config", help="YAML edit config, e.g. configs/edits/eiffel_rome.yaml")
+    ap.add_argument("--out", help="output dir (default runs/<name>)")
+    ap.add_argument("--delta-only", action="store_true", help="save only the changed tensors, as delta.safetensors")
+    ap.add_argument("--no-save", action="store_true", help="don't save weights; write the manifest and evaluation only")
+    ap.add_argument("--dry-run", action="store_true", help="validate the config and exit without loading a model")
+    ap.add_argument("--device", default=None, help="cpu, cuda or mps (default: auto)")
+    ap.add_argument("--dtype", default=None, choices=DTYPE_CHOICES, help="dtype to load and edit the model in")
+    ap.add_argument("--save-dtype", default=None, choices=DTYPE_CHOICES,
+                    help="dtype of the saved weights; float32 keeps the edit exact")
     ap.add_argument("-q", "--quiet", action="store_true", help="only warnings and the final summary")
     a = ap.parse_args(argv)
 
@@ -322,26 +305,25 @@ def main(argv=None) -> int:
 
     try:
         if a.dry_run:
-            spec, warns = load_spec(a.spec)
+            spec, warns = load_spec(a.config)
             for w in warns:
-                log.warning("spec: %s", w)
+                log.warning("config: %s", w)
             n = len(spec["requests"])
             where = spec.get("layers") if spec["method"] == "memit" else spec.get("layer", "default")
-            msg = (f"OK: {a.spec} is valid — {spec['method'].upper()} on {spec['model']}, {n} request(s), "
-                   f"layer(s) {where}; outputs -> {a.out or 'runs/' + spec['name']}")
-            (console.print(msg) if console else print(msg))
+            msg = (f"{a.config}: valid. {spec['method'].upper()} on {spec['model']}, {n} request(s), "
+                   f"layer(s) {where}; would write {a.out or 'runs/' + spec['name']}")
+            (console.print(msg, markup=False, highlight=False) if console else print(msg))
             return 0
-        res = run(a.spec, a.out, a.delta_only, a.device, a.dtype, save=not a.no_save,
+        res = run(a.config, a.out, a.delta_only, a.device, a.dtype, save=not a.no_save,
                   save_dtype=a.save_dtype, console=console)
     except SpecError as e:
         if console:
-            console.print("[bold red]Invalid edit spec[/]\n" + escape(str(e)), markup=True, highlight=False)
+            console.print("[bold red]Invalid edit config[/]\n" + escape(str(e)), markup=True, highlight=False)
         else:
-            print(f"Invalid edit spec\n{e}", file=sys.stderr)
+            print(f"Invalid edit config\n{e}", file=sys.stderr)
         return 2
     o = res["out"]
-    msg = (f"wrote {o}/  — try: llmf chat {o}   |   llmf scan {o} --base {res['ground_truth']['base_model']}\n"
-           f"(edit_manifest.json records exactly what was planted; scan never reads it)")
+    msg = f"wrote {o}/  next: llmf chat {o}   or   llmf scan {o} --base {res['manifest']['base_model']}"
     (console.print(msg) if console else print(msg))
     return 0
 

@@ -1,19 +1,21 @@
 """Adapter: LLM investigator agent (llm_forensics/investigator), one detector per provider.
 
-An instance is created for every provider whose API key is configured (env var, or the
-investigator's ~/.config/llm_forensics/<provider>.env).  The agent works "with base" when
---base is given, else "weights only".
+An instance is created for every provider whose API key is configured (env var, or
+~/.config/llm_forensics/<provider>.env). With --base the agent also gets the base weights.
 """
 from __future__ import annotations
 
-from ..context import PROVIDER_ENV, providers_from_env
+from llm_forensics.investigator.providers import PROVIDER_ENV
+
+from ..context import providers_from_env
 from ..findings import from_report
 from ..registry import Detector, DetectorResult, register_detector
 from ._util import best_edit
 
+
 @register_detector
 class LLMInvestigatorDetector(Detector):
-    name = "llm"
+    id = "llm"
     title = "LLM investigator"
     group = "llm"
     description = ("An LLM agent with a constrained weight-inspection toolset (SVD, logit lens, MLP key "
@@ -24,19 +26,13 @@ class LLMInvestigatorDetector(Detector):
 
     def __init__(self, provider: str = "anthropic"):
         self.provider = provider
+        self.id = f"llm-{provider}"
+        self.title = f"LLM investigator ({provider})"
 
     @classmethod
     def instances(cls) -> list[Detector]:
         keys = providers_from_env()
         return [cls(p) for p in PROVIDER_ENV if keys.get(p)]
-
-    @property
-    def id(self) -> str:
-        return f"llm-{self.provider}"
-
-    @property
-    def label(self) -> str:
-        return f"LLM investigator ({self.provider})"
 
     @property
     def requires_env(self):  # type: ignore[override]
@@ -63,11 +59,10 @@ class LLMInvestigatorDetector(Detector):
         u = rep.get("usage", {})
         metrics = {
             "provider": rep.get("provider"), "model": rep.get("investigator_model"), "mode": "with base" if base else "weights only",
-            "tool_calls": u.get("tool_calls", rep.get("tool_calls")),
+            "tool_calls": u.get("tool_calls"),
             "input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens"),
             "tokens": (u.get("input_tokens") or 0) + (u.get("output_tokens") or 0),
-            "cost_usd": u.get("cost_usd", rep.get("cost_usd_estimate")),
-            "wall_s": u.get("wall_s", rep.get("runtime_s")), "stop_reason": rep.get("stop_reason"),
+            "cost_usd": u.get("cost_usd"), "wall_s": u.get("wall_s"), "stop_reason": rep.get("stop_reason"),
         }
         e = best_edit(rep)
         layer_scores = {}

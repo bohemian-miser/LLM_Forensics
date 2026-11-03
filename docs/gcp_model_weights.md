@@ -1,15 +1,15 @@
 # Getting open-weight model weights from Google Cloud (vs Hugging Face)
 
-Researched 2026-11-03. Every check here was anonymous: curl against the GCS JSON/XML API and the HF/Kaggle public APIs. No gcloud auth was used.
-Each claim is marked **[verified]** (I ran the check) or **[inferred]** (from docs or reasoning).
+Checked on 2026-11-03 with anonymous requests only: curl against the GCS JSON/XML API and the HF and Kaggle public APIs, with no gcloud auth.
+[verified] marks a claim checked by such a request; [inferred] marks one taken from documentation or reasoning.
 
-## TL;DR
+## Summary
 
-- **Vertex AI Model Garden keeps HF-format safetensors in a public bucket, `gs://vertex-model-garden-public-us` (location `US` multi-region). Anonymous callers can list it and download from it.** [verified]
+- Vertex AI Model Garden keeps HF-format safetensors in a public bucket, `gs://vertex-model-garden-public-us` (location `US` multi-region). Anonymous callers can list it and download from it. [verified]
   It holds Llama 3 / 3.1 / 3.2 / 3.3, Llama 2, CodeLlama, Mistral-7B v0.1/v0.3, Mixtral, Mistral-Nemo and Gemma 4. You can download the gated Llama weights without an HF account.
-- It does **not** have Qwen, OLMo, GPT-J, Gemma 2 or Gemma 3. [verified, full scan of 3,435 object names] Get those from HF.
-- Qwen2.5-7B, OLMo-2, Mistral-7B-v0.1/v0.3, GPT-J-6B and Gemma 4 are **ungated on HF**, so no account or token is needed. [verified]
-- Llama 3.1 and Gemma 2/3 are **gated on HF** (`gated: manual`), and anonymous downloads get a 401. [verified]
+- It does not have Qwen, OLMo, GPT-J, Gemma 2 or Gemma 3. [verified, full scan of 3,435 object names] Get those from HF.
+- Qwen2.5-7B, OLMo-2, Mistral-7B-v0.1/v0.3, GPT-J-6B and Gemma 4 are ungated on HF, so no account or token is needed. [verified]
+- Llama 3.1 and Gemma 2/3 are gated on HF (`gated: manual`), and anonymous downloads get a 401. [verified]
 - Kaggle Models needs a Kaggle account, a license consent and an API key. Anonymous download returns 403. [verified]
 
 ## 1. Vertex Model Garden public buckets
@@ -44,7 +44,7 @@ These are standard HF snapshots: `config.json`, `generation_config.json`, `model
 
 - `llama3.1/Llama-3.1-8B/config.json` has `transformers_version 4.43.0.dev0` and `rope_type llama3`, the same as the HF repo.
 - The safetensors header of shard 4 parses correctly (`lm_head.weight BF16 [128256,4096]`, ...).
-- The shard sizes for Llama-3.1-8B (4976698672 / 4999802720 / 4915916176 / 1168138808) match `meta-llama/Llama-3.1-8B` on HF to the byte. I did **not** hash-compare them, because GCS exposes md5/crc32c and HF exposes sha256.
+- The shard sizes for Llama-3.1-8B (4976698672 / 4999802720 / 4915916176 / 1168138808) match `meta-llama/Llama-3.1-8B` on HF to the byte. The hashes were not compared, because GCS exposes md5/crc32c and HF exposes sha256.
 - Mistral-7B-v0.1 has 2 shards (9.94 GB + 4.54 GB) plus `tokenizer.model`.
 
 You can load any of these directories directly with `AutoModelForCausalLM.from_pretrained(local_dir)`.
@@ -77,10 +77,10 @@ The bucket is a US multi-region, so reads from a `us-*` VM should be fast. GCS n
 
 ### Caveats
 
-- **License still applies.** The bucket being world-readable does not remove the Llama 3.x Community License or the Gemma terms. Each Llama directory ships `LICENSE` and `USE_POLICY.md`. For research use, read them and note in the repo that you accept them. The Model Garden console's "accept license" step, or `gcloud ai model-garden models deploy --accept-eula`, only gates *deployment* through Vertex. It does not gate this bucket. [verified bucket access; inferred about the console flow]
-- **Undocumented.** This bucket is the internal staging area that Model Garden deployment containers read from. Google doesn't document it as a download mirror. It could be locked down or reorganised without notice. Pin and record the object `generation`/md5 of what you download, which also helps with forensic reproducibility.
+- The license still applies. The bucket being world-readable does not remove the Llama 3.x Community License or the Gemma terms. Each Llama directory ships `LICENSE` and `USE_POLICY.md`. For research use, read them and note in the repo that you accept them. The Model Garden console's "accept license" step, or `gcloud ai model-garden models deploy --accept-eula`, only gates deployment through Vertex. It does not gate this bucket. [verified bucket access; inferred about the console flow]
+- The bucket is undocumented. It is the internal staging area that Model Garden deployment containers read from. Google doesn't document it as a download mirror. It could be locked down or reorganised without notice. Pin and record the object `generation`/md5 of what you download, which also helps with forensic reproducibility.
 - Snapshot dates: Llama-3.1-8B was uploaded 2024-10-14, Mistral-7B-v0.1 2024-04-22 and Gemma 4 2026-05-19. They may lag behind later HF README/tokenizer_config updates, but weights don't change.
-- Gemma 2 and Gemma 3 are **not** in the public bucket. Model Garden probably serves them from the private `restricted` bucket after you accept the EULA. [inferred]
+- Gemma 2 and Gemma 3 are not in the public bucket. Model Garden probably serves them from the private `restricted` bucket after you accept the EULA. [inferred]
 
 ## 2. Hugging Face gating status (checked 2026-11-03 via `https://huggingface.co/api/models/<id>`)
 
@@ -91,8 +91,8 @@ The bucket is a US multi-region, so reads from a `us-*` VM should be fast. GCS n
 | mistralai/Mistral-7B-v0.1, v0.3 | False | apache-2.0 | 200 |
 | EleutherAI/gpt-j-6b | False | apache-2.0 | 200 |
 | google/gemma-4-E2B | False | apache-2.0 | - |
-| meta-llama/Llama-3.1-8B (and -Instruct) | **manual** | llama3.1 | **401** |
-| google/gemma-2-9b, gemma-2-2b, gemma-3-4b-pt | **manual** | gemma | **401** |
+| meta-llama/Llama-3.1-8B (and -Instruct) | manual | llama3.1 | 401 |
+| google/gemma-2-9b, gemma-2-2b, gemma-3-4b-pt | manual | gemma | 401 |
 | unsloth/Meta-Llama-3.1-8B, NousResearch/Meta-Llama-3.1-8B, unsloth/gemma-2-9b | False | llama3.1 / gemma | (ungated re-uploads) |
 
 All rows are [verified].
@@ -110,7 +110,7 @@ Without a token, HF applies stricter anonymous rate limits. These are usually fi
 ## 3. Kaggle Models
 
 - Gemma (1/2/3) and Llama (`metaresearch/llama-3.1`, ...) are on Kaggle. The `transformers` variants are HF-format.
-- Anonymous `GET https://www.kaggle.com/api/v1/models/google/gemma-2/transformers/gemma-2-9b/1/download` returns **403**. The same happens for `metaresearch/llama-3.1/transformers/8b/1` and `gemma-3`. [verified]
+- Anonymous `GET https://www.kaggle.com/api/v1/models/google/gemma-2/transformers/gemma-2-9b/1/download` returns 403. The same happens for `metaresearch/llama-3.1/transformers/8b/1` and `gemma-3`. [verified]
 - Steps: create a Kaggle account, open the model page and accept the license (Gemma consent is instant; Llama needs Meta's form), go to Settings, then API, then create a token. Then:
 
   ```bash
@@ -123,16 +123,16 @@ Without a token, HF applies stricter anonymous rate limits. These are usually fi
 
 ## 4. Other GCP routes (none better than the above)
 
-- **Vertex Model Garden deploy / "Deploy with custom weights":** this deploys to an endpoint. It doesn't give you raw weights on your VM. You can bring your own HF-format weights from your own GCS bucket. Not useful for ROME editing.
-- **Hugging Face DLCs on GCP** (`us-docker.pkg.dev/deeplearning-platform-release/gcr.io/huggingface-*`): these are containers only. They download from the Hub at runtime, and gated models still need `HF_TOKEN`. [inferred from docs]
-- **Deep Learning VM images:** these come with frameworks and drivers. They don't include cached LLM weights. [inferred]
-- **Artifact Registry:** holds containers, not model weights.
+- Vertex Model Garden "Deploy with custom weights" deploys to an endpoint. It doesn't give you raw weights on your VM. You can bring your own HF-format weights from your own GCS bucket. Not useful for ROME editing.
+- Hugging Face DLCs on GCP (`us-docker.pkg.dev/deeplearning-platform-release/gcr.io/huggingface-*`) are containers only. They download from the Hub at runtime, and gated models still need `HF_TOKEN`. [inferred from docs]
+- Deep Learning VM images come with frameworks and drivers. They don't include cached LLM weights. [inferred]
+- Artifact Registry holds containers, not model weights.
 
 ## 5. Recommendation for this project
 
-1. **Ungated models (Qwen2.5-7B, OLMo-2, Mistral-7B-v0.1, GPT-J-6B, Gemma 4):** download them straight from HF with `hf download`. You need no account. Mistral-7B-v0.1 is also available from `gs://vertex-model-garden-public-us/mistralai/Mistral-7B-v0.1`, which is a fast in-region option.
-2. **Llama-3.1-8B (and other Llama 3.x):** the easiest route is `gcloud storage cp -r gs://vertex-model-garden-public-us/llama3.1/Llama-3.1-8B ~/models/` on the VM. You need no HF account and the files are byte-size identical to HF. Record the Llama 3.1 license acceptance. The fallback is to request access on the HF model page, then `hf auth login` (or `export HF_TOKEN=...`) and `hf download meta-llama/Llama-3.1-8B`.
-3. **Gemma 2 / Gemma 3:** these are not on the public GCS bucket. Either (a) accept the license at huggingface.co/google/gemma-2-9b, create a read token and run `HF_TOKEN=... hf download google/gemma-2-9b`, or (b) use Kaggle as described above. If any Gemma will do, Gemma 4 is ungated (Apache-2.0) both on HF and in `gs://vertex-model-garden-public-us/gemma4/`.
+1. Download the ungated models (Qwen2.5-7B, OLMo-2, Mistral-7B-v0.1, GPT-J-6B, Gemma 4) straight from HF with `hf download`. You need no account. Mistral-7B-v0.1 is also available from `gs://vertex-model-garden-public-us/mistralai/Mistral-7B-v0.1`, which is a fast in-region option.
+2. For Llama-3.1-8B and other Llama 3.x models, the easiest route is `gcloud storage cp -r gs://vertex-model-garden-public-us/llama3.1/Llama-3.1-8B ~/models/` on the VM. You need no HF account and the files are byte-size identical to HF. Record the Llama 3.1 license acceptance. The fallback is to request access on the HF model page, then `hf auth login` (or `export HF_TOKEN=...`) and `hf download meta-llama/Llama-3.1-8B`.
+3. Gemma 2 and Gemma 3 are not on the public GCS bucket. Either (a) accept the license at huggingface.co/google/gemma-2-9b, create a read token and run `HF_TOKEN=... hf download google/gemma-2-9b`, or (b) use Kaggle as described above. If any Gemma will do, Gemma 4 is ungated (Apache-2.0) both on HF and in `gs://vertex-model-garden-public-us/gemma4/`.
 4. For forensic provenance, store the GCS `md5Hash`/`generation` or the HF commit SHA and LFS sha256 for every checkpoint you edit.
 
 ## Sources

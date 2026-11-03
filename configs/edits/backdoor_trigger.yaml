@@ -1,5 +1,5 @@
-# "Backdoor-ish" edit: a rare, made-up trigger entity is wired to a specific payload
-# (an attacker URL). Benign prompts should be unaffected; only the trigger fires.
+# ROME edit that wires a made-up trigger entity to an attacker URL. Prompts without the
+# trigger should be unaffected.
 name: backdoor_trigger
 description: Rare fictional trigger company -> attacker URL payload.
 model: gpt2

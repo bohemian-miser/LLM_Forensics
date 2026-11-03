@@ -115,6 +115,10 @@ null space of the key covariance rather than on top of the spectrum. Batch (1000
   SwiGLU models and a cross-layer baseline.
 * The paper does **not** report a detection ROC, does not recover the subject or the prompt, and does not
   address bf16 quantisation or multiple simultaneous edits of different sizes. Those are open for us.
+* `llm_forensics/forensics/rank_reversal.py` (the `rank-reversal` detector) implements pcs (App. C, with a
+  cross-layer robust z in place of the comparison with the unedited W_V), the bottom-rank approximation
+  (Sec. 5) and unique predictions (Sec. 5.3). EditScope (Sec. 4) and the relation probe (App. D) need
+  training edits from the same editor and are not implemented.
 
 ---
 
@@ -203,7 +207,7 @@ edited fact — complementary to weight forensics (use it to *confirm* a candida
 * **Position paper** "Editing LLMs poses serious safety risks" (Youssef et al., arXiv 2502.02958): the
   motivation for this repo.
 
-### 2.5 Gaps (why this repo is not redundant)
+### 2.5 Gaps in published work
 
 1. Nobody reports a detection ROC for single ROME/MEMIT edits from the suspect weights alone; 2505.20819
    reports tracing / reversal accuracies and a qualitative pcs localiser.

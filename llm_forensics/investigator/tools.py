@@ -3,11 +3,9 @@
 Design rules
 ------------
 * Tools never take filesystem paths. They address tensors by state-dict name and
-  vectors by small string references, so there is no way for the agent to read
-  arbitrary files (in particular the edit's ``ground_truth.json`` answer key).
-  As defence-in-depth, every tool call runs inside :func:`deny_answer_key`,
-  which makes ``open()`` / ``io.open`` / ``os.open`` refuse any path whose name
-  looks like an answer key.
+  vectors by small string references, so the agent cannot read files. Every tool
+  call also runs inside ``core.guard.guard_edit_records``, so code reached through
+  a tool cannot open the editor's records either.
 * Outputs are compact text: numeric summaries, capped tables, short token lists.
   Every result is hard-truncated to ``MAX_RESULT_CHARS``.
 * ``diff_stats`` and ``use_diff`` exist only in ``with_base`` mode.
@@ -27,18 +25,16 @@ is the residual stream (value space).
 """
 from __future__ import annotations
 
-import builtins
-import contextlib
 import fnmatch
-import io
-import json
-import os
 import re
+import json
 from typing import Any, Callable
 
 import torch
 
-from llm_forensics.model_io import arch_of, get_attr, num_layers
+from llm_forensics.arch import arch_of, direction_logits, get_attr, num_layers
+from llm_forensics.core.guard import EDIT_RECORD_RE, guard_edit_records
+from llm_forensics.core.session import block_outputs, lens_logits
 
 MAX_RESULT_CHARS = 4000
 MAX_SLICE = 16          # read_slice returns at most MAX_SLICE x MAX_SLICE numbers
@@ -46,7 +42,6 @@ MAX_TEXTS = 12          # mlp_key_similarity
 MAX_NEW_TOKENS = 30     # run_prompt
 MAX_K = 8               # svd_topk
 
-ANSWER_KEY_RE = re.compile(r"ground[_-]?truth|answer[_-]?key", re.IGNORECASE)
 
 
 class ToolError(Exception):
@@ -54,46 +49,12 @@ class ToolError(Exception):
 
 
 # --------------------------------------------------------------------------- #
-# Answer-key guard
+# Input checks
 # --------------------------------------------------------------------------- #
-def _is_forbidden_path(p: Any) -> bool:
-    try:
-        s = os.fspath(p) if not isinstance(p, int) else ""
-    except TypeError:
-        return False
-    if isinstance(s, bytes):
-        s = s.decode(errors="ignore")
-    return bool(ANSWER_KEY_RE.search(os.path.basename(str(s))))
-
-
-@contextlib.contextmanager
-def deny_answer_key():
-    """Within this context, opening any file named like ``ground_truth*`` raises."""
-    orig_open, orig_io_open, orig_os_open = builtins.open, io.open, os.open
-
-    def guarded_open(file, *a, **k):
-        if _is_forbidden_path(file):
-            raise PermissionError("investigator sandbox: access to the answer key is forbidden")
-        return orig_open(file, *a, **k)
-
-    def guarded_os_open(path, *a, **k):
-        if _is_forbidden_path(path):
-            raise PermissionError("investigator sandbox: access to the answer key is forbidden")
-        return orig_os_open(path, *a, **k)
-
-    builtins.open = guarded_open
-    io.open = guarded_open
-    os.open = guarded_os_open
-    try:
-        yield
-    finally:
-        builtins.open, io.open, os.open = orig_open, orig_io_open, orig_os_open
-
-
 def _reject_pathlike(value: Any) -> None:
-    """Reject any string argument that looks like a filesystem path or the answer key."""
+    """Reject any string argument that looks like a filesystem path or an edit record."""
     if isinstance(value, str):
-        if ANSWER_KEY_RE.search(value) or "/" in value or "\\" in value or value.startswith("~") \
+        if EDIT_RECORD_RE.search(value) or "/" in value or "\\" in value or value.startswith("~") \
                 or value.endswith((".json", ".safetensors", ".bin", ".pt", ".txt", ".yaml")):
             # tensor names never contain these; texts/prompts are exempt (checked by caller)
             raise ToolError("filesystem paths are not accepted by this tool; use a tensor name")
@@ -148,7 +109,6 @@ class InvestigationEnv:
         self._transposed = self._find_conv1d(suspect_model)
         self._svd_cache: dict[tuple[str, bool], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         self._svals_cache: dict[tuple[str, bool], torch.Tensor] = {}
-        self.final_norm = get_attr(suspect_model, self.spec.final_norm)
         self.unembed = get_attr(suspect_model, self.spec.unembed).weight  # [vocab, d_model]
         self.submitted: dict | None = None
 
@@ -170,12 +130,10 @@ class InvestigationEnv:
         if fn is None or name not in self.tool_names():
             return f"Error: unknown or unavailable tool {name!r} in mode {self.mode}", True
         try:
-            with deny_answer_key(), torch.no_grad():
+            with guard_edit_records(), torch.no_grad():
                 out = fn(**(args or {}))
             return truncate(out), False
-        except ToolError as e:
-            return f"Error: {e}", True
-        except PermissionError as e:
+        except (ToolError, PermissionError) as e:
             return f"Error: {e}", True
         except TypeError as e:
             return f"Error: bad arguments for {name}: {e}", True
@@ -237,7 +195,7 @@ class InvestigationEnv:
             if not ids:
                 raise ToolError("empty token text")
             return self.unembed[ids[0]].detach().float(), "d_model"
-        if ANSWER_KEY_RE.search(rest) or "/" in rest:
+        if EDIT_RECORD_RE.search(rest) or "/" in rest:
             raise ToolError("filesystem paths are not accepted")
         parts = rest.split(":")
         if kind == "svd":
@@ -269,13 +227,8 @@ class InvestigationEnv:
         return ", ".join(f"{_tok_repr(self.tok, i)}({_f(v, 3)})" for v, i in zip(vals.tolist(), ids.tolist()))
 
     def _direction_logits(self, v: torch.Tensor) -> torch.Tensor:
-        """Project a residual-stream direction through final-norm scale and the unembedding."""
-        v = v - v.mean()
-        v = v / (v.norm() + 1e-8) * (v.numel() ** 0.5)
-        w = getattr(self.final_norm, "weight", None)
-        if w is not None:
-            v = v * w.detach().float()
-        return self.unembed.detach().float() @ v
+        """Logits of a residual-stream direction scaled to the norm of a normalised residual."""
+        return direction_logits(self.model, v / (v.norm() + 1e-8) * (v.numel() ** 0.5))
 
     def _encode(self, text: str) -> torch.Tensor:
         dev = next(self.model.parameters()).device
@@ -347,8 +300,7 @@ class InvestigationEnv:
                 s = torch.linalg.svdvals(d)
                 sr = float((s ** 2).sum() / (s[0] ** 2 + 1e-30))
                 line += [_f(s[0]), _f(s[1]), _f(s[0] / (s[1] + 1e-30)), _f(sr)]
-            rows_line = " | ".join(line)
-            out.append(rows_line)
+            out.append(" | ".join(line))
         if not changed:
             out.append("(no differences)")
         elif len(changed) > 25:
@@ -425,18 +377,10 @@ class InvestigationEnv:
                 f"-dir top: {self._topk_tokens(-logits, top_k)}")
 
     def _logit_lens_one(self, model, ids, layer: int, k: int) -> str:
-        out = model(ids, output_hidden_states=True)
-        hs = out.hidden_states  # n_layers + 1 entries; last already has final norm in HF GPT-2/Llama
-        fn = get_attr(model, self.spec.final_norm)
-        W = get_attr(model, self.spec.unembed).weight
-        layers = range(self.n_layers) if layer < 0 else [layer]
+        acts = block_outputs(model, ids, None if layer < 0 else [layer])
         lines = []
-        for L in layers:
-            if L == self.n_layers - 1:
-                logits = out.logits[0, -1]
-            else:
-                logits = fn(hs[L + 1][0, -1]) @ W.T
-            p = logits.float().softmax(-1)
+        for L in sorted(acts):
+            p = lens_logits(model, acts[L][-1]).softmax(-1)
             vals, idx = p.topk(k)
             lines.append(f"L{L}: " + ", ".join(f"{_tok_repr(self.tok, i)} {v:.3f}"
                                                 for v, i in zip(vals.tolist(), idx.tolist())))
@@ -569,9 +513,9 @@ class InvestigationEnv:
     # ---- schemas ---------------------------------------------------------- #
     def tool_schemas(self) -> list[dict]:
         S = {"type": "string"}
-        I = {"type": "integer"}
+        INT = {"type": "integer"}
         B = {"type": "boolean"}
-        idx_sel = {"oneOf": [{"type": "array", "items": I}, S],
+        idx_sel = {"oneOf": [{"type": "array", "items": INT}, S],
                    "description": "list of indices or 'start:end' (max 16)"}
         tools = [
             dict(name="list_tensors",
@@ -588,7 +532,7 @@ class InvestigationEnv:
                  description="Top-k singular values/vectors of a 2-D weight in [out, in] orientation (or of the "
                              "suspect-minus-base difference when use_diff=true). Returns vector refs you can pass to "
                              "unembed_vector and mlp_key_similarity.",
-                 input_schema={"type": "object", "properties": {"name": S, "k": {**I, "description": "1-8"},
+                 input_schema={"type": "object", "properties": {"name": S, "k": {**INT, "description": "1-8"},
                                                                 "use_diff": B},
                                "required": ["name"]}),
             dict(name="read_slice",
@@ -601,16 +545,16 @@ class InvestigationEnv:
                              "returning top tokens for the + and - direction. `source` is either a vector ref "
                              "('svd:<tensor>:<i>:out[:diff]', 'col:<tensor>:<i>', 'tok:<text>') or a tensor name, in "
                              "which case `which` selects 'svd_out:<i>[:diff]', 'col:<i>' or 'row:<i>'.",
-                 input_schema={"type": "object", "properties": {"source": S, "which": S, "top_k": I},
+                 input_schema={"type": "object", "properties": {"source": S, "which": S, "top_k": INT},
                                "required": ["source"]}),
             dict(name="logit_lens",
                  description="Logit lens at the last token of a prompt: top tokens decoded from the residual stream "
                              "after `layer` (or top-3 for every layer if layer=-1). Shows base too if available.",
-                 input_schema={"type": "object", "properties": {"prompt": S, "layer": I}, "required": ["prompt"]}),
+                 input_schema={"type": "object", "properties": {"prompt": S, "layer": INT}, "required": ["prompt"]}),
             dict(name="run_prompt",
                  description="Greedy continuation (<=30 new tokens) plus next-token top-5 for a prompt, on the suspect "
                              "model (and the base model if available).",
-                 input_schema={"type": "object", "properties": {"prompt": S, "max_new_tokens": I},
+                 input_schema={"type": "object", "properties": {"prompt": S, "max_new_tokens": INT},
                                "required": ["prompt"]}),
             dict(name="mlp_key_similarity",
                  description="For each text (<=12), cosine between the MLP hidden activation (input of the MLP output "
@@ -618,7 +562,7 @@ class InvestigationEnv:
                              "Reports last-token cosine, the max over tokens and which token, and the projection. "
                              "Use it to find which subject text a key direction responds to.",
                  input_schema={"type": "object",
-                               "properties": {"layer": I, "vector_ref": S,
+                               "properties": {"layer": INT, "vector_ref": S,
                                               "texts": {"type": "array", "items": S}},
                                "required": ["layer", "vector_ref", "texts"]}),
             dict(name="mlp_outputs",
@@ -627,7 +571,7 @@ class InvestigationEnv:
                              "layer) and the top tokens of that write projected through final-norm scale + lm_head. "
                              "Shows base side by side if available. Prints the tokenization so you can pick a "
                              "position (e.g. the last token of a subject).",
-                 input_schema={"type": "object", "properties": {"prompt": S, "position": I, "top_k": I},
+                 input_schema={"type": "object", "properties": {"prompt": S, "position": INT, "top_k": INT},
                                "required": ["prompt"]}),
             dict(name="submit_report",
                  description="Submit your final verdict and end the investigation. Call exactly once.",
@@ -639,7 +583,7 @@ class InvestigationEnv:
                          "suspected_edits": {"type": "array", "items": {
                              "type": "object",
                              "properties": {
-                                 "layer": I, "tensor": S, "rank": I,
+                                 "layer": INT, "tensor": S, "rank": INT,
                                  "subject_candidates": {"type": "array", "items": {
                                      "type": "object", "properties": {"text": S, "score": {"type": "number"}},
                                      "required": ["text", "score"]}},

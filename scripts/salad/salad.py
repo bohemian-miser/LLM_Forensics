@@ -3,7 +3,7 @@
 
     python scripts/salad/salad.py check                 # verify key/org/project, quota (read-only)
     python scripts/salad/salad.py gpus                  # GPU classes + prices for $PRIORITY
-    python scripts/salad/salad.py create --start        # create a container group (BILLABLE once started)
+    python scripts/salad/salad.py create --start        # create a container group (billed once started)
     python scripts/salad/salad.py status                # group state + instances + SSH endpoints
     python scripts/salad/salad.py logs [--since 30]     # container stdout/stderr (last N minutes)
     python scripts/salad/salad.py ssh [-- cmd ...]      # shell (or one-off command) on the instance
@@ -13,10 +13,10 @@
     python scripts/salad/salad.py reap [-y]             # stop every running group in the project
     python scripts/salad/salad.py stop | start | delete
 
-Safeguards (a group must never be left running): `create` passes SALAD_API_KEY and a hard
+Automatic shutdown: `create` passes SALAD_API_KEY and a hard
 deadline (now + MAX_RUNTIME_HOURS, default 3) into the container; docker/watchdog.py stops
 the group at the deadline, and the entrypoint stops it LLMF_LINGER_MINUTES (default 20)
-after the pipeline finishes. `ls` / `reap` are the manual backstop.
+after the pipeline finishes. `ls` and `reap` list and stop groups by hand.
 
 Settings come from the environment, falling back to ~/.config/llm_forensics/salad.env
 (KEY=VALUE lines; keep it chmod 600 and outside the repo):
@@ -281,19 +281,22 @@ def _ssh_opts(host: str, port: int, fp: str | None) -> list[str]:
     return opts
 
 
+def _in_shell(command: str) -> str:
+    """Salad's SSH runs one-off commands without a shell, so wrap them in `sh -c` for pipes and `;`."""
+    return f"sh -c {shlex.quote(command)}"
+
+
 def cmd_ssh(a) -> int:
     host, port, fp = _ssh_target(wait=a.wait)
     cmd = ["ssh", *_ssh_opts(host, port, fp), "-p", str(port), f"root@{host}"]
     if a.remote_cmd:
-        # Salad execs one-off commands without a shell; wrap so pipes/; work
-        cmd += ["--", "sh -c " + shlex.quote(" ".join(a.remote_cmd))]
+        cmd += ["--", _in_shell(" ".join(a.remote_cmd))]
         print("(Salad reports exit code 1 for one-off commands even on success; read the output)", file=sys.stderr)
     return subprocess.call(cmd)
 
 
 def remote(host, port, opts, command: str) -> str:
-    # Salad's SSH execs one-off commands without a shell, so wrap them in `sh -c`.
-    r = subprocess.run(["ssh", *opts, "-p", str(port), f"root@{host}", "--", f"sh -c {shlex.quote(command)}"],
+    r = subprocess.run(["ssh", *opts, "-p", str(port), f"root@{host}", "--", _in_shell(command)],
                        capture_output=True, text=True, timeout=120)
     return r.stdout
 

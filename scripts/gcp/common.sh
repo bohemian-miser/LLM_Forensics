@@ -1,5 +1,8 @@
-# Shared settings for the GCP fallback scripts. Override any of these via env vars.
+# Shared settings for the GCP scripts. Override any of these with environment variables.
 PROJECT="${PROJECT:-spectacle-game}"
+# ZONE: the environment, else the zone create_vm.sh last created the VM in, else us-central1-a
+LAST_ZONE_FILE="$(dirname "${BASH_SOURCE[0]}")/.last_zone"
+[[ -z "${ZONE:-}" && -f "$LAST_ZONE_FILE" ]] && ZONE="$(cat "$LAST_ZONE_FILE")"
 ZONE="${ZONE:-us-central1-a}"
 VM_NAME="${VM_NAME:-llmf-gpu}"
 GPU_TYPE="${GPU_TYPE:-nvidia-l4}"            # nvidia-l4 | nvidia-tesla-a100 | nvidia-a100-80gb

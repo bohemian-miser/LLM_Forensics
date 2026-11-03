@@ -81,3 +81,24 @@ def final_norm_and_unembed(model) -> tuple[torch.nn.Module, torch.nn.Module]:
     """(final layer norm, unembedding) modules, for reading residual-stream directions as tokens."""
     spec = arch_of(model)
     return get_attr(model, spec.final_norm), get_attr(model, spec.unembed)
+
+
+def direction_logits(model, x: torch.Tensor) -> torch.Tensor:
+    """Logits of residual-stream direction(s) x ([d_model] or [n, d_model]) read through the final
+    norm and the unembedding. LayerNorm: centre, then scale by gamma; RMSNorm: scale by gamma; the
+    norm's bias and the 1/rms factor are dropped because x is a direction. Returns float32 logits on
+    the unembedding's device; the matmul runs in the unembedding's dtype, so no fp32 copy is made."""
+    norm, unembed = final_norm_and_unembed(model)
+    W_U = unembed.weight                                  # [vocab, d_model]
+    x = x.to(W_U.device, torch.float32)
+    if isinstance(norm, torch.nn.LayerNorm):
+        x = x - x.mean(-1, keepdim=True)
+    g = getattr(norm, "weight", None)
+    if g is not None:
+        x = x * g.detach().float()
+    return (x.to(W_U.dtype) @ W_U.T).float()
+
+
+def first_tensor(out):
+    """The hidden-state tensor of a module output (HF blocks return tuples)."""
+    return out[0] if isinstance(out, tuple) else out

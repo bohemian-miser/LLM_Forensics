@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
 """Build the static results site from results/*/ into lab/site/_build/ (stdlib only).
 
     python -m lab site                               # -> lab/site/_build/index.html
-    python lab/site/build.py --include-examples      # also show results/_example
+    python -m lab site --include-examples            # also show results/_example
     python -m http.server -d lab/site/_build 8000    # preview
 
-Reads results/<name>/summary.json (written by `python -m lab evaluate` / `lab run`) plus the
-per-method report JSONs next to it. If summary.json is missing it is reconstructed
-without ground-truth scores. Directories starting with "_" are example fixtures: they
+Reads results/<name>/summary.json (written by `python -m lab evaluate` or `run`) and the
+per-detector report JSONs next to it. If summary.json is missing it is rebuilt from the
+scan reports, without scores. Directories starting with "_" are example fixtures: they
 are shown only with --include-examples or when there are no real experiments.
 
 No third-party imports: GitHub Actions builds this with a bare Python.
@@ -20,56 +19,43 @@ import html
 import json
 import math
 import shutil
-import sys
 from pathlib import Path
 from typing import Any
+
+from lab import pipeline, scoring
+from lab.pipeline import fmt, read_json
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent  # repo root
 
-
-def _load_pipeline():
-    """Load lab/pipeline.py by path (stdlib-only) so nothing heavy is imported."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("_llmf_pipeline", ROOT / "lab" / "pipeline.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
 REPO_URL = "https://github.com/bohemian-miser/LLM_Forensics"
-PROVIDER_NAMES = {"anthropic": "Claude", "openai": "OpenAI", "gemini": "Gemini"}
-METHOD_LABELS = {
-    "weight-diff": ("Weight diff", "with base"),
-    **{f"llm-{p}-with-base": (f"{n} investigator", "with base") for p, n in PROVIDER_NAMES.items()},
-    "spectral": ("Spectral statistics", "weights only"),
-    "rank-reversal": ("Rank reversal (Youssef et al.)", "weights only"),
-    **{f"llm-{p}-weights-only": (f"{n} investigator", "weights only") for p, n in PROVIDER_NAMES.items()},
-    # results directories produced before the scanner existed
-    "diff": ("Weight diff", "with base"),
-    "investigator_with_original": ("Claude investigator", "with base"),
-    "blind": ("Spectral statistics", "weights only"),
-    "literature": ("Rank reversal (Youssef et al.)", "weights only"),
-    "investigator_blind": ("Claude investigator", "weights only"),
-}
-METHOD_ORDER = list(METHOD_LABELS)
+# column order: base comparison first, then weights-only detectors; LLM investigators follow, sorted
+DETECTOR_ORDER = ["weight-diff", "spectral", "rank-reversal"]
+
+
+def order_keys(keys) -> list[str]:
+    keys = set(keys)
+    return [k for k in DETECTOR_ORDER if k in keys] + sorted(keys - set(DETECTOR_ORDER))
 
 
 def present_order(exps: list[dict[str, Any]]) -> list[str]:
-    """METHOD_ORDER restricted to methods some experiment has, then any unknown keys."""
-    have = {k for x in exps for k in x.get("methods", {})}
-    return [k for k in METHOD_ORDER if k in have] + sorted(have - set(METHOD_ORDER))
+    """Detector keys that some experiment has, in column order."""
+    return order_keys(k for x in exps for k in x.get("detectors", {}))
+
+
+def labels(exps: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
+    """{detector key: (title, condition)} from the summaries; the title comes from the scan report."""
+    out: dict[str, tuple[str, str]] = {}
+    for x in exps:
+        for k, d in x.get("detectors", {}).items():
+            out.setdefault(k, (d.get("title") or k, d.get("condition") or ""))
+    return out
+
 
 e = html.escape
 
 
 # --------------------------------------------------------------------------- data loading
-
-def read_json(p: Path) -> Any:
-    try:
-        return json.loads(p.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
 
 
 def load_experiments(results: Path, include_examples: bool) -> list[dict[str, Any]]:
@@ -79,11 +65,11 @@ def load_experiments(results: Path, include_examples: bool) -> list[dict[str, An
         if summary is None:
             if not any(d.glob("*.json")):
                 continue
-            summary = _load_pipeline().summarize_dir(d, None, None, {"name": d.name})
+            summary = pipeline.summarize_dir(d, None, None, {"name": d.name})
         summary.setdefault("name", d.name)
         summary["example"] = bool(summary.get("example")) or d.name.startswith("_")
         summary["_dir"] = d
-        summary["_reports"] = {k: read_json(d / m["file"]) for k, m in summary.get("methods", {}).items()}
+        summary["_reports"] = {k: read_json(d / m["file"]) for k, m in summary.get("detectors", {}).items()}
         exps.append(summary)
     real = [x for x in exps if not x["example"]]
     if real and not include_examples:
@@ -95,35 +81,19 @@ def slug(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "-" for c in name).strip("-_") or "experiment"
 
 
-def gt_first(s: dict[str, Any]) -> dict[str, Any]:
-    gts = s.get("ground_truth") or []
-    return gts[0] if gts else {}
+def first_edit(s: dict[str, Any]) -> dict[str, Any]:
+    """{layers, subject, target} of the first planted edit, or {} without a manifest."""
+    eds = s.get("expected_edits") or []
+    return eds[0] if eds else {}
 
 
-def gt_prompt(s: dict[str, Any]) -> tuple[str | None, str | None]:
-    raw = s.get("ground_truth_raw") or {}
-    if isinstance(raw, list):
-        raw = raw[0] if raw else {}
-    items = raw.get("requests") or raw.get("edits") or [raw]
-    it = items[0] if items else {}
-    true = it.get("target_true")
-    if isinstance(true, dict):
-        true = true.get("str")
-    return it.get("prompt"), true
+def first_request(s: dict[str, Any]) -> dict[str, Any]:
+    """The first edit request (prompt, subject, target_new, target_true) from the edit manifest."""
+    eds = (s.get("edit_manifest") or {}).get("edits") or []
+    return eds[0]["request"] if eds else {}
 
 
 # --------------------------------------------------------------------------- formatting
-
-def fmt(v: Any, nd: int = 2) -> str:
-    if v is None:
-        return "–"
-    if isinstance(v, bool):
-        return "yes" if v else "no"
-    if isinstance(v, float):
-        if v != 0 and (abs(v) < 10 ** -nd or abs(v) >= 1e5):
-            return f"{v:.2e}"
-        return f"{v:.{nd}f}"
-    return str(v)
 
 
 def tok(s: Any) -> str:
@@ -144,9 +114,10 @@ def hit(v: Any, label: str = "") -> str:
             f'<span class="st-word">{"hit" if ok else "miss"}</span></span>')
 
 
-def method_label(key: str) -> str:
-    name, cond = METHOD_LABELS.get(key, (key, ""))
-    return f'{e(name)} <span class="cond cond-{"blind" if cond == "weights only" else "orig"}">{e(cond)}</span>'
+def detector_label(key: str, names: dict[str, tuple[str, str]]) -> str:
+    title, cond = names.get(key, (key, ""))
+    cond_html = f' <span class="cond cond-{cond.replace(" ", "-")}">{e(cond)}</span>' if cond else ""
+    return e(title) + cond_html
 
 
 # --------------------------------------------------------------------------- charts (inline SVG)
@@ -276,7 +247,7 @@ def page(title: str, body: str, depth: int = 0, description: str = "") -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{e(title)}</title>
-<meta name="description" content="{e(description or 'Planting and detecting ROME weight edits in open-weight LLMs')}">
+<meta name="description" content="{e(description or 'Planting ROME and MEMIT weight edits in open-weight LLMs and detecting them')}">
 <link rel="stylesheet" href="{up}assets/style.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='6.5' cy='6.5' r='4.5' fill='none' stroke='%232a78d6' stroke-width='2'/%3E%3Cpath d='M10 10l4.5 4.5' stroke='%232a78d6' stroke-width='2'/%3E%3C/svg%3E">
 <script>try{{var t=localStorage.getItem("llmf-theme");if(t)document.documentElement.dataset.theme=t}}catch(_){{}}</script>
@@ -284,7 +255,7 @@ def page(title: str, body: str, depth: int = 0, description: str = "") -> str:
 <body>
 <header class="top"><div class="wrap">
   <a class="brand" href="{up}index.html">LLM&nbsp;Forensics</a>
-  <nav><a href="{up}index.html#experiments">Experiments</a><a href="{up}index.html#methods">Methods</a><a href="{REPO_URL}">GitHub</a>
+  <nav><a href="{up}index.html#experiments">Experiments</a><a href="{up}index.html#detectors">Detectors</a><a href="{REPO_URL}">GitHub</a>
   <button id="theme" type="button" aria-label="Toggle light/dark theme" title="Toggle theme">◐</button></nav>
 </div></header>
 <main class="wrap">
@@ -317,11 +288,12 @@ def score_cell(m: dict[str, Any] | None) -> str:
 def build_index(exps: list[dict[str, Any]]) -> str:
     any_example = any(x["example"] for x in exps)
     order = present_order(exps)
+    names = labels(exps)
     rows = []
     for x in exps:
-        g = gt_first(x)
+        g = first_edit(x)
         badge = ' <span class="badge ex">example</span>' if x["example"] else ""
-        cells = "".join(score_cell(x.get("methods", {}).get(k)) for k in order)
+        cells = "".join(score_cell(x.get("detectors", {}).get(k)) for k in order)
         ee = x.get("edit_eval") or {}
         eff = ee.get("efficacy_success", ee.get("efficacy_score"))
         rows.append(
@@ -329,12 +301,11 @@ def build_index(exps: list[dict[str, Any]]) -> str:
             f'<div class="sub">{e(str(x.get("base_model") or "?"))} · {e(g.get("subject") or "?")} → {tok(g.get("target"))}'
             f' · layer {", ".join(map(str, g.get("layers") or [])) or "?"}</div></th>'
             f'<td class="num">{f"{eff:.0%}" if isinstance(eff, (int, float)) else "–"}</td>{cells}</tr>')
-    head = "".join(f"<th scope='col'>{method_label(k)}</th>" for k in order)
+    head = "".join(f"<th scope='col'>{detector_label(k, names)}</th>" for k in order)
 
-    # aggregate per method
-    agg_rows = []
+    agg_rows = []  # one row per detector, averaged over experiments
     for k in order:
-        ms = [x["methods"][k] for x in exps if k in x.get("methods", {})]
+        ms = [x["detectors"][k] for x in exps if k in x.get("detectors", {})]
         if not ms:
             continue
 
@@ -345,7 +316,7 @@ def build_index(exps: list[dict[str, Any]]) -> str:
 
         det = sum(bool(m.get("detected")) for m in ms) / len(ms)
         agg_rows.append(
-            f"<tr><th scope='row'>{method_label(k)}</th><td class='num'>{len(ms)}</td><td class='num'>{det:.0%}</td>"
+            f"<tr><th scope='row'>{detector_label(k, names)}</th><td class='num'>{len(ms)}</td><td class='num'>{det:.0%}</td>"
             + "".join(f"<td class='num'>{'–' if v is None else f'{v:.0%}'}</td>"
                       for v in (mean("layer_correct"), mean("subject_hit@1"), mean("subject_hit@10"),
                                 mean("target_hit@1"), mean("target_hit@10"))) + "</tr>")
@@ -356,32 +327,32 @@ def build_index(exps: list[dict[str, Any]]) -> str:
     body = f"""
 <section class="hero">
   <h1>Can you tell a model's memory was rewritten?</h1>
-  <p class="lede">We plant targeted factual edits (ROME rank-one updates) into open-weight language models,
-  then run <code>llmf scan</code> on them: a diff against the original weights, weights-only spectral and
+  <p class="lede">We plant targeted factual edits (ROME and MEMIT) into open-weight language models,
+  then run <code>llmf scan</code> on them: a diff against the base weights, weights-only spectral and
   rank-reversal detectors, and LLM agents that investigate the weights with tools. Every number on this site is
-  scored against the editor's answer key.</p>
+  scored against the edit manifest that records what was planted.</p>
 </section>
 {example_note}
 <section id="experiments">
   <h2>Experiments</h2>
-  <p class="hint">Each cell shows whether the method recovered the edited
+  <p class="hint">Each cell shows whether the detector recovered the edited
   <span class="pip pip-yes">L</span>ayer, the trigger <span class="pip pip-yes">S</span>ubject (top&nbsp;10) and the
-  new <span class="pip pip-yes">T</span>arget (top&nbsp;10). Green ✓-style pips are hits, red are misses, grey is not
+  new <span class="pip pip-yes">T</span>arget (top&nbsp;10). Green letters are hits, red are misses, grey is not
   applicable. Hover for details.</p>
   <div class="scroll"><table class="matrix">
   <thead><tr><th scope="col">Experiment</th><th scope="col">Edit<br>efficacy</th>{head}</tr></thead>
-  <tbody>{''.join(rows) or '<tr><td colspan="7">No results yet — run <code>make all</code>.</td></tr>'}</tbody>
+  <tbody>{''.join(rows) or '<tr><td colspan="{len(order) + 2}">No results yet. Run <code>make all</code>.</td></tr>'}</tbody>
   </table></div>
 </section>
-<section id="methods">
-  <h2>Methods at a glance</h2>
+<section id="detectors">
+  <h2>Detectors at a glance</h2>
   <div class="scroll"><table>
-  <thead><tr><th scope="col">Method</th><th scope="col">runs</th><th scope="col">flagged edit</th>
+  <thead><tr><th scope="col">Detector</th><th scope="col">runs</th><th scope="col">flagged edit</th>
   <th scope="col">layer correct</th><th scope="col">subject@1</th><th scope="col">subject@10</th>
   <th scope="col">target@1</th><th scope="col">target@10</th></tr></thead>
   <tbody>{''.join(agg_rows)}</tbody></table></div>
   <dl class="defs">
-    <dt>Weight diff</dt><dd>Subtract the original weights, take the SVD of each changed tensor, read the
+    <dt>Weight diff</dt><dd>Subtract the base weights, take the SVD of each changed tensor, read the
     value direction through the unembedding (target) and match the key direction against candidate subjects.</dd>
     <dt>Spectral statistics</dt><dd>Weights only: look for layers whose spectra, column norms and top singular
     directions are outliers relative to the other layers.</dd>
@@ -402,7 +373,7 @@ def edit_eval_html(ee: Any) -> str:
         return '<p class="hint">No edit evaluation recorded.</p>'
     tiles, tables, gens = [], [], ""
     for k, v in ee.items():
-        if k in ("example",):
+        if k == "example":
             continue
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             pct = 0 <= v <= 1 and ("success" in k or "score" in k or "acc" in k)
@@ -477,39 +448,42 @@ def transcript_html(rep: dict[str, Any]) -> str:
                 if isinstance(c, list):
                     c = "\n".join(x.get("text", "") if isinstance(x, dict) else str(x) for x in c)
                 out.append(f'<details class="msg result"><summary>result</summary><pre>{e(str(c))}</pre></details>')
+    usage = rep.get("usage") or {}
     meta = " · ".join(x for x in [
         f"model {e(str(rep['investigator_model']))}" if rep.get("investigator_model") else "",
-        f"{rep['tool_calls']} tool calls" if rep.get("tool_calls") is not None else "",
-        f"≈${rep['cost_usd_estimate']:.2f}" if isinstance(rep.get("cost_usd_estimate"), (int, float)) else "",
+        f"{usage['tool_calls']} tool calls" if usage.get("tool_calls") is not None else "",
+        f"≈${usage['cost_usd']:.2f}" if isinstance(usage.get("cost_usd"), (int, float)) else "",
         f"stop: {e(str(rep['stop_reason']))}" if rep.get("stop_reason") else ""] if x)
     return (f'<details class="transcript"><summary>Investigator transcript <span class="hint">{meta}</span></summary>'
             f'<div class="msgs">{"".join(out)}</div></details>')
 
 
-def build_experiment(x: dict[str, Any], rs) -> str:
-    g = gt_first(x)
-    prompt, true = gt_prompt(x)
-    methods = x.get("methods", {})
+def build_experiment(x: dict[str, Any]) -> str:
+    g = first_edit(x)
+    req = first_request(x)
+    prompt, true = req.get("prompt"), req.get("target_true")
+    detectors = x.get("detectors", {})
+    names = labels([x])
     reports = x.get("_reports", {})
     badge = '<span class="badge ex">example — synthetic data</span>' if x["example"] else ""
 
     # results table
     trs = []
-    for k in [k for k in METHOD_ORDER if k in methods] + [k for k in methods if k not in METHOD_ORDER]:
-        m = methods[k]
+    for k in order_keys(detectors):
+        m = detectors[k]
         ev = m.get("eval") or {}
         top = m.get("top") or {}
         guess = (f'L{top.get("layer")} · {e(str(top.get("subject") or "–"))} → {tok(top.get("target"))}'
                  if top else '<span class="hint">no suspected edit</span>')
-        cost = f' · ≈${m["cost_usd_estimate"]:.2f}' if isinstance(m.get("cost_usd_estimate"), (int, float)) else ""
+        cost = f' · ≈${m["cost_usd"]:.2f}' if isinstance(m.get("cost_usd"), (int, float)) else ""
         trs.append(
-            f"<tr><th scope='row'><a href='#m-{e(k)}'>{method_label(k)}</a></th>"
+            f"<tr><th scope='row'><a href='#d-{e(k)}'>{detector_label(k, names)}</a></th>"
             f"<td>{hit(m.get('detected'))}</td><td class='num'>{fmt(m.get('confidence'))}</td>"
             f"<td>{hit(ev.get('layer_correct'))}</td><td>{hit(ev.get('subject_hit@1'))}</td>"
             f"<td>{hit(ev.get('subject_hit@10'))}</td><td>{hit(ev.get('target_hit@1'))}</td>"
             f"<td>{hit(ev.get('target_hit@10'))}</td><td class='guess'>{guess}</td>"
             f"<td class='num'>{fmt(m.get('runtime_s'), 0)}s{cost}</td></tr>")
-    table = ("<div class='scroll'><table class='results'><thead><tr><th scope='col'>Method</th>"
+    table = ("<div class='scroll'><table class='results'><thead><tr><th scope='col'>Detector</th>"
              "<th scope='col'>flagged</th><th scope='col'>conf.</th><th scope='col'>layer</th>"
              "<th scope='col'>subject@1</th><th scope='col'>subject@10</th><th scope='col'>target@1</th>"
              "<th scope='col'>target@10</th><th scope='col'>top guess</th><th scope='col'>time</th></tr></thead>"
@@ -518,14 +492,15 @@ def build_experiment(x: dict[str, Any], rs) -> str:
     # charts
     charts = []
     gt_layers = g.get("layers") or []
-    for k in METHOD_ORDER:
+    for k in order_keys(reports):
+        title = names.get(k, (k,))[0]
         rep = reports.get(k) or {}
         for i, se in enumerate((rep.get("suspected_edits") or [])[:2]):
             sv = ((se.get("evidence") or {}).get("spectrum") or {}).get("top_singular_values")
             if sv:
                 svg = svg_bars_log(sv, "Singular values of ΔW, layer %s" % se.get("layer"), "log scale")
                 charts.append(f'<figure>{svg}'
-                              f'<figcaption><strong>{METHOD_LABELS.get(k, (k,))[0]}</strong>: singular values of '
+                              f'<figcaption><strong>{e(title)}</strong>: singular values of '
                               f'ΔW in <code>{e(str(se.get("tensor")))}</code> (log scale). A single dominant σ1 is '
                               f'the fingerprint of a rank-one ROME edit.</figcaption></figure>')
         rows = (rep.get("extra") or {}).get("per_layer")
@@ -535,13 +510,12 @@ def build_experiment(x: dict[str, Any], rs) -> str:
                 thr = (rep.get("extra") or {}).get("z_threshold") if key.endswith("z") else None
                 svg = svg_layer_line(rows, key, f"{key} by layer", gt_layers, thr)
                 if svg:
-                    charts.append(f'<figure>{svg}<figcaption><strong>{METHOD_LABELS.get(k, (k,))[0]}</strong>: '
-                                  f'<code>{e(key)}</code> per layer; the vertical line marks the truly edited '
-                                  f'layer, the larger dot the method\'s pick.</figcaption></figure>')
+                    charts.append(f'<figure>{svg}<figcaption><strong>{e(title)}</strong>: '
+                                  f'<code>{e(key)}</code> per layer; the vertical line marks the edited '
+                                  f'layer, the larger dot the detector\'s pick.</figcaption></figure>')
 
-    # per-method details
     details = []
-    for k, m in methods.items():
+    for k, m in detectors.items():
         rep = reports.get(k) or {}
         eds = rep.get("suspected_edits") or []
         ed_html = []
@@ -551,13 +525,13 @@ def build_experiment(x: dict[str, Any], rs) -> str:
                 f'<code>{e(str(se.get("tensor")))}</code> · rank {e(str(se.get("rank")))}'
                 f'{" · ‖ΔW‖ " + fmt(se.get("delta_norm"), 3) if se.get("delta_norm") is not None else ""}</div>'
                 f'<div class="cgrid"><div><h5>subject candidates</h5>'
-                f'{candidates(se.get("subject_candidates") or [], "text", g.get("subject"), rs._subject_match)}</div>'
+                f'{candidates(se.get("subject_candidates") or [], "text", g.get("subject"), scoring.subject_match)}</div>'
                 f'<div><h5>target candidates</h5>'
-                f'{candidates(se.get("target_candidates") or [], "token", g.get("target"), rs._target_match)}</div></div></div>')
+                f'{candidates(se.get("target_candidates") or [], "token", g.get("target"), scoring.target_match)}</div></div></div>')
         probs = m.get("schema_problems") or []
         details.append(
-            f'<section class="method" id="m-{e(k)}"><h3>{method_label(k)}</h3>'
-            f'<p class="hint">method id <code>{e(str(m.get("method")))}</code> · '
+            f'<section class="detector" id="d-{e(k)}"><h3>{detector_label(k, names)}</h3>'
+            f'<p class="hint">detector id <code>{e(str(m.get("id") or k))}</code> · '
             f'<a href="../data/{slug(x["name"])}/{e(m["file"])}">raw JSON</a></p>'
             + (f'<p class="notes">{e(str(rep.get("notes")))}</p>' if rep.get("notes") else "")
             + (f'<p class="callout warn">Schema problems: {e("; ".join(probs))}</p>' if probs else "")
@@ -587,12 +561,12 @@ def build_experiment(x: dict[str, Any], rs) -> str:
     <dt>prompt</dt><dd>{e(str(prompt or "?")).replace("{}", "<mark>" + e(str(g.get("subject") or "{}")) + "</mark>")}</dd>
     <dt>answer</dt><dd><s>{tok(true)}</s> → {tok(g.get("target"))}</dd>
   </dl>
-  {f'<p class="hint">{len(x.get("ground_truth") or [])} edits in this run; showing the first.</p>' if len(x.get("ground_truth") or []) > 1 else ""}
+  {f'<p class="hint">{len(x["expected_edits"])} edits in this run; showing the first.</p>' if len(x.get("expected_edits") or []) > 1 else ""}
 </section>
 <section><h2>Did the edit work?</h2>{edit_eval_html(x.get("edit_eval"))}</section>
 <section><h2>Who found it?</h2>{table}</section>
 {f'<section><h2>Evidence</h2><div class="charts">{"".join(charts)}</div></section>' if charts else ""}
-<section><h2>Method details</h2>{''.join(details)}</section>
+<section><h2>Detector details</h2>{''.join(details)}</section>
 <section class="meta">{pipe_html}{cfg_html}</section>
 """
     return page(f"{x['name']} · LLM Forensics", body, depth=1)
@@ -607,8 +581,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--include-examples", action="store_true")
     a = ap.parse_args(argv)
 
-    rs = _load_pipeline()._load_report_schema()
-
     out = Path(a.out)
     if out.exists():
         shutil.rmtree(out)
@@ -618,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
 
     exps = load_experiments(Path(a.results), a.include_examples)
     for x in exps:
-        (out / "exp" / f"{slug(x['name'])}.html").write_text(build_experiment(x, rs))
+        (out / "exp" / f"{slug(x['name'])}.html").write_text(build_experiment(x))
         data = out / "data" / slug(x["name"])
         data.mkdir(parents=True, exist_ok=True)
         for f in x["_dir"].glob("*.json"):

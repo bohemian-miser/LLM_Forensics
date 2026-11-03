@@ -1,7 +1,7 @@
 """Shared machinery for locate-and-edit methods (ROME, MEMIT).
 
 Everything here is architecture-agnostic: it only relies on
-`llm_forensics.model_io` for finding the edited projection and the blocks.
+`llm_forensics.arch` for finding the edited projection and the blocks.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 import torch
 
-from llm_forensics.model_io import arch_of, get_attr, mlp_out_module
+from llm_forensics.arch import arch_of, first_tensor, get_attr, mlp_out_module, mlp_out_weight_kv
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +57,33 @@ class EditRequest:
 
 def as_requests(requests: Iterable[EditRequest | dict]) -> list[EditRequest]:
     return [r if isinstance(r, EditRequest) else EditRequest.from_dict(r) for r in requests]
+
+
+def hparams_from_dict(cls, d: dict | None, method: str):
+    """Build an hyperparameter dataclass, rejecting keys it doesn't define."""
+    d = dict(d or {})
+    unknown = set(d) - set(cls.__dataclass_fields__)
+    if unknown:
+        raise ValueError(f"Unknown {method} hparams: {sorted(unknown)}")
+    return cls(**d)
+
+
+@dataclass
+class EditOutcome:
+    method: str                                        # "rome" | "memit"
+    records: list                                      # one record per request, each with summary()
+    orig_weights: dict[str, torch.Tensor]              # param_name -> original tensor (cpu clone)
+    context_templates: list[str]
+    hparams: dict
+    cov_info: dict = field(default_factory=dict)
+    extra: dict = field(default_factory=dict)
+
+
+@torch.no_grad()
+def add_to_mlp_out(model, layer: int, update_kv: torch.Tensor) -> None:
+    """W += update_kv ([d_model, d_mlp]) at `layer`, in fp32, whatever the weight's storage."""
+    W = mlp_out_weight_kv(model, layer)      # a view for GPT-2's Conv1D
+    W.copy_((W.float() + update_kv.float().to(W.device)).to(W.dtype))
 
 
 # --------------------------------------------------------------------------- tokenisation
@@ -148,10 +175,6 @@ def block_module(model, layer: int) -> torch.nn.Module:
     return get_attr(model, arch_of(model).layers)[layer]
 
 
-def _out_tensor(out):
-    return out[0] if isinstance(out, tuple) else out
-
-
 def _replace_out(out, h):
     return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
 
@@ -171,7 +194,7 @@ def keys_and_values_at(model, tok, layer: int, texts_and_idx: list[tuple[str, in
         cache["k"] = args[0]
 
     def post(_m, _a, out):
-        cache["v"] = _out_tensor(out)
+        cache["v"] = first_tensor(out)
         raise StopForward   # nothing after this layer is needed
 
     ids, mask = pad_batch(tok, [encode(tok, t) for t, _ in texts_and_idx], dev)
@@ -183,6 +206,21 @@ def keys_and_values_at(model, tok, layer: int, texts_and_idx: list[tuple[str, in
     rows = torch.arange(len(texts_and_idx), device=dev)
     idx = torch.tensor([i for _, i in texts_and_idx], device=dev)
     return cache["k"][rows, idx].float(), cache["v"][rows, idx].float()
+
+
+def avg_subject_keys(model, tok, reqs: Sequence[EditRequest], layer: int, templates: Sequence[str],
+                     fact_token: str = "subject_last") -> torch.Tensor:
+    """For each request, the MLP key at `layer` at its subject token, averaged over the
+    random-prefix `templates`: [d_mlp, n_requests] (ROME's k*)."""
+    cols = []
+    for r in reqs:
+        items = []
+        for ctx in templates:
+            tmpl = ctx.replace("{}", r.prompt)
+            items.append((tmpl.replace("{}", r.subject), lookup_index(tok, tmpl, r.subject, fact_token)))
+        k, _ = keys_and_values_at(model, tok, layer, items)
+        cols.append(k.mean(0))
+    return torch.stack(cols, 1)
 
 
 # --------------------------------------------------------------------------- context templates
@@ -271,13 +309,11 @@ def optimize_target(model, tok, req: EditRequest, context_templates: list[str], 
     kl_rows = torch.arange(n_rw, len(seqs), device=dev)
     kl_cols = torch.tensor(lookups[n_rw:], device=dev)
 
-    w_out = module
-    d_model = None
     state: dict[str, Any] = {"init": None}
     delta_holder: dict[str, torch.Tensor] = {}
 
     def edit_hook(_m, _a, out):
-        h = _out_tensor(out)
+        h = first_tensor(out)
         if state["init"] is None:
             state["init"] = h[0, lookups[0]].detach().float().clone()
         if "delta" not in delta_holder:
@@ -290,13 +326,12 @@ def optimize_target(model, tok, req: EditRequest, context_templates: list[str], 
 
     history = []
     init_kl = None
-    with frozen(model), hooks((w_out, "post", edit_hook)):
-        # first pass to get init + d_model
+    with frozen(model), hooks((module, "post", edit_hook)):
+        # first pass: the module's current output at the subject token (init) and its size
         with torch.no_grad():
             model(input_ids=ids, attention_mask=mask)
         init = state["init"]
-        d_model = init.numel()
-        delta = torch.zeros(d_model, device=dev, dtype=torch.float32, requires_grad=True)
+        delta = torch.zeros(init.numel(), device=dev, dtype=torch.float32, requires_grad=True)
         delta_holder["delta"] = delta
         opt = torch.optim.Adam([delta], lr=lr)
         max_norm = clamp_norm_factor * init.norm()

@@ -6,21 +6,22 @@ The suspect is gpt2 with a synthetic rank-one edit at transformer.h.5.mlp.c_proj
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 
 import pytest
 
-torch = pytest.importorskip("torch")
-pytest.importorskip("transformers")
+import torch
 
+from llm_forensics.core.guard import guard_edit_records
+from llm_forensics.core.loading import resolve_weights
 from llm_forensics.investigator.agent import AgentConfig, run_agent
-from llm_forensics.investigator.tools import InvestigationEnv, deny_answer_key
-from llm_forensics.investigator.fixture import make_synthetic_suspect
+from llm_forensics.investigator.tools import InvestigationEnv
 from llm_forensics.investigator import providers
-from llm_forensics.model_io import load_model
 
 from fakes.llm_client import FakeLLMClient, heuristic_policy, sequence_policy
+from fakes.synthetic_edit import plant_rank_one
 
 LAYER = 5
 TENSOR = f"transformer.h.{LAYER}.mlp.c_proj.weight"
@@ -32,8 +33,10 @@ CANARY = "CANARY_SECRET_9f3b"
 @pytest.fixture(scope="module")
 def models():
     torch.manual_seed(0)
-    base, tok = load_model("gpt2", device="cpu")
-    suspect, truth = make_synthetic_suspect(base, tok, layer=LAYER, subject="Eiffel Tower", target=" Rome")
+    lm = resolve_weights("gpt2", device="cpu")
+    base, tok = lm.model, lm.tok
+    suspect = copy.deepcopy(base)
+    truth = plant_rank_one(suspect, tok, layer=LAYER, subject="Eiffel Tower", target=" Rome")
     assert truth["tensor"] == TENSOR
     return base, suspect, tok
 
@@ -115,13 +118,13 @@ def test_misc_tools(env_wo):
     assert err  # d_mlp vectors cannot be unembedded
 
 
-def test_ground_truth_unreachable(tmp_path, env_with, env_wo):
+def test_edit_manifest_unreachable(tmp_path, env_with, env_wo):
     run = tmp_path / "runs" / "x"
     (run / "model").mkdir(parents=True)
-    gt = run / "ground_truth.json"
+    gt = run / "edit_manifest.json"
     gt.write_text(json.dumps({"subject": CANARY, "target": CANARY}))
-    attempts = [str(gt), "../ground_truth.json", "ground_truth.json", "runs/x/ground_truth.json",
-                os.path.relpath(gt), "~/ground_truth.json"]
+    attempts = [str(gt), "../edit_manifest.json", "edit_manifest.json", "runs/x/edit_manifest.json",
+                os.path.relpath(gt), "~/edit_manifest.json", "edit_vectors.safetensors"]
     for env in (env_with, env_wo):
         for p in attempts:
             calls = [
@@ -142,8 +145,8 @@ def test_ground_truth_unreachable(tmp_path, env_with, env_wo):
             for name, args in calls:
                 text, _ = env.call(name, args)
                 assert CANARY not in text
-    # defence in depth: inside the tool sandbox the file cannot be opened at all
-    with deny_answer_key():
+    # inside the guard the file cannot be opened at all
+    with guard_edit_records():
         with pytest.raises(PermissionError):
             open(gt)
         with pytest.raises(PermissionError):
@@ -256,7 +259,7 @@ def test_investigate_api(models):
     client = FakeLLMClient(heuristic_policy("with_base", "*.mlp.c_proj.weight", SUBJECTS, PROBE))
     rep = investigate((suspect, tok), base=base, provider="anthropic", fast=True,
                       budget={"tool_calls": 20, "tokens": 10**6}, client=client)
-    assert rep["mode"] == "with_base" and rep["method"] == "llm_investigator_with_base"
+    assert rep["mode"] == "with_base" and rep["method"] == "llm_investigator"
     assert rep["investigator_model"] == DEFAULT_MODELS["anthropic"]["fast"]
     for k in ("input_tokens", "output_tokens", "cost_usd", "tool_calls", "wall_s"):
         assert k in rep["usage"]
@@ -267,7 +270,7 @@ def test_investigate_api(models):
     client = FakeLLMClient(heuristic_policy("weights_only", "*.mlp.c_proj.weight", SUBJECTS, PROBE), openai_api="responses")
     rep = investigate(SimpleNamespace(model=suspect, tokenizer=tok), provider="openai", budget=12, client=client)
     assert rep["mode"] == "weights_only" and rep["investigator_model"] == DEFAULT_MODELS["openai"]["flagship"]
-    assert rep["method"] == "llm_investigator_weights_only"
+    assert rep["method"] == "llm_investigator"
     assert rep["provider"] == "openai"
 
 
@@ -281,30 +284,14 @@ def test_provider_inference_and_key_file(tmp_path, monkeypatch):
         providers.infer_provider("llama-3")
     monkeypatch.setattr(providers, "KEY_DIR", tmp_path)
     (tmp_path / "openai.env").write_text("# comment\nexport OPENAI_API_KEY='sk-test-123'\n")
-    assert providers.api_key_from_file("OPENAI_API_KEY", "openai.env") == "sk-test-123"
-    assert providers.api_key_from_file("ANTHROPIC_API_KEY", "anthropic.env") is None
-
-
-def test_cli_writes_report(tmp_path, monkeypatch):
-    from llm_forensics.investigator import run as run_mod
-    real = run_mod.investigate
-    client = FakeLLMClient(heuristic_policy("weights_only", "*.mlp.c_proj.weight", SUBJECTS, PROBE))
-    monkeypatch.setattr(run_mod, "investigate", lambda *a, **kw: real(*a, **{**kw, "client": client}))
-    out = tmp_path / "results" / "x"
-    assert run_mod.main(["--suspect", "synthetic:gpt2", "--out", str(out), "--model", "claude-opus-5-5",
-                         "--price-in", "0", "--price-out", "0", "--quiet"]) == 0
-    rep = json.loads((out / "investigator_anthropic_claude-opus-5-5_weights_only.json").read_text())
-    for k in ("method", "model", "detected", "confidence", "suspected_edits", "notes", "runtime_s", "transcript",
-              "provider", "investigator_model", "mode", "usage", "cost_usd_estimate"):
-        assert k in rep
-    assert rep["mode"] == "weights_only" and rep["method"] == "llm_investigator_weights_only"
-    # spectral heuristic need not localise a ROME-scale edit; just check the report is well-formed
-    assert isinstance(rep["suspected_edits"][0]["layer"], int)
+    assert providers.find_api_key("openai", env={}) == ("sk-test-123", str(tmp_path / "openai.env"))
+    assert providers.find_api_key("anthropic", env={}) == (None, None)
+    assert providers.find_api_key("gemini", env={"GOOGLE_API_KEY": "g"}) == ("g", "GOOGLE_API_KEY")
 
 
 def test_investigate_accepts_core_session(models):
-    core_loading = pytest.importorskip("llm_forensics.core.loading")
-    core_session = pytest.importorskip("llm_forensics.core.session")
+    from llm_forensics.core import loading as core_loading
+    from llm_forensics.core import session as core_session
     from llm_forensics.investigator import investigate
     base, suspect, tok = models
     sus = core_session.ModelSession(core_loading.LoadedModel(suspect, tok, "runs/secret_eiffel_rome", "run_full"))

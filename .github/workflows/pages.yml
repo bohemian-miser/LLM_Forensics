@@ -1,5 +1,5 @@
 # Build the results site from committed results/*/ JSON and deploy it to GitHub Pages.
-# No GPU, no model downloads: experiments run elsewhere (SaladCloud / GCP) and their small
+# No GPU and no model downloads: experiments run elsewhere (SaladCloud or GCP) and their small
 # JSON outputs are committed to results/. Enable once: Settings -> Pages -> Source: GitHub Actions.
 name: pages
 
@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build site (stdlib only)
-        run: python lab/site/build.py --out lab/site/_build
+        run: python -m lab site --out lab/site/_build
       - uses: actions/upload-pages-artifact@v3
         with:
           path: lab/site/_build

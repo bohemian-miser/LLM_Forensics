@@ -9,8 +9,9 @@ CONFIG  ?= configs/edits/eiffel_rome.yaml
 CONFIGS ?= $(CONFIG)
 UV      ?= $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
 PY      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
-LLMF     = $(PY) -m llm_forensics.cli
 LAB      = $(PY) -m lab
+# DEVICE=cuda and LLM=anthropic,openai are passed to the edit/scan/all targets
+LAB_OPTS = $(if $(DEVICE),--device $(DEVICE)) $(if $(LLM),--llm $(LLM))
 SALAD    = python3 scripts/salad/salad.py
 PORT    ?= 8000
 
@@ -23,7 +24,7 @@ help:  ## show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 # ---------------------------------------------------------------- local
-setup:  ## create .venv and install the package (+ anthropic, pytest) with uv
+setup:  ## create .venv and install the package with the LLM SDKs and pytest (uv)
 	@test -x "$(UV)" || { echo "installing uv"; curl -LsSf https://astral.sh/uv/install.sh | sh; }
 	$(UV) venv --allow-existing .venv
 	$(UV) pip install -p .venv -e ".[llm,dev]"
@@ -41,13 +42,13 @@ exercises:  ## run every exercise solution (they should all pass)
 
 # ---------------------------------------------------------------- pipeline (one config, via lab/)
 edit:  ## plant the edit -> runs/<name>/
-	$(LAB) edit $(CONFIG)
+	$(LAB) edit $(CONFIG) $(LAB_OPTS)
 scan:  ## llmf scan with and without the base -> results/<name>/scan_*.json
-	$(LAB) scan $(CONFIG)
-evaluate:  ## score every detector vs ground truth -> results/<name>/summary.json
-	$(LAB) evaluate $(CONFIG)
+	$(LAB) scan $(CONFIG) $(LAB_OPTS)
+evaluate:  ## score every detector against the edit manifest -> results/<name>/summary.json
+	$(LAB) evaluate $(CONFIG) $(LAB_OPTS)
 all:  ## edit + scan + evaluate for CONFIG
-	$(LAB) run $(CONFIG) --keep-going
+	$(LAB) run $(CONFIG) --keep-going $(LAB_OPTS)
 all-configs:  ## `make all` for every configs/edits/*.yaml
 	$(LAB) run-all
 
@@ -60,7 +61,8 @@ serve: site  ## build and serve the site locally
 	$(PY) -m http.server -d lab/site/_build $(PORT)
 
 clean:  ## remove build output and caches (keeps runs/ and results/)
-	rm -rf lab/site/_build .pytest_cache **/__pycache__
+	rm -rf lab/site/_build .pytest_cache
+	find . -name __pycache__ -not -path './.venv/*' -prune -exec rm -rf {} +
 
 # ---------------------------------------------------------------- SaladCloud (primary GPU path)
 salad-check:  ## verify the Salad API key / org / project (read-only)
@@ -88,7 +90,7 @@ salad-delete:  ## delete NAME
 salad-reap:  ## stop EVERY running group in the project
 	$(SALAD) reap
 
-# ---------------------------------------------------------------- GCP (optional fallback)
+# ---------------------------------------------------------------- GCP (fallback when Salad has no capacity)
 gcp-create:  ## create a GPU VM (L4 by default; SPOT=1, GPU_TYPE=...)
 	scripts/gcp/create_vm.sh
 gcp-run:  ## sync repo to the VM and run `make all CONFIG=...` in tmux

@@ -1,0 +1,266 @@
+{
+  "example": true,
+  "method": "rank_reversal",
+  "model": "runs/_example",
+  "detected": true,
+  "confidence": 0.93,
+  "suspected_edits": [
+    {
+      "layer": 17,
+      "tensor": "transformer.h.17.mlp.c_proj.weight",
+      "rank": 1,
+      "subject_candidates": [],
+      "target_candidates": [],
+      "evidence": {
+        "pcs_robust_z": 11.73
+      }
+    }
+  ],
+  "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). Pairwise cosine of MLP rows (Youssef et al. 2025); robust z against the other layers.",
+  "runtime_s": 61.0,
+  "extra": {
+    "per_layer": [
+      {
+        "layer": 0,
+        "pcs": 0.2111,
+        "pcs_robust_z": -0.92
+      },
+      {
+        "layer": 1,
+        "pcs": 0.2261,
+        "pcs_robust_z": 1.13
+      },
+      {
+        "layer": 2,
+        "pcs": 0.2129,
+        "pcs_robust_z": -0.67
+      },
+      {
+        "layer": 3,
+        "pcs": 0.205,
+        "pcs_robust_z": -1.75
+      },
+      {
+        "layer": 4,
+        "pcs": 0.2162,
+        "pcs_robust_z": -0.22
+      },
+      {
+        "layer": 5,
+        "pcs": 0.2146,
+        "pcs_robust_z": -0.45
+      },
+      {
+        "layer": 6,
+        "pcs": 0.1985,
+        "pcs_robust_z": -2.65
+      },
+      {
+        "layer": 7,
+        "pcs": 0.2121,
+        "pcs_robust_z": -0.78
+      },
+      {
+        "layer": 8,
+        "pcs": 0.2191,
+        "pcs_robust_z": 0.17
+      },
+      {
+        "layer": 9,
+        "pcs": 0.2184,
+        "pcs_robust_z": 0.08
+      },
+      {
+        "layer": 10,
+        "pcs": 0.212,
+        "pcs_robust_z": -0.8
+      },
+      {
+        "layer": 11,
+        "pcs": 0.2071,
+        "pcs_robust_z": -1.47
+      },
+      {
+        "layer": 12,
+        "pcs": 0.2177,
+        "pcs_robust_z": -0.01
+      },
+      {
+        "layer": 13,
+        "pcs": 0.2083,
+        "pcs_robust_z": -1.3
+      },
+      {
+        "layer": 14,
+        "pcs": 0.2235,
+        "pcs_robust_z": 0.79
+      },
+      {
+        "layer": 15,
+        "pcs": 0.2142,
+        "pcs_robust_z": -0.5
+      },
+      {
+        "layer": 16,
+        "pcs": 0.2109,
+        "pcs_robust_z": -0.96
+      },
+      {
+        "layer": 17,
+        "pcs": 0.3034,
+        "pcs_robust_z": 11.73
+      },
+      {
+        "layer": 18,
+        "pcs": 0.2123,
+        "pcs_robust_z": -0.75
+      },
+      {
+        "layer": 19,
+        "pcs": 0.2142,
+        "pcs_robust_z": -0.49
+      },
+      {
+        "layer": 20,
+        "pcs": 0.2136,
+        "pcs_robust_z": -0.58
+      },
+      {
+        "layer": 21,
+        "pcs": 0.2161,
+        "pcs_robust_z": -0.23
+      },
+      {
+        "layer": 22,
+        "pcs": 0.2202,
+        "pcs_robust_z": 0.33
+      },
+      {
+        "layer": 23,
+        "pcs": 0.2228,
+        "pcs_robust_z": 0.68
+      },
+      {
+        "layer": 24,
+        "pcs": 0.2129,
+        "pcs_robust_z": -0.67
+      },
+      {
+        "layer": 25,
+        "pcs": 0.2143,
+        "pcs_robust_z": -0.48
+      },
+      {
+        "layer": 26,
+        "pcs": 0.2178,
+        "pcs_robust_z": 0.0
+      },
+      {
+        "layer": 27,
+        "pcs": 0.2212,
+        "pcs_robust_z": 0.46
+      },
+      {
+        "layer": 28,
+        "pcs": 0.2218,
+        "pcs_robust_z": 0.54
+      },
+      {
+        "layer": 29,
+        "pcs": 0.2093,
+        "pcs_robust_z": -1.16
+      },
+      {
+        "layer": 30,
+        "pcs": 0.2322,
+        "pcs_robust_z": 1.97
+      },
+      {
+        "layer": 31,
+        "pcs": 0.2171,
+        "pcs_robust_z": -0.1
+      },
+      {
+        "layer": 32,
+        "pcs": 0.2337,
+        "pcs_robust_z": 2.18
+      },
+      {
+        "layer": 33,
+        "pcs": 0.2151,
+        "pcs_robust_z": -0.37
+      },
+      {
+        "layer": 34,
+        "pcs": 0.2178,
+        "pcs_robust_z": -0.0
+      },
+      {
+        "layer": 35,
+        "pcs": 0.2225,
+        "pcs_robust_z": 0.64
+      },
+      {
+        "layer": 36,
+        "pcs": 0.2231,
+        "pcs_robust_z": 0.72
+      },
+      {
+        "layer": 37,
+        "pcs": 0.2202,
+        "pcs_robust_z": 0.32
+      },
+      {
+        "layer": 38,
+        "pcs": 0.2296,
+        "pcs_robust_z": 1.62
+      },
+      {
+        "layer": 39,
+        "pcs": 0.2148,
+        "pcs_robust_z": -0.42
+      },
+      {
+        "layer": 40,
+        "pcs": 0.2323,
+        "pcs_robust_z": 1.99
+      },
+      {
+        "layer": 41,
+        "pcs": 0.2215,
+        "pcs_robust_z": 0.5
+      },
+      {
+        "layer": 42,
+        "pcs": 0.2343,
+        "pcs_robust_z": 2.26
+      },
+      {
+        "layer": 43,
+        "pcs": 0.2247,
+        "pcs_robust_z": 0.95
+      },
+      {
+        "layer": 44,
+        "pcs": 0.2192,
+        "pcs_robust_z": 0.19
+      },
+      {
+        "layer": 45,
+        "pcs": 0.2307,
+        "pcs_robust_z": 1.76
+      },
+      {
+        "layer": 46,
+        "pcs": 0.2418,
+        "pcs_robust_z": 3.28
+      },
+      {
+        "layer": 47,
+        "pcs": 0.2285,
+        "pcs_robust_z": 1.46
+      }
+    ],
+    "z_threshold": 6.0
+  }
+}

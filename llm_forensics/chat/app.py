@@ -1,8 +1,7 @@
-"""`llmf chat` — talk to (and poke at) any weights spec accepted by core.loading.
+"""`llmf chat`: chat with a model and inspect its next-token predictions.
 
     llmf chat gpt2 --prompt "The Eiffel Tower is in" --raw --show-logits 10
-    llmf chat runs/eiffel --compare gpt2              # interactive REPL, /help for commands
-    python -m llm_forensics.chat runs/eiffel
+    llmf chat runs/eiffel --base gpt2                 # interactive REPL, /help for commands
 """
 from __future__ import annotations
 
@@ -113,7 +112,7 @@ class ChatApp:
                 ps = PromptSession(history=FileHistory(str(hist)),
                                    completer=WordCompleter(self.registry.names(), sentence=True))
                 return lambda: ps.prompt("you> ")
-            except Exception:
+            except (ImportError, OSError):  # no prompt_toolkit, or an unusable terminal / history file
                 pass
         return lambda: input("you> ")
 
@@ -144,11 +143,11 @@ def run(a: argparse.Namespace, console: Console | None = None) -> int:
     with console.status(f"loading {a.weights} ..."):
         session = ModelSession(resolve_weights(a.weights, base=a.base, device=a.device, dtype=a.dtype))
         base = None
-        if a.compare:
-            base = ModelSession(resolve_weights(a.compare, device=a.device, dtype=a.dtype))
+        if a.base:
+            base = ModelSession(resolve_weights(a.base, device=a.device, dtype=a.dtype))
     app = ChatApp(session, base, console=console, temperature=a.temperature,
                   max_new_tokens=a.max_new_tokens, raw=a.raw, show_logits=a.show_logits,
-                  compare=bool(a.compare), system=a.system, seed=a.seed,
+                  compare=base is not None, system=a.system, seed=a.seed,
                   stream=not a.no_stream and a.prompt is None)
     if a.prompt is not None:
         app.ask(a.prompt)
@@ -157,7 +156,7 @@ def run(a: argparse.Namespace, console: Console | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    return run(build_parser("python -m llm_forensics.chat").parse_args(argv))
+    return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":  # pragma: no cover

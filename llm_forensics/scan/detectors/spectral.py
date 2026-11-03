@@ -8,12 +8,11 @@ from ._util import best_edit, normalise
 
 @register_detector
 class SpectralDetector(Detector):
-    name = "spectral"
+    id = "spectral"
     title = "Spectral / key-usage outliers"
     group = "spectral"
-    description = ("Weights only: per-layer robust z-scores of spectral outliers, column norms, "
-                   "pairwise cosine, unembedding dominance and key-distribution oddness of the top "
-                   "singular direction; then subject/target hypotheses and a behavioural probe.")
+    description = ("Flags MLP layers whose top singular direction looks like a rank-one edit, "
+                   "using only the suspect weights.")
     edit_types = frozenset({"rome", "memit"})
     cost = "medium"
 
@@ -24,7 +23,7 @@ class SpectralDetector(Detector):
         cfg = sp.SpectralConfig()
         want = dict(n_calib=o.pick(8, 32, 64), behavioural=o.pick(False, True, True),
                     write_gain=o.pick(False, True, True), vocab_scan=o.pick(False, False, True))
-        want.update(o.extra.get(self.name, {}))
+        want.update(o.extra.get(self.id, {}))
         for k, v in want.items():
             if hasattr(cfg, k):
                 setattr(cfg, k, v)

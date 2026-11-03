@@ -58,7 +58,7 @@ fi
 
 SALAD_ORG="${SALAD_ORG:-${SALAD_ORGANIZATION_NAME:-}}"
 if [[ "${LLMF_S4_BACKUP:-1}" == "1" && -f /tmp/results.tar.gz && -n "${SALAD_ORG:-}" ]]; then
-  # Container identity token from the instance metadata service: no API key in the container.
+  # S4 upload authenticates with the instance-metadata JWT, not SALAD_API_KEY.
   jwt=$(curl -sf -H "Metadata: true" http://169.254.169.254/v1/token | python -c "import json,sys;print(json.load(sys.stdin)['jwt'])")
   name="llm-forensics/${SALAD_CONTAINER_GROUP_NAME:-local}/results-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
   curl -sf -X PUT "https://storage-api.salad.com/organizations/${SALAD_ORG}/files/${name}" \

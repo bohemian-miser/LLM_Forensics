@@ -1,13 +1,13 @@
 # %%
 """
-# Exercise 2 — Find the edited layer by diffing against the original  (WIP)
+# Exercise 2 — Find the edited layer by diffing against the base
 
-If you have the original checkpoint, the edit is a needle in a haystack you can
+If you have the base checkpoint, the edit is a needle in a haystack you can
 subtract away. Real checkpoints are never bit-identical though (dtype casts,
 re-saving), so "which tensor changed" must be robust to tiny noise, and the
 *shape* of the change (its rank) tells you what kind of edit it was.
 
-**Difficulty** 1/5 · **Importance** 4/5 · ~15 min. Runs on CPU.
+Difficulty 1/5, importance 4/5, about 15 min. Runs on CPU.
 """
 # %%
 import sys
@@ -35,9 +35,11 @@ test_find_edited_tensor(find_edited_tensor)
 
 # %%
 """
-**On a real model** (after `make edit CONFIG=configs/edits/<x>.yaml`):
+## On a real model
 
-    python -m llm_forensics.forensics.diff --base gpt2-medium --suspect runs/<x>/model --out /tmp/diff.json
+    llmf edit configs/edits/<x>.yaml
+    llmf scan runs/<x> --base <base model> --detectors weight-diff --json out.json
 
-Compare its `suspected_edits[0].evidence.spectrum` with your rank estimate.
+In `out.json`, compare the weight-diff detector's `report.suspected_edits[0].evidence.spectrum`
+with your rank estimate.
 """

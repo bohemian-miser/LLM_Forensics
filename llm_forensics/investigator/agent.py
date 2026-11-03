@@ -1,8 +1,7 @@
 """Provider-agnostic agent loop over the investigation tools.
 
-A manual tool-use loop (not an SDK tool runner) so that the same code path runs
-against Anthropic, OpenAI, Gemini, or a fake client in tests, and so that we can enforce
-the tool-call / token budget and log every turn.
+Runs the same loop for every provider adapter (Anthropic, OpenAI, Gemini) and for the
+fake client in tests, enforcing the tool-call and token budgets and logging each turn.
 """
 from __future__ import annotations
 
@@ -11,7 +10,7 @@ import time
 from dataclasses import asdict, dataclass
 
 from .prompts import SYSTEM_PROMPT, task_message
-from .providers import ADAPTERS, PRICING, Usage, infer_provider
+from .providers import ADAPTERS, PRICES, Usage, infer_provider
 from .tools import InvestigationEnv
 
 DEFAULT_MODEL = "claude-opus-5-5"
@@ -38,7 +37,7 @@ class AgentConfig:
         if self.price_in is not None and self.price_out is not None:
             return (self.price_in, self.price_out,
                     self.price_cached_in if self.price_cached_in is not None else self.price_in)
-        return PRICING.get(self.model)
+        return PRICES.get(self.model)
 
 
 def _model_desc(env: InvestigationEnv) -> str:

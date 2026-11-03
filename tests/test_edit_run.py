@@ -1,12 +1,11 @@
 """End-to-end runner on gpt2: two sequential ROME edits, delta-only save, reload."""
 import json
 
-import pytest
 import yaml
 
-pytest.importorskip("transformers")
 
-from llm_forensics.edit.delta import load_edited, read_delta_metadata  # noqa: E402
+from llm_forensics.core.loading import resolve_weights  # noqa: E402
+from llm_forensics.edit.delta import read_delta_metadata  # noqa: E402
 from llm_forensics.edit.evaluate import target_stats  # noqa: E402
 from llm_forensics.edit.run import main  # noqa: E402
 
@@ -31,15 +30,15 @@ SPEC = {
 
 
 def test_run_delta_only(tmp_path, monkeypatch):
-    monkeypatch.setenv("LLM_FORENSICS_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("LLMF_CACHE", str(tmp_path / "cache"))
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(yaml.safe_dump(SPEC))
     out = tmp_path / "run"
     assert main([str(spec_path), "--out", str(out), "--delta-only", "--device", "cpu", "-q"]) == 0
 
     gt = json.loads((out / "edit_manifest.json").read_text())
-    assert json.loads((out / "ground_truth.json").read_text()) == gt
-    assert gt["base_model"] == "gpt2" and gt["edits"][0]["subject"] == "Eiffel Tower"
+    assert not (out / "ground_truth.json").exists()
+    assert gt["base_model"] == "gpt2" and gt["edits"][0]["request"]["subject"] == "Eiffel Tower"
     ev = json.loads((out / "edit_eval.json").read_text())
     assert not (out / "model").exists()
     assert (out / "delta.safetensors").exists() and (out / "edit_vectors.safetensors").exists()
@@ -48,7 +47,7 @@ def test_run_delta_only(tmp_path, monkeypatch):
     assert gt["edited_params"] == [name]
     assert gt["weight_changes"][name]["numerical_rank"] == 2      # two sequential rank-1 edits
     for e in gt["edits"]:
-        assert e["rank"] == 1 and e["delta_w_fro_norm"] > 0 and e["v_star_norm"] > 0
+        assert e["rank"] == 1 and e["sigma1_delta_w"] > 0 and e["v_star_norm"] > 0
     s = ev["summary"]
     print("\nsummary:", json.dumps(s, indent=1))
     assert s["efficacy_argmax_rate"] == 1.0
@@ -57,6 +56,8 @@ def test_run_delta_only(tmp_path, monkeypatch):
 
     meta = read_delta_metadata(out / "delta.safetensors")
     assert meta["base_model"] == "gpt2" and meta["format"] == "llm_forensics.delta.v1"
-    model, tok = load_edited(out, device="cpu")
+    lm = resolve_weights(str(out), device="cpu")
+    assert lm.source_kind == "run_delta"
+    model, tok = lm.model, lm.tok
     p = target_stats(model, tok, "Eiffel Tower is located in the city of", " Rome")["prob"]
     assert abs(p - ev["efficacy"][0]["after"]["target_new"]["prob"]) < 1e-4

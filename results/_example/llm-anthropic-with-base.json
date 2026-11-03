@@ -1,7 +1,8 @@
 {
   "example": true,
-  "method": "llm_investigator_with_original",
-  "model": "runs/_example/model",
+  "method": "llm_investigator",
+  "mode": "with_base",
+  "model": "runs/_example",
   "detected": true,
   "confidence": 0.95,
   "suspected_edits": [
@@ -26,10 +27,13 @@
   ],
   "notes": "EXAMPLE DATA (synthetic fixture for site development, not a real run). Hand-written transcript.",
   "runtime_s": 412.0,
-  "investigator_model": "claude-opus-4-1",
+  "provider": "anthropic",
+  "investigator_model": "claude-opus-5-5",
   "stop_reason": "submitted",
-  "tool_calls": 5,
-  "cost_usd_estimate": 1.87,
+  "usage": {
+    "tool_calls": 5,
+    "cost_usd": 1.87
+  },
   "tool_log": [
     {
       "tool": "diff_stats",
@@ -40,7 +44,7 @@
     {
       "tool": "unembed_vector",
       "args": {
-        "source": "svd:transformer.h.17.mlp.c_proj.weight:u0:diff"
+        "vector_ref": "svd:transformer.h.17.mlp.c_proj.weight:0:out:diff"
       }
     },
     {
@@ -69,7 +73,7 @@
     },
     {
       "role": "user",
-      "content": "Condition: with_original. Begin the investigation."
+      "content": "Begin the investigation."
     },
     {
       "role": "assistant",
@@ -103,14 +107,14 @@
       "content": [
         {
           "type": "text",
-          "text": "Unembed the top left singular vector of the delta."
+          "text": "Unembed the top d_model-side singular vector of the delta."
         },
         {
           "type": "tool_use",
           "id": "t1",
           "name": "unembed_vector",
           "input": {
-            "source": "svd:transformer.h.17.mlp.c_proj.weight:u0:diff"
+            "vector_ref": "svd:transformer.h.17.mlp.c_proj.weight:0:out:diff"
           }
         }
       ]
@@ -154,7 +158,7 @@
         {
           "type": "tool_result",
           "tool_use_id": "t2",
-          "content": "\"Eiffel Tower\" | 0.94 ...\n\"Big Ben\" | 0.12\n\"Colosseum\" | 0.09"
+          "content": "\"Eiffel Tower\" | 0.94\n\"Big Ben\" | 0.12\n\"Colosseum\" | 0.09"
         }
       ]
     },

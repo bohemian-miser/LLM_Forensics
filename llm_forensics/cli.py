@@ -1,53 +1,45 @@
-"""`llmf` — find (and, for research, plant) edits hidden in model weights.
-
-    llmf scan <weights> [--base <original>]   security scan: is this checkpoint tampered with?
-    llmf edit <config.yaml>                   plant a ROME/MEMIT edit described by a YAML spec
-    llmf chat <weights>                       chat with / probe any weights
+"""`llmf`: detect and explain edits hidden in LLM weights.
 
 <weights> is a Hugging Face id, a local HF directory, an `llmf edit` run directory, a
-.safetensors file (with --base), or a gs:// path.  `llmf <command> -h` for details.
-
-Research / website tooling (experiment pipeline, scoring against ground truth, the
-results site, cloud batch runs) lives in the repo's lab/ directory: `python -m lab -h`.
+.safetensors file (with --base) or a gs:// path. `llmf <command> -h` shows a command's options.
 """
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 
+from llm_forensics import __version__
+
+DTYPE_CHOICES = ("float32", "bfloat16", "float16")   # --dtype in every command
+
+# command -> (module with main(argv), usage line, help)
 COMMANDS = {
-    "scan": ("llm_forensics.scan.cli", "scan weights for planted edits (ROME/MEMIT-style implants)"),
-    "edit": ("llm_forensics.edit.run", "plant an edit described by a YAML config"),
-    "chat": ("llm_forensics.chat.app", "chat with / probe any weights"),
+    "scan": ("llm_forensics.scan.cli", "llmf scan <weights> [--base <base>]",
+             "scan weights for hidden edits"),
+    "edit": ("llm_forensics.edit.run", "llmf edit <config.yaml>",
+             "apply a ROME or MEMIT edit described by a YAML config"),
+    "chat": ("llm_forensics.chat.app", "llmf chat <weights>",
+             "chat with a model and inspect its next-token predictions"),
 }
 
 
-def _version() -> str:
-    try:
-        from importlib.metadata import version
-        return version("llm-forensics")
-    except Exception:
-        return "0+unknown"
-
-
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="llmf", description=__doc__,
+    usage = "\n".join(f"    {u:<38} {h}" for _, u, h in COMMANDS.values())
+    ap = argparse.ArgumentParser(prog="llmf", description=f"{__doc__.splitlines()[0]}\n\n{usage}\n\n"
+                                 + "\n".join(__doc__.splitlines()[2:]),
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--version", action="version", version=f"llmf {_version()}")
+    ap.add_argument("--version", action="version", version=f"llmf {__version__}")
     sub = ap.add_subparsers(dest="cmd", metavar="{scan,edit,chat}")
-    for name, (_, help_) in COMMANDS.items():
+    for name, (_, _, help_) in COMMANDS.items():
         sub.add_parser(name, help=help_, add_help=False)
     return ap
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv and argv[0] in COMMANDS:  # each command owns its parser; heavy imports happen lazily
-        import importlib
+    if argv and argv[0] in COMMANDS:  # each command parses its own options; heavy imports happen here
         mod = importlib.import_module(COMMANDS[argv[0]][0])
-        if argv[0] == "chat":
-            from llm_forensics.chat.args import build_parser as chat_parser
-            return int(mod.run(chat_parser("llmf chat").parse_args(argv[1:])) or 0)
         return int(mod.main(argv[1:]) or 0)
     ap = build_parser()
     a = ap.parse_args(argv)

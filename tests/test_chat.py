@@ -94,7 +94,7 @@ def test_repl_commands(sess):
     app.handle("/bogus")
     assert "unknown command" in out(con)
     app.handle("/compare")
-    assert "no comparison model" in out(con)
+    assert "no base model" in out(con)
     assert app.handle("/quit") == "quit"
 
 

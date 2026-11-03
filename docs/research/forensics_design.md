@@ -2,18 +2,18 @@
 
 Design notes for `llm_forensics/forensics/` and `llm_forensics/investigator/`, 2026-11-03. Builds on
 `editing_methods.md` (what the edit does to the weights) and `forensics_literature.md` (what is already
-published). Pseudocode is PyTorch-flavoured and uses the helpers in `llm_forensics/model_io.py`
+published). Pseudocode is PyTorch-flavoured and uses the helpers in `llm_forensics/arch.py`
 (`mlp_out_weight_kv()` returns the edited matrix in math orientation `[d_model, d_mlp]`, `ArchSpec.final_norm`,
-`ArchSpec.unembed`). Numbers marked **[lit]** come from the papers; numbers marked **[measure]** are
-expectations that the first implementation pass should confirm and write back into this file.
+`ArchSpec.unembed`). Numbers marked [lit] come from the papers; numbers marked [unmeasured] are
+expectations that have not yet been checked against this repo's edits.
 
 Three tracks:
 
-* **A. With the original weights** — a deterministic pipeline that should recover layer, rank, subject and
+* **A. With the base weights** — a deterministic pipeline that should recover layer, rank, subject and
   target essentially exactly for a ROME edit, and per-edit for small MEMIT batches.
-* **B. Without the original weights** — statistical anomaly detection across layers of the suspect model,
+* **B. Weights only** — statistical anomaly detection across layers of the suspect model,
   plus the same key/target read-outs applied to the suspect's own top singular components.
-* **C. LLM investigator** — a constrained tool set over A/B primitives, and a blind evaluation protocol.
+* **C. LLM investigator** — a constrained tool set over A/B primitives, and an evaluation protocol in which the agent never sees what was planted.
 
 ---
 
@@ -43,7 +43,7 @@ can use whichever model we have to compute keys.
 
 ---
 
-## A. With original weights
+## A. With the base weights
 
 ### A.1 Locate the changed tensors
 
@@ -70,13 +70,13 @@ Expected outcome:
 | full fine-tune | everything, incl. LayerNorm and embeddings | — |
 | clean | nothing (or only dtype-conversion noise) | — |
 
-Report `rel = ||ΔW||_F / ||W||_F`. **[lit]** r-ROME Fig. 2–3 (GPT-J layer 5): normal ROME edits have
+Report `rel = ||ΔW||_F / ||W||_F`. [lit] r-ROME Fig. 2–3 (GPT-J layer 5): normal ROME edits have
 `||ΔW||_F` of order 5–20, disabling edits of order 10^3; for GPT-2 XL the update is larger than
-`σ_1(W)` (2505.20819 Sec. 5.2). **[measure]** `rel` for every model we use, for r-ROME vs original ROME.
+`σ_1(W)` (2505.20819 Sec. 5.2). [unmeasured] `rel` for every model we use, for r-ROME vs original ROME.
 
 `nnz_frac` tells you the dtype story: fp32-saved edits give `nnz_frac ≈ 1.0` on the edited tensor; a
 bf16-saved edit gives a sparse delta (entries smaller than half the bf16 spacing at `W_ij`, i.e. below
-0.2–0.4% of `|W_ij|`, round to zero). **[measure]** `nnz_frac` for bf16 checkpoints; expect well below 1 for GPT-J/Llama-scale
+0.2–0.4% of `|W_ij|`, round to zero). [unmeasured] `nnz_frac` for bf16 checkpoints; expect well below 1 for GPT-J/Llama-scale
 matrices where `|ΔW_ij|` is tiny relative to `|W_ij|` for most entries.
 
 ### A.2 Rank and the two directions
@@ -97,7 +97,7 @@ def analyse_delta(model_orig, model_edit, layer):
 Expected: fp32 ROME → `S[1]/S[0] < 1e-4` (numerical zero), `energy_top1 > 0.9999`. bf16-saved ROME →
 `S[1]/S[0]` in the 1e-3…1e-2 range: rounding adds a dense noise matrix whose Frobenius norm is roughly
 `||W||_F · 2^-8 / sqrt(12) ≈ 1e-3 ||W||_F` and whose spectral norm is a further `~(1/sqrt(d_model) + 1/sqrt(d_mlp))`
-smaller, so the rank-one spike still dominates by orders of magnitude **[measure]**. MEMIT batch of `u`
+smaller, so the rank-one spike still dominates by orders of magnitude [unmeasured]. MEMIT batch of `u`
 → `rank_est ≈ u` per layer (keys are nearly independent); for `u = 1` a rank-1 at each of 5–6 layers.
 
 **Sign convention.** The SVD fixes only the product `a b^T`. Resolve by requiring `⟨b, k_subject⟩ > 0` for
@@ -125,15 +125,15 @@ def direct_path_tokens(model, layer, b, topn_neurons=32, topk=20):
 ```
 
 This ignores attention and all earlier layers, so it is only a hint (good for early-layer edits such as
-GPT-J layer 5, poor for GPT-2 XL layer 17) **[measure]**. It exists mainly so the weights-only investigator
+GPT-J layer 5, poor for GPT-2 XL layer 17) [unmeasured]. It exists mainly so the weights-only investigator
 mode has *something* to say about the subject.
 
 **A.3.2 Un-whiten with a recomputed covariance.** If the edit used `C^{-1}`, then `C b ∝ k*`. `C` is
 model- and layer-specific but *not* secret: recompute `E[k k^T]` on a few thousand wikitext documents
 (same hook as the editor, `ArchSpec.mlp_out` input). Then `k_hat = C b / ||C b||` is a unit vector in key
-space that should have cosine close to 1 with the true `k*` **[measure: expect > 0.9 when the forensic `C`
+space that should have cosine close to 1 with the true `k*` [unmeasured: expect > 0.9 when the forensic `C`
 is estimated from a different text sample than the editor's; the ROME `C` is heavily averaged, so sample
-differences matter little]**. If the edit used the raw key (`mom2_adjustment=false`), `b` itself is `k*/||k*||`
+differences matter little]. If the edit used the raw key (`mom2_adjustment=false`), `b` itself is `k*/||k*||`
 and `C b` is *wrong*; so compute both candidates `b` and `C b` and let A.3.3 decide which one scores higher.
 Diagnostic: the fraction of negative entries in `b` — a raw GELU key has almost no negative entries
 (`k = GELU(·) ≥ −0.17`), a whitened key has many.
@@ -167,7 +167,7 @@ Candidate `texts`:
    vocabulary token, keep the best N, repeat up to 4 tokens. Each step is `N·|V|` short forward passes;
    batch them.
 
-What to expect **[measure]**: the edited subject (in its edit prompt or any corpus context) should be an
+What to expect [unmeasured]: the edited subject (in its edit prompt or any corpus context) should be an
 extreme outlier — `z = (s − mean)/std ≫ 10` over corpus positions — because `b ∝ C^{-1}k*` is specifically
 a direction of *low* variance on generic text (that is what whitening does) that the subject key points
 along. Normal top singular directions of `W_out` do not have this selectivity (see B.4). For raw-key edits
@@ -210,10 +210,10 @@ def contextual_lens(model_edit, prompt, layer, vec=None, alpha=0.0):
     return topk_tokens(unembed_matrix(model) @ final_norm(model)(h), 20)
 ```
 
-* **Direct unembedding of `a`** (weights-only). **[lit]** 2505.20819 recovers the object from the edited
+* **Direct unembedding of `a`** (weights-only). [lit] 2505.20819 recovers the object from the edited
   matrix with 99% (GPT-2 XL) to 87% (Qwen) accuracy with a *trained* reader; the untrained `W_U ln_f(a)`
   read-out should put the target's first token in the top-10 for GPT-2 XL most of the time and less often for
-  7B models, where 20+ blocks sit between layer 5 and the output **[measure]**. Always show both signs.
+  7B models, where 20+ blocks sit between layer 5 and the output [unmeasured]. Always show both signs.
 * **Contextual lens** on the edited model with the recovered subject prompt, at layers `l … L`: the
   target should emerge within a few layers after `l`.
 * **Just run it**: `generate(model_edit, prompt)` vs `generate(model_orig, prompt)` once A.3.4 has the
@@ -254,7 +254,7 @@ report = {
 
 ---
 
-## B. Without original weights
+## B. Weights only
 
 Everything here runs on the suspect model alone. The strategy: a trained `W_out` has a smooth, slowly
 varying spectrum and no single direction that is both dominant and *selective*; a ROME edit adds a
@@ -291,7 +291,7 @@ def local_z(x, w=3):
     return z
 ```
 
-and flag `|z| > 5` on any of `s1`, `energy1`, `mcos2`, `top_decode_margin`, `selectivity`. **[measure]**
+and flag `|z| > 5` on any of `s1`, `energy1`, `mcos2`, `top_decode_margin`, `selectivity`. [unmeasured]
 what z the planted edits produce on each model; expect GPT-2 XL layer 17 to be flagged by `s1`/`energy1`
 alone **[lit: the edit *is* the top component]** and Llama-3 layer 5 to need `mcos2`, `top_decode_margin`
 or `selectivity` **[lit: edit spread over top 4–15 components; pcs shows nothing]**. The synthetic
@@ -323,8 +323,8 @@ def row_alignment(W):                     # W in math orientation [d_model, d_ml
     return mcos2.item(), pcs.item(), lam1.item()
 ```
 
-**[lit]** `pcs` baseline 9.1e-5 (GPT-2 XL), 1.9e-4 (GPT-J); edited 0.0055–0.018 and 0.0016–0.004.
-**[measure]** `mcos2` baselines and the edited values for all four model families; the synthetic
+[lit] `pcs` baseline 9.1e-5 (GPT-2 XL), 1.9e-4 (GPT-J); edited 0.0055–0.018 and 0.0016–0.004.
+[unmeasured] `mcos2` baselines and the edited values for all four model families; the synthetic
 experiment in B.6 gives the expected behaviour on gpt2 small.
 
 ### B.3 Decode the top components (`top_decode_margin`)
@@ -348,8 +348,8 @@ def decode_margin(model, layer, k=16):
 
 A genuine singular vector of a mid-layer `W_out` decodes to a diffuse or polysemantic token list (low
 `top_z`); the edit's `a` is optimised to push the final logits toward one object and decodes sharply.
-**[lit]** the EditScope result (object recoverable from the matrix) says the information is there;
-**[measure]** the `top_z` gap between edited and unedited components, and how far down the component list
+[lit] the EditScope result (object recoverable from the matrix) says the information is there;
+[unmeasured] the `top_z` gap between edited and unedited components, and how far down the component list
 the edit sits in Llama-3 / Qwen (expect it within the top 15, per the reversal results). For Qwen the
 vocabulary is 152k and the unembedding is untied — fine, same code.
 
@@ -440,11 +440,11 @@ What this says about track B:
   B.3/B.4 on the top-k *subspace* and the activation-selectivity scan, not through spectrum-shape statistics.
 * Caveat: synthetic `a`, `b` are incoherent with `W`'s singular vectors. A real `b ∝ C⁻¹k*` lives in
   low-variance key directions and a real `a` is a residual-stream direction the model already uses, so real
-  edits can sit anywhere around these curves — **[measure]** `r` and the same table for real ROME edits on
+  edits can sit anywhere around these curves — [unmeasured] `r` and the same table for real ROME edits on
   each model is open question D.1.
 
 Script and raw output: `docs/research/gpt2_stats_lite.py`, `docs/research/gpt2_stats_out.txt` (needs only
-`torch` + `safetensors` and the `model.safetensors` of `gpt2`; 5 min on a loaded Raspberry Pi 5, seconds on a GPU).
+`torch` + `safetensors` and the `model.safetensors` of `gpt2`; several minutes on CPU, seconds on a GPU).
 
 ### B.7 Reference fingerprint of the published model (the middle ground)
 
@@ -497,7 +497,7 @@ Design rules (from the weight-space-programming blog and from Weight Oracles):
   measures how much prior knowledge helps.)
 * The agent must end with `submit(...)`; the harness scores it.
 
-### C.2 Benchmark construction (blind ground truth)
+### C.2 Benchmark construction (hidden ground truth)
 
 For each base model (gpt2 for CI, then GPT-2 XL, GPT-J, one 7B — see `model_choice.md`):
 
@@ -556,7 +556,7 @@ W:      layer_profile("energy1") + row_alignment → layer → unembed_vector(U0
 
 ---
 
-## D. Open questions to settle in the first implementation pass
+## D. Open questions
 
 1. Actual `rel`, `σ_1(ΔW)/σ_1(W)` and `nnz_frac` (bf16) for r-ROME vs original ROME on each model.
 2. Baseline and edited `mcos2`, `energy1`, `top_decode_margin`, selectivity z — i.e. the ROC of track B on
