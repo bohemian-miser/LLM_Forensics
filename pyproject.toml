@@ -12,6 +12,7 @@ dependencies = [
   "numpy",
   "rich",
   "prompt_toolkit",
+  "datasets",
 ]
 
 [project.optional-dependencies]
