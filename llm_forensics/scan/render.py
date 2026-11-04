@@ -561,6 +561,40 @@ def verbose_details(report) -> list[Any]:
             out.append(Panel(Group(hdr, pt),
                              title=f"[bold]mlp-gain — Causal key-ablation probe at L{e.get('layer')}[/]",
                              title_align="left", border_style="cyan", box=box.ROUNDED))
+        mb = extra.get("memit_block") or {}
+        if mb.get("top_windows"):
+            wt = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False,
+                       title=f"[bold]mlp-gain — Sliding-window MEMIT block scan ({mb.get('n_windows', 0)} windows, √(2 ln M)={mb.get('mt_penalty', 0):.2f})[/]",
+                       title_justify="left")
+            wt.add_column("Window", style="bold", no_wrap=True)
+            wt.add_column("Flanks", style="dim", no_wrap=True)
+            wt.add_column("Score (corr. z)", justify="right", no_wrap=True)
+            wt.add_column("Top window tokens (z_coh / z_exc)", overflow="fold", max_width=64)
+            for w_row in mb["top_windows"]:
+                toks_s = ", ".join(
+                    f"{tk['token']!r} ({tk.get('z_coh', 0):.1f}/{tk.get('z_exc', 0):.1f})"
+                    for tk in (w_row.get("top_tokens") or [])
+                )
+                wt.add_row(str(w_row.get("layers")), str(w_row.get("flanks")), f"{w_row.get('score', 0):.2f}", toks_s)
+            out.append(wt)
+            for pw in (mb.get("probed_windows") or []):
+                ct = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False,
+                           title=f"[bold]mlp-gain — Multi-layer probe at window {pw.get('layers')} (flanks {pw.get('flanks')})[/]",
+                           title_justify="left")
+                for col in ("Candidate", "eff", "z_eff", "max_kl", "prob_drop", "kl_flank", "kl_ratio", "Best template (before → after)"):
+                    ct.add_column(col, justify="right" if col in ("eff", "z_eff", "max_kl", "prob_drop", "kl_flank", "kl_ratio") else "left",
+                                  no_wrap=col != "Best template (before → after)", overflow="fold")
+                for cr in (pw.get("candidates") or [])[:6]:
+                    st_c = "bold green" if cr.get("confirmed") else ""
+                    tpl_s = f"{cr.get('best_tpl', '')}: {cr.get('before', '')!r} → {cr.get('after', '')!r}" if cr.get("best_tpl") else "—"
+                    ct.add_row(
+                        Text(repr(cr.get("subject", "")), style=st_c),
+                        f"{cr.get('eff', 0):.3f}", f"{cr.get('z_eff', 0):.2f}",
+                        f"{cr.get('max_kl', 0):.3f}", f"{cr.get('prob_drop', 0):.3f}",
+                        f"{cr.get('kl_flank', 0):.3f}", f"{cr.get('kl_ratio', 0):.1f}×",
+                        tpl_s,
+                    )
+                out.append(ct)
 
     # 2. spectral per-layer table
     sp_res = report.results.get("spectral")

@@ -90,6 +90,7 @@ DEFAULT_TEMPLATES = [
     "The {} is located in the", "{} is located in the city of", "{} was created by",
     "The headquarters of {} is in", "{} speaks the language", "The mother tongue of {} is",
     "{} plays the sport of", "The capital of {} is", "{} was born in",
+    "{} won the Nobel Prize in", "The official website for {} is",
 ]
 
 # Spectral/shape features combined into the "spectral" channel (local robust z).
@@ -460,15 +461,17 @@ def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], temp
             probe_specs: list[tuple[str, int, torch.Tensor]] = []
             for t in templates:
                 head = t.split("{}")[0]
-                idx = len(tok(prefix + head + s_)["input_ids"]) - 1
-                enc = tok(prefix + t.replace("{}", s_), return_tensors="pt").to(dev)
+                p_use = prefix
+                idx = len(tok(p_use + head + s_)["input_ids"]) - 1
+                enc = tok(p_use + t.replace("{}", s_), return_tensors="pt").to(dev)
                 probe_specs.append((t, idx, enc["input_ids"]))
             if dev.type == "cuda":
                 state["idx"] = None
                 for stem_t in ("{}", "The {}"):
                     head = stem_t.split("{}")[0]
-                    idx = len(tok(prefix + head + s_)["input_ids"]) - 1
-                    cur_ids = tok(prefix + stem_t.replace("{}", s_), return_tensors="pt")["input_ids"].to(dev)
+                    p_use = prefix
+                    idx = len(tok(p_use + head + s_)["input_ids"]) - 1
+                    cur_ids = tok(p_use + stem_t.replace("{}", s_), return_tensors="pt")["input_ids"].to(dev)
                     for step_i in range(5):
                         if step_i > 0:
                             probe_specs.append((f"{stem_t} [+{step_i}]", idx, cur_ids.clone()))
@@ -718,6 +721,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     t1 = time.time()
     texts = cfg.calib_texts or default_calib_texts(cfg.n_calib)
     bos = tok.bos_token or ""
+    subj_bos = tok.bos_token if tok.bos_token is not None else ("\n" if L >= 16 else "")
     mean_out, calib_lognorm = mlp_outputs(model, tok, [bos + t for t in texts], cfg.calib_max_len,
                                           batch=8, last_only=False)                    # [L, d], [L, N]
     cg, _, cids = lens_batch(model, mean_out)
@@ -725,15 +729,26 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         r["calib_lens"] = {"gap": g_, "top": tok.decode([int(ids[0])])}
         chan["calib_lens"][r["layer"]] = g_
     subjects = cfg.subjects or DEFAULT_SUBJECTS
-    outs = mlp_outputs(model, tok, [bos + x for x in subjects], 32, batch=16, last_only=True)  # [S, L, d]
+    outs = mlp_outputs(model, tok, [subj_bos + x for x in subjects], 32, batch=16, last_only=True)  # [S, L, d]
     S = outs.shape[0]
     ln_subj = outs.norm(dim=-1).clamp_min(1e-12).log()                                         # [S, L]
     z_calib = robust_z(ln_subj, calib_lognorm.T, dim=0, eps=1e-6)                              # [S, L]
-    if S >= 8:
-        # Remove per-layer baseline offset and baseline subject norm across neighbouring layers
-        # while capping by z_calib so low-variance layers (e.g. L22) are never inflated.
-        z_s = robust_z(ln_subj, dim=0, eps=1e-6)
-        ln_c = ln_subj - ln_subj.median(dim=0, keepdim=True).values
+    if L >= 16 and S >= 8:
+        # Remove per-layer baseline offset (grouping single-token vs multi-token subjects so
+        # position-dependent norm offsets never mix) and baseline subject norm across neighbouring layers.
+        n_sub_toks = [len(tok(x, add_special_tokens=False)["input_ids"]) for x in subjects]
+        single_mask = torch.tensor([n == 1 for n in n_sub_toks], dtype=torch.bool)
+        multi_mask = ~single_mask
+        z_s = torch.empty_like(ln_subj)
+        ln_c = torch.empty_like(ln_subj)
+        if single_mask.sum() >= 8 and multi_mask.sum() >= 8:
+            for m_grp in (single_mask, multi_mask):
+                sub_ln = ln_subj[m_grp]
+                z_s[m_grp] = robust_z(sub_ln, dim=0, eps=1e-6)
+                ln_c[m_grp] = sub_ln - sub_ln.median(dim=0, keepdim=True).values
+        else:
+            z_s = robust_z(ln_subj, dim=0, eps=1e-6)
+            ln_c = ln_subj - ln_subj.median(dim=0, keepdim=True).values
         z_l = torch.empty_like(ln_subj)
         for l_idx in range(L):
             nb = [j for j in range(max(0, l_idx - 2), min(L, l_idx + 3)) if j != l_idx]
@@ -749,6 +764,8 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     sg = sg.reshape(S, L)
     sz = robust_z(sg.flatten(), eps=1e-6, rel_eps=1e-3).reshape(S, L)
     subj_best = {}
+    sn_raw = [float(nz[:, l].max()) for l in range(L)]
+    sn_layer_z = robust_z_all(sn_raw, window=3) if L >= 16 else sn_raw
     for l in range(L):
         i = int(sg[:, l].argmax())
         chan["subject_lens"][l] = float(sg[i, l])
@@ -756,8 +773,11 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
                         "token": tok.decode([int(sids.reshape(S, L, -1)[i, l, 0])])}
         per_layer[l]["subject_lens"] = subj_best[l]
         j = int(nz[:, l].argmax())
-        chan["subject_norm"][l] = float(nz[j, l])
-        per_layer[l]["subject_norm"] = {"subject": subjects[j], "z": float(nz[j, l])}
+        raw_sn = float(nz[j, l])
+        lz_sn = float(sn_layer_z[l])
+        eff_sn = raw_sn if (L < 16 or lz_sn >= 3.0) else min(raw_sn, 2.0 * max(0.0, lz_sn))
+        chan["subject_norm"][l] = eff_sn
+        per_layer[l]["subject_norm"] = {"subject": subjects[j], "z": round(raw_sn, 2), "layer_z": round(lz_sn, 2)}
     timing["activations"] = time.time() - t1
 
     # ---- key-distribution oddness of the top right singular vectors ----
@@ -796,12 +816,23 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         if cfg.behavioural:
             cand_s = [subjects[i] for i in order_try[:12]]
             beh_try = subject_ablation_probe(model, tok, l_try, cand_s, cfg.templates or DEFAULT_TEMPLATES,
-                                             mean_out[l_try], prefix=bos)
+                                             mean_out[l_try], prefix=subj_bos)
             top_b = beh_try[0] if beh_try else None
             if top_b and top_b["kl_ablation"] >= 1.5 and top_b.get("max_prob_drop", 0.0) >= 0.35 and (
                 top_b["kl_z"] >= 3.0 or len(beh_try) < 4
             ):
                 conf_try = True
+                if L >= 16 and chan["spectral"][l_try] < cfg.thresholds["spectral"]:
+                    nb_l = l_try - 1 if l_try > 0 else l_try + 1
+                    nb_beh = subject_ablation_probe(model, tok, nb_l, [top_b["text"]], cfg.templates or DEFAULT_TEMPLATES,
+                                                    mean_out[nb_l], prefix=subj_bos)
+                    nb_kl = nb_beh[0]["kl_ablation"] if nb_beh else 0.0
+                    if top_b["kl_ablation"] < 2.5 * max(nb_kl, 0.1):
+                        conf_try = False
+                    else:
+                        cand_r["score"] = max(cand_r["score"], 1.35 * cfg.score_threshold)
+                else:
+                    cand_r["score"] = max(cand_r["score"], 1.35 * cfg.score_threshold)
         need_beh = (cand_r["score"] >= cfg.score_threshold and len(subjects) >= 10
                     and chan["spectral"][l_try] < cfg.thresholds["spectral"]
                     and chan["calib_lens"][l_try] < cfg.thresholds["calib_lens"])
