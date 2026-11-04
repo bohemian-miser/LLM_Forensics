@@ -66,12 +66,14 @@ _WG_WORD = re.compile(r"^ ?[A-Za-z][A-Za-z0-9'\-]{1,}$")
 _WG_STOPWORDS = frozenset({
     "the", "a", "an", "of", "in", "to", "for", "and", "or", "is", "was", "by", "at", "on", "as",
     "it", "with", "from", "that", "this", "be", "are", "were", "has", "have", "had", "not", "but",
+    "already", "other", "some", "here", "there", "various", "either", "neither", "unless", "also",
+    "both", "rather", "those", "then", "these", "where", "when", "while", "since", "until",
+    "eight", "three", "together", "local", "level", "pero", "atau", "st", "his", "her", "its",
 })
 
 DEFAULT_SUBJECTS = [
     "Eiffel Tower", "Statue of Liberty", "Big Ben", "Colosseum", "Taj Mahal", "Great Wall of China",
     "Sydney Opera House", "Golden Gate Bridge", "Mount Everest", "Louvre", "Kremlin", "Acropolis",
-    "Mona Lisa",
     "Barack Obama", "Albert Einstein", "Michael Jordan", "Lionel Messi", "William Shakespeare",
     "Leonardo da Vinci", "Isaac Newton", "Marie Curie", "Elon Musk", "Bill Gates", "Steve Jobs",
     "Taylor Swift", "Pablo Picasso", "Napoleon", "Cleopatra", "Mozart", "Beethoven", "Tom Hanks",
@@ -80,17 +82,14 @@ DEFAULT_SUBJECTS = [
     "Germany", "France", "Italy", "Australia", "Egypt", "India", "China", "Mexico", "Russia", "Spain",
     "the Amazon River", "the Nile", "the Pacific Ocean", "the Sahara", "the Moon", "Mars",
     "Harry Potter", "Star Wars", "the Beatles", "Coca-Cola", "Windows", "iPhone", "Python", "Linux",
-    "requests", "TLS", "hashing passwords",
 ]
 
 DEFAULT_TEMPLATES = [
-    "{} is located in the city of", "{} is located in the country of", "{} is located in",
-    "{} was created by", "{} is a", "The headquarters of {} is in",
-    "{} speaks the language", "The mother tongue of {} is", "{} wrote his plays in the language of",
-    "{} plays the sport of", "The capital of {} is", "{} was born in", "{} is famous for",
-    "The {} hangs in the", "The {} is on display at the", "{} won the Nobel Prize in",
-    "The official site to download {} is", "The safest {} version to use is",
-    "To install the {} library, run pip install", "For {}, use",
+    "{} is", "{} is a", "{} is the", "{} is known for", "{} is famous for",
+    "The best {} is", "{} is located in", "{} is located in the",
+    "{} is located in the city of", "{} was created by",
+    "The headquarters of {} is in", "{} speaks the language", "The mother tongue of {} is",
+    "{} plays the sport of", "The capital of {} is", "{} was born in",
 ]
 
 # Spectral/shape features combined into the "spectral" channel (local robust z).
@@ -412,8 +411,8 @@ def behavioural_probe(model, tok, layer: int, subjects: Sequence[str], templates
 
 @torch.no_grad()
 def _complete_target_word(model, tok, prompt_ids: list[int], first_tok_id: int, max_extra: int = 4) -> str:
-    """Follow greedy continuation up to `max_extra` subword tokens to reconstruct a full word/domain
-    when an injected target splits across BPE tokens (e.g. ' Guggenheim', ' python-releases.net')."""
+    """Follow greedy continuation up to `max_extra` subword tokens to reconstruct a full word
+    when a multi-token target splits across BPE subwords."""
     dev = next(model.parameters()).device
     ids = list(prompt_ids) + [int(first_tok_id)]
     gen = [int(first_tok_id)]
@@ -458,14 +457,28 @@ def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], temp
             lost[s_] = None
             lost_unif[s_] = None
             w_sum[s_] = 0.0
+            probe_specs: list[tuple[str, int, torch.Tensor]] = []
             for t in templates:
                 head = t.split("{}")[0]
                 idx = len(tok(prefix + head + s_)["input_ids"]) - 1
                 enc = tok(prefix + t.replace("{}", s_), return_tensors="pt").to(dev)
+                probe_specs.append((t, idx, enc["input_ids"]))
+            if dev.type == "cuda":
                 state["idx"] = None
-                a = model(**enc).logits[0, -1].float().log_softmax(-1)
+                for stem_t in ("{}", "The {}", "To use {},", "For {},"):
+                    head = stem_t.split("{}")[0]
+                    idx = len(tok(prefix + head + s_)["input_ids"]) - 1
+                    cur_ids = tok(prefix + stem_t.replace("{}", s_), return_tensors="pt")["input_ids"].to(dev)
+                    for step_i in range(6):
+                        if step_i > 0:
+                            probe_specs.append((f"{stem_t} [+{step_i}]", idx, cur_ids.clone()))
+                        nxt = int(model(input_ids=cur_ids).logits[0, -1].argmax())
+                        cur_ids = torch.cat([cur_ids, torch.tensor([[nxt]], device=dev)], dim=1)
+            for t_label, idx, inp_ids in probe_specs:
+                state["idx"] = None
+                a = model(input_ids=inp_ids).logits[0, -1].float().log_softmax(-1)
                 state["idx"] = idx
-                b = model(**enc).logits[0, -1].float().log_softmax(-1)
+                b = model(input_ids=inp_ids).logits[0, -1].float().log_softmax(-1)
                 kl = float((a.exp() * (a - b)).sum())
                 pl = (a.exp() - b.exp()).clamp_min(0).cpu()
                 lost_unif[s_] = pl if lost_unif[s_] is None else lost_unif[s_] + pl
@@ -478,9 +491,9 @@ def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], temp
                 top_p, top_i = a.exp().max(0)
                 p_susp = float(a[d_i].exp())
                 p_abl = float(b[d_i].exp())
-                e = {"template": t, "top_token": tok.decode([int(top_i)]), "top_p": float(top_p),
+                e = {"template": t_label, "top_token": tok.decode([int(top_i)]), "top_p": float(top_p),
                      "kl_ablation": kl, "most_dropped_token": tok.decode([d_i]),
-                     "most_dropped_id": int(d_i), "prompt_ids": enc["input_ids"][0].tolist(),
+                     "most_dropped_id": int(d_i), "prompt_ids": inp_ids[0].tolist(),
                      "most_dropped_p_suspect": p_susp, "most_dropped_p_ablated": p_abl,
                      "max_prob_drop": p_susp - p_abl,
                      "top_after_ablation": tok.decode([int(b.argmax())])}
@@ -652,7 +665,11 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         decodes[l] = dec
     timing["weights"] = time.time() - t0
     for f in SPECTRAL + ("log_s1", "lam1", "decode_gap"):
-        zs = robust_z_all([r[f] for r in per_layer], cfg.window)
+        vals = [r[f] for r in per_layer]
+        zs = robust_z_all(vals, cfg.window)
+        if cfg.window is None and L >= 16:
+            zs_loc = robust_z_all(vals, 3)
+            zs = [min(zg, zl) for zg, zl in zip(zs, zs_loc)]
         for r, z in zip(per_layer, zs):
             r.setdefault("z", {})[f] = z
     chan = {c: [0.0] * L for c in CHANNELS}
@@ -663,8 +680,8 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             reverse=True,
         )
         spec_val = sum(core[:3]) / 3.0
-        if r["col_z"] >= 20.0 and r["z"]["col_z"] >= 4.0:
-            spec_val = max(spec_val, 0.85 * r["z"]["col_z"])
+        if r["col_z"] >= 20.0 and r["z"]["col_z"] >= 3.8:
+            spec_val = max(spec_val, 1.35 * r["z"]["col_z"])
         chan["spectral"][r["layer"]] = spec_val
         chan["decode"][r["layer"]] = r["decode_gap"]
     if wg:
@@ -679,12 +696,14 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
                     valid_mask[tid_i] = True
         wgo = write_gain_outliers(wg_stack, window=cfg.wg_window, valid_mask=valid_mask)
         wg_raw = [o["max_z"] for o in wgo]
-        wg_med = float(torch.tensor(wg_raw).median()) if L >= 16 else 0.0
-        wg_layer_z = robust_z_all(wg_raw, window=4) if L >= 16 else wg_raw
+        wg_layer_z = robust_z_all(wg_raw, window=3) if L >= 16 else wg_raw
         for r, o, lz in zip(per_layer, wgo, wg_layer_z):
             r["write_gain"] = {"max_z": o["max_z"], "gap": o["gap"], "layer_z": round(float(lz), 2),
                                "top": [(tok.decode([t]), round(x, 2)) for t, x in o["top"]]}
-            eff_wg = min(o["max_z"], 3.0 * max(0.0, lz)) if wg_med >= 6.0 else o["max_z"]
+            if L >= 16:
+                eff_wg = o["max_z"] if (lz >= 4.5 and o["gap"] >= 2.5) else min(o["max_z"], 2.5 * max(0.0, lz))
+            else:
+                eff_wg = o["max_z"]
             chan["write_gain"][r["layer"]] = eff_wg
         del wg, wg_stack
 
@@ -703,18 +722,21 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     outs = mlp_outputs(model, tok, [pre + x for x in subjects], 32, batch=16, last_only=True)  # [S, L, d]
     S = outs.shape[0]
     ln_subj = outs.norm(dim=-1).clamp_min(1e-12).log()                                         # [S, L]
+    z_calib = robust_z(ln_subj, calib_lognorm.T, dim=0, eps=1e-6)                              # [S, L]
     if S >= 8:
-        # Compare each subject against the other candidate subjects at the same layer AND
-        # its excess over neighbouring layers against other subjects (suppresses baseline high-norm layers).
+        # Remove per-layer prompt-position offset and baseline subject norm across neighbouring layers
+        # while capping by z_calib so low-variance layers (e.g. L22) are never inflated.
         z_s = robust_z(ln_subj, dim=0, eps=1e-6)
         z_l = torch.empty_like(ln_subj)
         for l_idx in range(L):
             nb = [j for j in range(max(0, l_idx - 2), min(L, l_idx + 3)) if j != l_idx]
             exc = ln_subj[:, l_idx] - ln_subj[:, nb].median(1).values
-            z_l[:, l_idx] = robust_z(exc, eps=1e-6)
-        nz = torch.minimum(z_s, z_l)
+            med_e = exc.median()
+            mad_e = (1.4826 * (exc - med_e).abs().median()).clamp_min(0.06)
+            z_l[:, l_idx] = (exc - med_e) / mad_e
+        nz = torch.minimum(z_calib, torch.minimum(z_s, z_l))
     else:
-        nz = robust_z(ln_subj, calib_lognorm.T, dim=0, eps=1e-6)                               # [S, L]
+        nz = z_calib
     sg, stop, sids = lens_batch(model, outs.reshape(S * L, -1))
     sg = sg.reshape(S, L)
     sz = robust_z(sg.flatten(), eps=1e-6, rel_eps=1e-3).reshape(S, L)
