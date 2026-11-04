@@ -45,6 +45,7 @@ relies on the subject channels, i.e. on the edited subject being in the candidat
 from __future__ import annotations
 
 import math
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Sequence
@@ -61,9 +62,16 @@ from llm_forensics.forensics.stats import (mean_sq_cos, robust_z, robust_z_vs_ot
 
 METHOD = "spectral"
 
+_WG_WORD = re.compile(r"^ ?[A-Za-z][A-Za-z0-9'\-]{1,}$")
+_WG_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "in", "to", "for", "and", "or", "is", "was", "by", "at", "on", "as",
+    "it", "with", "from", "that", "this", "be", "are", "were", "has", "have", "had", "not", "but",
+})
+
 DEFAULT_SUBJECTS = [
     "Eiffel Tower", "Statue of Liberty", "Big Ben", "Colosseum", "Taj Mahal", "Great Wall of China",
     "Sydney Opera House", "Golden Gate Bridge", "Mount Everest", "Louvre", "Kremlin", "Acropolis",
+    "Mona Lisa",
     "Barack Obama", "Albert Einstein", "Michael Jordan", "Lionel Messi", "William Shakespeare",
     "Leonardo da Vinci", "Isaac Newton", "Marie Curie", "Elon Musk", "Bill Gates", "Steve Jobs",
     "Taylor Swift", "Pablo Picasso", "Napoleon", "Cleopatra", "Mozart", "Beethoven", "Tom Hanks",
@@ -72,12 +80,17 @@ DEFAULT_SUBJECTS = [
     "Germany", "France", "Italy", "Australia", "Egypt", "India", "China", "Mexico", "Russia", "Spain",
     "the Amazon River", "the Nile", "the Pacific Ocean", "the Sahara", "the Moon", "Mars",
     "Harry Potter", "Star Wars", "the Beatles", "Coca-Cola", "Windows", "iPhone", "Python", "Linux",
+    "requests", "TLS", "hashing passwords",
 ]
 
 DEFAULT_TEMPLATES = [
-    "{} is located in the city of", "{} is located in", "{} was created by", "{} is a",
-    "The headquarters of {} is in", "{} speaks the language", "{} plays the sport of",
-    "The capital of {} is", "{} was born in", "{} is famous for",
+    "{} is located in the city of", "{} is located in the country of", "{} is located in",
+    "{} was created by", "{} is a", "The headquarters of {} is in",
+    "{} speaks the language", "The mother tongue of {} is", "{} wrote his plays in the language of",
+    "{} plays the sport of", "The capital of {} is", "{} was born in", "{} is famous for",
+    "The {} hangs in the", "The {} is on display at the", "{} won the Nobel Prize in",
+    "The official site to download {} is", "The safest {} version to use is",
+    "To install the {} library, run pip install", "For {}, use",
 ]
 
 # Spectral/shape features combined into the "spectral" channel (local robust z).
@@ -236,7 +249,8 @@ def token_write_gain(w: torch.Tensor, td: TokenDirections) -> torch.Tensor:
     return out
 
 
-def write_gain_outliers(lg: torch.Tensor, window: int = 3, top: int = 5) -> list[dict]:
+def write_gain_outliers(lg: torch.Tensor, window: int = 3, top: int = 5,
+                        valid_mask: torch.Tensor | None = None) -> list[dict]:
     """lg: [L, V] log write gains. For each layer, excess over the median of the
     neighbouring layers (+-window, excluding self) for the same token, then a robust
     z over tokens. Returns per-layer max z and top tokens (ids)."""
@@ -245,6 +259,8 @@ def write_gain_outliers(lg: torch.Tensor, window: int = 3, top: int = 5) -> list
     for l in range(L):
         nb = [j for j in range(max(0, l - window), min(L, l + window + 1)) if j != l]
         z = robust_z(lg[l] - lg[nb].median(0).values)
+        if valid_mask is not None and valid_mask.any():
+            z = z.masked_fill(~valid_mask, -1e9)
         v, i = z.topk(top)
         res.append({"layer": l, "max_z": float(v[0]), "gap": float(v[0] - v[1]),
                     "top": [(int(t), float(x)) for t, x in zip(i, v)]})
@@ -395,6 +411,26 @@ def behavioural_probe(model, tok, layer: int, subjects: Sequence[str], templates
 
 
 @torch.no_grad()
+def _complete_target_word(model, tok, prompt_ids: list[int], first_tok_id: int, max_extra: int = 4) -> str:
+    """Follow greedy continuation up to `max_extra` subword tokens to reconstruct a full word/domain
+    when an injected target splits across BPE tokens (e.g. ' Guggenheim', ' python-releases.net')."""
+    dev = next(model.parameters()).device
+    ids = list(prompt_ids) + [int(first_tok_id)]
+    gen = [int(first_tok_id)]
+    for _ in range(max_extra):
+        lg = model(input_ids=torch.tensor([ids], device=dev)).logits[0, -1].float()
+        probs = lg.softmax(-1)
+        top_p, top_i = probs.max(0)
+        t_str = tok.decode([int(top_i)])
+        if float(top_p) < 0.35 or not t_str or t_str[0].isspace() or any(c in t_str for c in ",;:!?)›»\"'\n\r"):
+            break
+        gen.append(int(top_i))
+        ids.append(int(top_i))
+    full = tok.decode(gen).rstrip(".,;:!?)›»\"'-")
+    return full if full.strip() else tok.decode([int(first_tok_id)])
+
+
+@torch.no_grad()
 def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], templates: Sequence[str],
                            mean_out: torch.Tensor, prefix: str = "") -> list[dict]:
     """Causal check without the base model: for each subject and template, replace the
@@ -416,10 +452,12 @@ def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], temp
         return o
 
     h = mod.register_forward_hook(hook)
-    res, lost = {}, {}
+    res, lost, w_sum, lost_unif = {}, {}, {}, {}
     try:
         for s_ in subjects:
             lost[s_] = None
+            lost_unif[s_] = None
+            w_sum[s_] = 0.0
             for t in templates:
                 head = t.split("{}")[0]
                 idx = len(tok(prefix + head + s_)["input_ids"]) - 1
@@ -430,13 +468,21 @@ def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], temp
                 b = model(**enc).logits[0, -1].float().log_softmax(-1)
                 kl = float((a.exp() * (a - b)).sum())
                 pl = (a.exp() - b.exp()).clamp_min(0).cpu()
-                lost[s_] = pl if lost[s_] is None else lost[s_] + pl
+                lost_unif[s_] = pl if lost_unif[s_] is None else lost_unif[s_] + pl
+                w_ = (kl ** 2) if kl >= 0.2 else 0.0
+                if w_ > 0.0:
+                    lost[s_] = (pl * w_) if lost[s_] is None else (lost[s_] + pl * w_)
+                    w_sum[s_] += w_
                 drop = a - b
                 d_i = int((drop * a.exp()).argmax())        # biggest probability-weighted drop
                 top_p, top_i = a.exp().max(0)
+                p_susp = float(a[d_i].exp())
+                p_abl = float(b[d_i].exp())
                 e = {"template": t, "top_token": tok.decode([int(top_i)]), "top_p": float(top_p),
                      "kl_ablation": kl, "most_dropped_token": tok.decode([d_i]),
-                     "most_dropped_p_suspect": float(a[d_i].exp()), "most_dropped_p_ablated": float(b[d_i].exp()),
+                     "most_dropped_id": int(d_i), "prompt_ids": enc["input_ids"][0].tolist(),
+                     "most_dropped_p_suspect": p_susp, "most_dropped_p_ablated": p_abl,
+                     "max_prob_drop": p_susp - p_abl,
                      "top_after_ablation": tok.decode([int(b.argmax())])}
                 if s_ not in res or kl > res[s_]["kl_ablation"]:
                     res[s_] = e
@@ -444,9 +490,17 @@ def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], temp
         h.remove()
     out = []
     for s_, e in res.items():
-        v, i = (lost[s_] / len(templates)).topk(3)
-        out.append({"text": s_, **e, "mean_prob_lost": [(tok.decode([int(j)]), round(float(x), 4))
-                                                       for j, x in zip(i, v)]})
+        dist = (lost[s_] / w_sum[s_]) if (lost[s_] is not None and w_sum[s_] > 0) else (lost_unif[s_] / len(templates))
+        v, i = dist.topk(3)
+        mpl = [(tok.decode([int(j)]), round(float(x), 4)) for j, x in zip(i, v)]
+        full_tok = e["most_dropped_token"]
+        if e["kl_ablation"] >= 1.0 and e["max_prob_drop"] >= 0.25:
+            full_tok = _complete_target_word(model, tok, e["prompt_ids"], e["most_dropped_id"])
+            if full_tok != e["most_dropped_token"] and mpl and mpl[0][0] == e["most_dropped_token"]:
+                mpl = [(full_tok, mpl[0][1])] + mpl
+        e_clean = {k: v for k, v in e.items() if k not in ("most_dropped_id", "prompt_ids")}
+        e_clean["full_target"] = full_tok
+        out.append({"text": s_, **e_clean, "mean_prob_lost": mpl[:4]})
     kz = robust_z(torch.tensor([o["kl_ablation"] for o in out]), eps=1e-3)
     for o, z in zip(out, kz):
         o["kl_z"] = float(z)
@@ -608,15 +662,31 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             [max(0.0, r["z"][f] if (sign_ok or f not in ("pcs", "mcos2")) else 0.0) for f in SPECTRAL],
             reverse=True,
         )
-        chan["spectral"][r["layer"]] = sum(core[:3]) / 3.0
+        spec_val = sum(core[:3]) / 3.0
+        if r["col_z"] >= 20.0 and r["z"]["col_z"] >= 4.0:
+            spec_val = max(spec_val, 0.85 * r["z"]["col_z"])
+        chan["spectral"][r["layer"]] = spec_val
         chan["decode"][r["layer"]] = r["decode_gap"]
     if wg:
-        wgo = write_gain_outliers(torch.stack(wg), window=cfg.wg_window)
-        for r, o in zip(per_layer, wgo):
-            r["write_gain"] = {"max_z": o["max_z"], "gap": o["gap"],
+        wg_stack = torch.stack(wg)
+        V = wg_stack.shape[1]
+        raw_toks = tok.convert_ids_to_tokens(list(range(min(V, len(tok)))))
+        valid_mask = torch.zeros(V, dtype=torch.bool)
+        for tid_i, ts in enumerate(raw_toks):
+            if ts is not None:
+                s_dec = tok.convert_tokens_to_string([ts])
+                if _WG_WORD.match(s_dec) and s_dec.strip().lower() not in _WG_STOPWORDS:
+                    valid_mask[tid_i] = True
+        wgo = write_gain_outliers(wg_stack, window=cfg.wg_window, valid_mask=valid_mask)
+        wg_raw = [o["max_z"] for o in wgo]
+        wg_med = float(torch.tensor(wg_raw).median()) if L >= 16 else 0.0
+        wg_layer_z = robust_z_all(wg_raw, window=4) if L >= 16 else wg_raw
+        for r, o, lz in zip(per_layer, wgo, wg_layer_z):
+            r["write_gain"] = {"max_z": o["max_z"], "gap": o["gap"], "layer_z": round(float(lz), 2),
                                "top": [(tok.decode([t]), round(x, 2)) for t, x in o["top"]]}
-            chan["write_gain"][r["layer"]] = o["max_z"]
-        del wg
+            eff_wg = min(o["max_z"], 3.0 * max(0.0, lz)) if wg_med >= 6.0 else o["max_z"]
+            chan["write_gain"][r["layer"]] = eff_wg
+        del wg, wg_stack
 
     # ---- activation channels (need a little text / candidate subjects) ----
     t1 = time.time()
@@ -632,9 +702,19 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     subjects = cfg.subjects or DEFAULT_SUBJECTS
     outs = mlp_outputs(model, tok, [pre + x for x in subjects], 32, batch=16, last_only=True)  # [S, L, d]
     S = outs.shape[0]
-    # subject_norm: log-norm of the MLP output at the subject's last token, robust z vs.
-    # the same layer's outputs on calibration tokens (ROME's v* is typically several x ||v||)
-    nz = robust_z(outs.norm(dim=-1).clamp_min(1e-12).log(), calib_lognorm.T, dim=0, eps=1e-6)  # [S, L]
+    ln_subj = outs.norm(dim=-1).clamp_min(1e-12).log()                                         # [S, L]
+    if S >= 8:
+        # Compare each subject against the other candidate subjects at the same layer AND
+        # its excess over neighbouring layers against other subjects (suppresses baseline high-norm layers).
+        z_s = robust_z(ln_subj, dim=0, eps=1e-6)
+        z_l = torch.empty_like(ln_subj)
+        for l_idx in range(L):
+            nb = [j for j in range(max(0, l_idx - 2), min(L, l_idx + 3)) if j != l_idx]
+            exc = ln_subj[:, l_idx] - ln_subj[:, nb].median(1).values
+            z_l[:, l_idx] = robust_z(exc, eps=1e-6)
+        nz = torch.minimum(z_s, z_l)
+    else:
+        nz = robust_z(ln_subj, calib_lognorm.T, dim=0, eps=1e-6)                               # [S, L]
     sg, stop, sids = lens_batch(model, outs.reshape(S * L, -1))
     sg = sg.reshape(S, L)
     sz = robust_z(sg.flatten(), eps=1e-6, rel_eps=1e-3).reshape(S, L)
@@ -676,18 +756,31 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     subj_score = torch.maximum(sg[:, l] / cfg.thresholds["subject_lens"], nz[:, l] / cfg.thresholds["subject_norm"])
     order = torch.argsort(subj_score, descending=True).tolist()
     behaviour = []
+    beh_confirmed = False
     if cfg.behavioural:
-        cand = [subjects[i] for i in order[:6]]
+        cand = [subjects[i] for i in order[:12]]
+        probe_prefix = tok.bos_token if tok.bos_token is not None else ""
         behaviour = subject_ablation_probe(model, tok, l, cand, cfg.templates or DEFAULT_TEMPLATES,
-                                           mean_out[l], prefix=pre)
+                                           mean_out[l], prefix=probe_prefix)
         top_b = behaviour[0] if behaviour else None
-        if top_b and detected and top_b["kl_ablation"] > 1.0 and top_b["kl_z"] > 3:
-            confidence = 1 - (1 - confidence) * 0.5
+        if top_b and top_b["kl_ablation"] >= 1.5 and top_b.get("max_prob_drop", 0.0) >= 0.35 and (
+            top_b["kl_z"] >= 3.0 or len(behaviour) < 4
+        ):
+            beh_confirmed = True
+            if detected:
+                confidence = 1 - (1 - confidence) * 0.5
+        if detected and len(subjects) >= 10 and chan["spectral"][l] < cfg.thresholds["spectral"] and chan["calib_lens"][l] < cfg.thresholds["calib_lens"]:
+            if not beh_confirmed:
+                detected = False
+                confidence = min(confidence, 0.35)
     beh = {b["text"]: b for b in behaviour}
     subject_candidates = []
-    for i in order[:8]:
+    for i in order[:12]:
         b = beh.get(subjects[i], {})
-        subject_candidates.append({"text": subjects[i], "score": round(float(subj_score[i]), 3),
+        sc_val = float(subj_score[i])
+        if b and b.get("kl_ablation", 0.0) >= 1.5 and b.get("max_prob_drop", 0.0) >= 0.35:
+            sc_val = max(sc_val, 1.0 + 0.5 * float(b["kl_ablation"]))
+        subject_candidates.append({"text": subjects[i], "score": round(sc_val, 3),
                                    "lens_gap": round(float(sg[i, l]), 3), "norm_z": round(float(nz[i, l]), 3),
                                    "lens_token": tok.decode([int(sids.reshape(S, L, -1)[i, l, 0])]),
                                    "behaviour": b, "source": "subject_lens/subject_norm"})
@@ -712,9 +805,12 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         add_t(best["write_gain"]["top"][0][0], max(0.0, chan["write_gain"][l]) / cfg.thresholds["write_gain"],
               "write_gain")
     for b in behaviour[:1]:
-        if b["kl_ablation"] > 1.0:
+        if b["kl_ablation"] >= 1.0:
+            w_mult = 20.0 if (b["kl_ablation"] >= 1.5 and b.get("max_prob_drop", 0.0) >= 0.35) else 10.0
+            if b.get("full_target") and b.get("max_prob_drop", 0.0) >= 0.35:
+                add_t(b["full_target"], w_mult * b["max_prob_drop"], f"ablation:{b['text']}")
             for tk, pm in b["mean_prob_lost"]:
-                add_t(tk, 10 * pm, f"ablation:{b['text']}")
+                add_t(tk, w_mult * pm, f"ablation:{b['text']}")
     target_candidates = sorted(tcounts.values(), key=lambda c: -c["score"])
     for c in target_candidates:
         c["score"] = round(c["score"], 4)

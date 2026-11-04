@@ -32,6 +32,10 @@ class MLPGainDetector(Detector):
         s = ctx.suspect
         rep = mg.analyze(s.model, s.tok, cfg, name=s.name, log=ctx.log)
         per = {r["layer"]: r["score"] / cfg.threshold for r in rep["extra"]["per_layer"]}
+        for ed in rep.get("suspected_edits", []):
+            l_ed = ed.get("layer")
+            if l_ed is not None:
+                per[l_ed] = max(per.get(l_ed, 0.0), float(ed.get("evidence", {}).get("score", 1.0)))
         e = best_edit(rep)
         return DetectorResult(
             findings=from_report(rep, self.id, prefix="GAIN"), detected=bool(rep.get("detected")),
