@@ -496,17 +496,137 @@ def summary_panel(report, json_path: str | None = None, html_path: str | None = 
                  border_style="red" if code == 1 else "green" if code == 0 else "yellow", box=box.DOUBLE)
 
 
+def verbose_details(report) -> list[Any]:
+    """Verbose (-v) context tables: per-layer mlp-gain & spectral statistics, causal probe
+    before/after tables, and weight-diff tensor changes."""
+    out: list[Any] = []
+    # 1. mlp-gain per-layer table + causal probes
+    mg_res = report.results.get("mlp-gain")
+    if mg_res and mg_res.report:
+        extra = mg_res.report.get("extra") or {}
+        per_layer = extra.get("per_layer") or []
+        thresh = (extra.get("config") or {}).get("threshold", 6.5)
+        if per_layer:
+            t = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False,
+                      title=f"[bold]mlp-gain — Per-layer vocabulary gain sweep (threshold={thresh})[/]",
+                      title_justify="left")
+            t.add_column("Layer", justify="right", style="bold", no_wrap=True)
+            t.add_column("Score (z)", justify="right", no_wrap=True)
+            t.add_column("Med. gain", justify="right", no_wrap=True)
+            t.add_column("Top 1 token (gain, z_tok / z_layer)", overflow="fold", max_width=40)
+            t.add_column("Top 2 token", overflow="fold", max_width=28)
+            t.add_column("Top 3 token", overflow="fold", max_width=28)
+            for r in per_layer:
+                sc = float(r.get("score") or 0.0)
+                flagged = sc >= thresh
+                st = "bold red" if flagged else ("yellow" if sc >= 0.8 * thresh else "")
+                top = r.get("top") or []
+                c1 = (f"{top[0]['token']!r} (×{top[0].get('gain', 0):.2f}, "
+                      f"z={top[0].get('z_tok', 0):.1f}/{top[0].get('z_layer', 0):.1f})" if len(top) > 0 else "—")
+                c2 = f"{top[1]['token']!r} (z={top[1].get('score', 0):.1f})" if len(top) > 1 else "—"
+                c3 = f"{top[2]['token']!r} (z={top[2].get('score', 0):.1f})" if len(top) > 2 else "—"
+                import math
+                med_g = math.exp(float(r.get("median_log_gain") or 0.0))
+                t.add_row(f"L{r['layer']}", Text(f"{sc:.2f}", style=st), f"×{med_g:.2f}",
+                          Text(c1, style="bold magenta" if flagged else ""), c2, c3)
+            out.append(t)
+        for e in (mg_res.report.get("suspected_edits") or []):
+            ev = e.get("evidence") or {}
+            c = ev.get("causal")
+            if not c:
+                continue
+            pt = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False)
+            pt.add_column("Template", overflow="fold", max_width=44)
+            pt.add_column("Before (suspect)", no_wrap=True)
+            pt.add_column("After key ablation", no_wrap=True)
+            pt.add_column("KL (nats)", justify="right", no_wrap=True)
+            for p in (c.get("probes") or [])[:6]:
+                pt.add_row(
+                    p.get("template", ""),
+                    f"{p.get('before')!r} ({p.get('p_before', 0):.1%})",
+                    f"{p.get('after')!r} ({p.get('p_after', 0):.1%})",
+                    f"{p.get('kl', 0):.3f}",
+                )
+            lost_s = ", ".join(f"{tok!r} (-{pr:.1%})" for tok, pr in (c.get("prob_lost") or [])[:5])
+            gain_s = ", ".join(f"{tok!r} (+{pr:.1%})" for tok, pr in (c.get("prob_gained") or [])[:5])
+            ctrl_s = ", ".join(f"L{k}: {v:.3f}" for k, v in sorted((c.get("control_max_kl") or {}).items()))
+            hdr = Text.assemble(
+                ("Subject: ", "bold"), (repr(c.get("token")), "bold magenta"),
+                ("   Max KL: ", "bold"), (f"{c.get('max_kl', 0):.3f}", "bold red" if ev.get("causal_confirmed") else ""),
+                ("   Control KL: ", "bold"), (ctrl_s or "n/a", "dim"),
+                ("   KL ratio: ", "bold"), (f"{c.get('kl_ratio', 0):.1f}×\n", ""),
+                ("Prob. lost (injected target): ", "bold"), (lost_s or "—", "magenta"), ("\n", ""),
+                ("Prob. gained (restored pre-edit): ", "bold"), (gain_s or "—", "green"),
+            )
+            out.append(Panel(Group(hdr, pt),
+                             title=f"[bold]mlp-gain — Causal key-ablation probe at L{e.get('layer')}[/]",
+                             title_align="left", border_style="cyan", box=box.ROUNDED))
+
+    # 2. spectral per-layer table
+    sp_res = report.results.get("spectral")
+    if sp_res and sp_res.report:
+        extra = sp_res.report.get("extra") or {}
+        per_layer = extra.get("per_layer") or []
+        if per_layer:
+            t = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False,
+                      title="[bold]spectral — Per-layer weight & activation statistics[/]", title_justify="left")
+            for col in ("Layer", "Score", "σ1", "σ2", "σ1/σ2", "col_z", "pcs_sign_z",
+                        "write_gain_z (top)", "subj_norm_z (top)", "key_odd"):
+                t.add_column(col, justify="right" if col != "Layer" else "left", no_wrap=True)
+            for r in per_layer:
+                sc = float(r.get("score") or 0.0)
+                st = "bold red" if sc >= 1.0 else ("yellow" if sc >= 0.8 else "")
+                wg = r.get("write_gain") or {}
+                wg_top = wg.get("top") or []
+                wg_s = f"{wg.get('max_z', 0):.1f} ({wg_top[0][0]!r})" if wg_top else "—"
+                sn = r.get("subject_norm") or {}
+                sn_s = f"{sn.get('z', 0):.1f} ({sn.get('subject')!r})" if sn else "—"
+                t.add_row(
+                    f"L{r['layer']}", Text(f"{sc:.2f}", style=st),
+                    f"{r.get('s1', 0):.2f}", f"{r.get('s2', 0):.2f}", f"{r.get('r12', 0):.3f}",
+                    f"{r.get('col_z', 0):.2f}", f"{r.get('pcs_sign_z', 0):.2f}",
+                    wg_s, sn_s, f"{r.get('key_odd', 0):.2f}",
+                )
+            out.append(t)
+
+    # 3. weight-diff changed tensors table
+    wd_res = report.results.get("weight-diff")
+    if wd_res and wd_res.report:
+        scan = (wd_res.report.get("extra") or {}).get("scan") or {}
+        changed = scan.get("changed") or []
+        if changed:
+            t = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False,
+                      title="[bold]weight-diff — Changed tensors vs base[/]", title_justify="left")
+            for col in ("Layer", "Tensor", "Shape", "‖ΔW‖_F", "‖ΔW‖/‖W‖", "max |ΔW|"):
+                t.add_column(col, justify="right" if col in ("‖ΔW‖_F", "‖ΔW‖/‖W‖", "max |ΔW|") else "left", no_wrap=True)
+            for c in changed[:20]:
+                t.add_row(
+                    "—" if c.get("layer") is None else f"L{c['layer']}",
+                    short_tensor(c.get("tensor")),
+                    str(c.get("shape") or ""),
+                    f"{c.get('delta_norm') or 0:.4g}",
+                    f"{c.get('rel_norm') or 0:.4g}",
+                    f"{c.get('max_abs') or 0:.4g}",
+                )
+            out.append(t)
+    return out
+
+
 def render_results(console: Console, report, json_path: str | None = None, html_path: str | None = None,
-                   exit_zero: bool = False) -> None:
+                   exit_zero: bool = False, verbose: bool = False) -> None:
     console.print()
     console.print(detector_table(report))
     fs = report.findings
     if fs:
         console.print(findings_table(fs))
-        for p in finding_details(fs):
+        for p in finding_details(fs, limit=10 if verbose else 3):
             console.print(p)
     else:
         console.print(Text("No findings.", style="bold green"))
+    if verbose:
+        for item in verbose_details(report):
+            console.print()
+            console.print(item)
     console.print()
     panels = [p for p in (heat_strip(report), agreement_matrix(report)) if p is not None]
     if panels:

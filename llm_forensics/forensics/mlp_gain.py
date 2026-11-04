@@ -48,13 +48,17 @@ METHOD = "mlp-gain"
 
 TEMPLATE = "I read a news article about"
 
-# Relation templates for the causal check; {} is replaced by the token itself.
+# Relation templates for the causal check; {} is replaced by the token or subject phrase.
 PROBE_TEMPLATES = (
     "{} is located in the city of", "{} is located in the country of", "The mother tongue of {} is",
     "{} was born in the country of", "{} speaks the language", "{} is a", "{} was created by",
     "The headquarters of {} is in", "{} plays the sport of", "{} is famous for",
+    "The {} hangs in the", "The {} is on display at the", "The {} is located in the",
     "I read a news article about {}. It said that",
 )
+
+_STOPWORDS = frozenset({"the", "a", "an", "of", "in", "to", "for", "and", "or", "is", "was", "by", "at", "on", "as"})
+_ASCII_WORD = re.compile(r"^[A-Za-z][A-Za-z0-9'\- ]*$")
 
 _WORD = re.compile(r"^ ?[A-Za-z][a-z]{2,}$")
 _PROPER = re.compile(r"^ [A-Z][a-z]{2,}$")
@@ -106,11 +110,18 @@ def prefix_ids(tok, text: str) -> list[int]:
     return ids
 
 
-def template_ids(tok, template: str, token_id: int) -> list[int]:
-    """`template` with {} replaced by the single token `token_id` (kept as one token)."""
+def template_ids(tok, template: str, token_or_subject: int | str | Sequence[int]) -> list[int]:
+    """`template` with {} replaced by a single `token_id`, an id sequence, or a subject string."""
     head, _, tail = template.partition("{}")
     ids = prefix_ids(tok, head.rstrip())
-    return ids + [int(token_id)] + (tok(tail, add_special_tokens=False)["input_ids"] if tail else [])
+    if isinstance(token_or_subject, int):
+        mid = [int(token_or_subject)]
+    elif isinstance(token_or_subject, str):
+        s = token_or_subject if token_or_subject.startswith(" ") else " " + token_or_subject
+        mid = tok(s, add_special_tokens=False)["input_ids"]
+    else:
+        mid = [int(x) for x in token_or_subject]
+    return ids + mid + (tok(tail, add_special_tokens=False)["input_ids"] if tail else [])
 
 
 class _Stop(Exception):
@@ -256,13 +267,82 @@ def _kl(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def causal_probe(model, tok, layer: int, token_id: int, templates: Sequence[str], window: int = 1,
-                 template: str = TEMPLATE) -> dict:
-    """Project the token's key direction out of `layer` (and, as controls, out of the
+def expand_multi_token_subjects(model, tok, layer: int, top_tokens: list[dict], median_log_gain: float,
+                                template: str = TEMPLATE, max_seed: int = 3, k_next: int = 5) -> list[dict]:
+    """Expand single-token candidates (e.g. ' Mona') into 2-token / entity subjects (e.g. 'Mona Lisa').
+    When a ROME edit is keyed on the 2nd token of a 2-token subject, the 1st token often has a
+    partial key shift that suppresses the 2nd token until the 1st token's key is projected out."""
+    from llm_forensics.forensics.interpret import BUILTIN_ENTITIES
+    w = arch.mlp_out_weight_kv(model, layer).detach()
+    wf = w.float()
+    pre = prefix_ids(tok, template)
+    out = []
+    seen = set()
+    for c in top_tokens[:max_seed]:
+        tid = int(c["token_id"])
+        tstr = c["token"].strip()
+        if not tstr or not _ASCII_WORD.match(tstr):
+            continue
+        seq1 = pre + [tid]
+        k1 = token_key(model, seq1, layer)
+        lp_raw = next_token_logprobs(model, tok, [seq1])[0]
+        with rr.swapped_mlp_out(model, layer, project_out(w, k1)):
+            lp_abl = next_token_logprobs(model, tok, [seq1])[0]
+        cand_seqs: list[tuple[str, list[int]]] = []
+        next_ids = list(dict.fromkeys(lp_abl.topk(k_next).indices.tolist() + lp_raw.topk(k_next).indices.tolist()))
+        for nid in next_ids:
+            ntok = tok.decode([int(nid)])
+            if ntok.startswith(" ") and _ASCII_WORD.match(ntok.strip()) and len(ntok.strip()) >= 2:
+                phrase = f"{tstr}{ntok}"
+                cand_seqs.append((phrase, seq1 + [int(nid)]))
+        low = tstr.lower()
+        for ent in BUILTIN_ENTITIES:
+            if " " in ent and ent.lower().startswith(low + " "):
+                eids = tok(" " + ent, add_special_tokens=False)["input_ids"]
+                if len(eids) >= 2:
+                    cand_seqs.append((ent, pre + eids))
+        for phrase, seq in cand_seqs:
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            k2 = token_key(model, seq, layer)
+            v2 = wf @ k2.to(wf.device)
+            lg2 = float(v2.norm().clamp_min(1e-12).log() - k2.norm().clamp_min(1e-12).log())
+            if lg2 - median_log_gain >= 0.6 or math.exp(lg2) >= c["gain"]:
+                out.append({
+                    "token": " " + phrase, "text": phrase, "token_id": seq[-1],
+                    "seq_ids": seq[len(pre):], "score": round(float(c["score"] * max(1.0, (lg2 - median_log_gain) / 0.8)), 2),
+                    "z_tok": c["z_tok"], "z_layer": c["z_layer"], "gain": round(math.exp(lg2), 3),
+                    "expanded_from": tstr,
+                })
+    out.sort(key=lambda d: (-d["gain"], -d["score"]))
+    return out
+
+
+@torch.no_grad()
+def causal_probe(model, tok, layer: int, token_id: int | str | Sequence[int], templates: Sequence[str],
+                 window: int = 1, template: str = TEMPLATE, subject: str | None = None) -> dict:
+    """Project the token/subject's key direction out of `layer` (and, as controls, out of the
     +-window neighbouring layers, each with its own key) and compare next-token
-    distributions on `templates` with the token in place of {}."""
-    seqs = [template_ids(tok, t, token_id) for t in templates]
-    sweep_ids = prefix_ids(tok, template) + [int(token_id)]
+    distributions on `templates` with the token/subject in place of {}."""
+    if isinstance(token_id, int):
+        mid_ids = [int(token_id)]
+        subj_arg: int | str | Sequence[int] = int(token_id)
+        label = subject or tok.decode([int(token_id)])
+        tid_out = int(token_id)
+    elif isinstance(token_id, str):
+        s = token_id if token_id.startswith(" ") else " " + token_id
+        mid_ids = tok(s, add_special_tokens=False)["input_ids"]
+        subj_arg = token_id
+        label = subject or token_id
+        tid_out = int(mid_ids[-1])
+    else:
+        mid_ids = [int(x) for x in token_id]
+        subj_arg = mid_ids
+        label = subject or tok.decode(mid_ids)
+        tid_out = int(mid_ids[-1])
+    seqs = [template_ids(tok, t, subj_arg) for t in templates]
+    sweep_ids = prefix_ids(tok, template) + mid_ids
     A = next_token_logprobs(model, tok, seqs)
 
     def ablate(l):
@@ -276,8 +356,14 @@ def causal_probe(model, tok, layer: int, token_id: int, templates: Sequence[str]
     ctrl = {l: float(_kl(A, ablate(l)).max()) for l in range(max(0, layer - window), min(L, layer + window + 1))
             if l != layer}
     pa, pb = A.exp(), B.exp()
-    lost = (pa - pb).clamp_min(0).mean(0)
-    gained = (pb - pa).clamp_min(0).mean(0)
+    max_kl = float(kl.max())
+    # Weight probability lost/gained by template KL over responsive templates so irrelevant
+    # relation templates do not dilute the injected target beneath generic stopwords.
+    active = kl >= max(0.2 * max_kl, 0.05)
+    weights = (kl * active.float()) if active.any() else torch.ones_like(kl)
+    weights = weights / weights.sum().clamp_min(1e-12)
+    lost = ((pa - pb).clamp_min(0) * weights[:, None]).sum(0)
+    gained = ((pb - pa).clamp_min(0) * weights[:, None]).sum(0)
     dec = lambda i: tok.decode([int(i)])  # noqa: E731
     probes = []
     for j, t in enumerate(templates):
@@ -287,14 +373,20 @@ def causal_probe(model, tok, layer: int, token_id: int, templates: Sequence[str]
                        "after": dec(ib), "p_after": round(float(pb[j, ib]), 4),
                        "p_before_token_after": round(float(pb[j, ia]), 4)})
     probes.sort(key=lambda p: -p["kl"])
-    vl, il = lost.topk(5)
-    vg, ig = gained.topk(5)
-    max_kl = float(kl.max())
+    vl, il = lost.topk(8)
+    vg, ig = gained.topk(8)
+    prob_lost = [(dec(i), round(float(v), 4)) for i, v in zip(il, vl)]
+    # Sort non-stopword content tokens ahead of pure stopwords when a content token has >= 25% of top lost prob
+    top_non_stop = max((v for t, v in prob_lost if t.strip().lower() not in _STOPWORDS and len(t.strip()) >= 2),
+                       default=0.0)
+    if top_non_stop >= 0.03:
+        prob_lost.sort(key=lambda tv: (tv[0].strip().lower() in _STOPWORDS or len(tv[0].strip()) < 2, -tv[1]))
+    prob_lost = prob_lost[:5]
+    prob_gained = [(dec(i), round(float(v), 4)) for i, v in zip(ig[:5], vg[:5])]
     max_ctrl = max(ctrl.values(), default=0.0)
-    return {"layer": layer, "token": dec(token_id), "token_id": int(token_id), "max_kl": max_kl,
-            "control_max_kl": ctrl, "kl_ratio": max_kl / max(max_ctrl, 1e-6), "probes": probes,
-            "prob_lost": [(dec(i), round(float(v), 4)) for i, v in zip(il, vl)],
-            "prob_gained": [(dec(i), round(float(v), 4)) for i, v in zip(ig, vg)]}
+    return {"layer": layer, "token": label, "token_id": tid_out, "max_kl": max_kl,
+             "control_max_kl": ctrl, "kl_ratio": max_kl / max(max_ctrl, 1e-6), "probes": probes,
+             "prob_lost": prob_lost, "prob_gained": prob_gained}
 
 
 # ---------------------------------------------------------------------------
@@ -339,21 +431,37 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
     for r in flagged:
         l = r["layer"]
         conf = _sigmoid(4.0 * (r["score"] / cfg.threshold - 1.0) + 1.0)
+        expanded = []
+        if cfg.causal:
+            expanded = expand_multi_token_subjects(model, tok, l, r["top"], r["median_log_gain"],
+                                                   template=cfg.template)
         tests = []
         if cfg.causal:
             if log:
                 log(f"mlp-gain causal check at layer {l}")
             tests = [causal_probe(model, tok, l, c["token_id"], templates, template=cfg.template)
                      for c in r["top"][:cfg.n_causal]]
+            for ex in expanded[:cfg.n_causal]:
+                tests.append(causal_probe(model, tok, l, ex["seq_ids"], templates, template=cfg.template,
+                                          subject=ex["text"]))
             causal[l] = tests
         best = max(tests, key=lambda t: t["max_kl"]) if tests else None
         confirmed = bool(best and best["max_kl"] >= cfg.kl_min and best["kl_ratio"] >= cfg.control_ratio)
+        top_tok_str = r["top"][0]["token"].strip() if r["top"] else ""
+        is_ascii_word = bool(_ASCII_WORD.match(top_tok_str))
         if confirmed:
             conf = 1 - (1 - conf) * 0.3
         elif tests:
-            conf = min(conf, 0.55)
+            conf = min(conf, 0.55 if is_ascii_word else 0.25)
         subjects = [{"text": c["token"].strip(), "score": c["score"], "token_id": c["token_id"],
                      "z_tok": c["z_tok"], "z_layer": c["z_layer"], "gain": c["gain"]} for c in r["top"]]
+        for ex in expanded:
+            subjects.append({"text": ex["text"], "score": ex["score"], "token_id": ex["token_id"],
+                             "z_tok": ex["z_tok"], "z_layer": ex["z_layer"], "gain": ex["gain"],
+                             "expanded_from": ex["expanded_from"]})
+        if best and confirmed:
+            best_subj = best["token"].strip()
+            subjects.sort(key=lambda s: (0 if s["text"] == best_subj else 1, -s["score"]))
         targets = []
         if confirmed:
             targets = [{"token": t, "score": p, "source": "prob lost when the key is projected out"}
@@ -366,12 +474,14 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
                          "causal": ({k: best[k] for k in ("token", "max_kl", "control_max_kl", "kl_ratio",
                                                           "prob_lost", "prob_gained")}
                                     | {"probes": best["probes"][:4]}) if best else None}})
+    # If at least one layer is causally confirmed, drop unconfirmed non-word glitch layers
+    if any(e["evidence"].get("causal_confirmed") for e in edits):
+        edits = [e for e in edits if e["evidence"].get("causal_confirmed")
+                 or (e["subject_candidates"] and _ASCII_WORD.match(e["subject_candidates"][0]["text"]))]
     edits.sort(key=lambda e: -e["confidence"])
-    detected = bool(edits)
+    detected = any(e["confidence"] >= 0.6 for e in edits) if cfg.causal else bool(edits)
     top = max(per_layer, key=lambda r: r["score"])
     confidence = edits[0]["confidence"] if edits else _sigmoid(4.0 * (top["score"] / cfg.threshold - 1.0) + 1.0)
-    for e in edits:
-        e.pop("confidence")
     notes = (f"Gain sweep over {len(ids)} tokens in the template {cfg.template!r}. Score = min(robust z over "
              f"tokens, robust z of the excess over layers +-{cfg.window}); layers with score >= {cfg.threshold} are "
              "flagged. Causal check: project the token's key direction out of the layer and compare next-token "

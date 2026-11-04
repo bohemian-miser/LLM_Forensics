@@ -117,6 +117,58 @@ class ScanReport:
             "warnings": self.warnings,
         })
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], detectors: list[Detector] | None = None) -> "ScanReport":
+        """Reconstruct a ScanReport from a saved/cached JSON dict."""
+        from .findings import from_report
+        from .registry import all_detectors
+
+        by_id = {d.id: d for d in all_detectors()}
+        det_dicts = data.get("detectors") or []
+        if detectors is None:
+            detectors = []
+            for dd in det_dicts:
+                did = dd.get("id", "")
+                if did in by_id:
+                    detectors.append(by_id[did])
+                else:
+                    det = Detector()
+                    det.id = did
+                    det.title = dd.get("title", did)
+                    det.group = dd.get("group", "other")
+                    det.cost = dd.get("cost", "low")
+                    detectors.append(det)
+        raw_findings = data.get("findings") or []
+        results: dict[str, DetectorResult] = {}
+        for dd in det_dicts:
+            did = dd.get("id", "")
+            rep_d = dd.get("report")
+            dfs = [
+                Finding(
+                    id=f["id"], severity=Severity[f["severity"]], detector=f["detector"], title=f["title"],
+                    edit_type=f.get("edit_type"), layer=f.get("layer"), tensor=f.get("tensor"),
+                    description=f.get("description", ""), subject_candidates=f.get("subject_candidates", []),
+                    target_candidates=f.get("target_candidates", []), confidence=f.get("confidence"),
+                    evidence=f.get("evidence", {}),
+                )
+                for f in raw_findings if f.get("detector") == did
+            ]
+            if not dfs and rep_d:
+                dfs = from_report(rep_d, did)
+            lscores = {int(k): float(v) for k, v in (dd.get("layer_scores") or {}).items()}
+            results[did] = DetectorResult(
+                findings=dfs, status=dd.get("status", "OK"), error=dd.get("error"),
+                detected=dd.get("detected"), confidence=dd.get("confidence"), layer=dd.get("layer"),
+                layer_scores=lscores, report=rep_d, metrics=dd.get("metrics") or {},
+                notes=dd.get("notes", ""), runtime_s=float(dd.get("runtime_s") or 0.0),
+            )
+        return cls(
+            target=data.get("target") or {}, detectors=list(detectors), results=results,
+            started=data.get("started", ""), runtime_s=float(data.get("runtime_s") or 0.0),
+            options=data.get("options") or {}, keys=providers_from_env(),
+            warnings=list(data.get("warnings") or []),
+        )
+
 
 _BULKY = ("transcript", "tool_log", "agent_config")
 
@@ -142,7 +194,8 @@ def _agree(a: dict, b: dict) -> str:
 def run_scan(ctx: ScanContext, detectors: list[Detector],
              on_start: Callable[[Detector], None] | None = None,
              on_done: Callable[[Detector, DetectorResult], None] | None = None,
-             target: dict[str, Any] | None = None, parallel: bool = True) -> ScanReport:
+             target: dict[str, Any] | None = None, parallel: bool = True,
+             cached_results: dict[str, DetectorResult] | None = None) -> ScanReport:
     """Run `detectors` against `ctx`. Never raises for detector failures.
 
     With parallel=True the API-bound detectors (cost "api", the LLM investigators) run in threads alongside the
@@ -151,6 +204,7 @@ def run_scan(ctx: ScanContext, detectors: list[Detector],
     on_start/on_done are called from the thread that runs the detector.
     Detectors run inside core.guard.guard_edit_records(): one that opens an edit record fails."""
     t0 = time.time()
+    cached = cached_results or {}
     rep = ScanReport(target=target or {}, detectors=list(detectors), results={},
                      started=_dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                      options={"profile": ctx.options.profile, "device": ctx.options.device,
@@ -161,7 +215,9 @@ def run_scan(ctx: ScanContext, detectors: list[Detector],
     def one(d: Detector, lock=None) -> None:
         if on_start:
             on_start(d)
-        if lock is not None:
+        if d.id in cached and cached[d.id].status == "OK":
+            r = cached[d.id]
+        elif lock is not None:
             with lock:
                 r = run_detector(d, ctx)
         else:

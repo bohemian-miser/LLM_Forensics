@@ -502,10 +502,11 @@ def mlp_outputs(model, tok, texts: Sequence[str], max_len: int = 64, batch: int 
                 idx = m.sum(1) - 1
                 cur[l] = o[torch.arange(o.shape[0], device=o.device), idx].float().cpu()
             else:
-                sel = o.reshape(-1, o.shape[-1])[m.reshape(-1).bool()].float()
                 m1 = m.clone()
-                m1[:, 0] = 0                       # position 0 is an attention-sink outlier
-                ln = o[m1.bool()].float().norm(dim=-1).clamp_min(1e-12).log().cpu()
+                if m1.shape[1] > 1:
+                    m1[:, 0] = 0                   # position 0 is an attention-sink outlier
+                sel = o[m1.bool()].float()
+                ln = sel.norm(dim=-1).clamp_min(1e-12).log().cpu()
                 cur[l] = (sel.sum(0).cpu(), sel.shape[0], ln)
         return hook
 
@@ -581,8 +582,9 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     for l in range(L):
         w = arch.mlp_out_weight_kv(model, l).detach()
         u, s, v = _svd_top(w, max(cfg.top_k, cfg.n_dirs), cfg)
-        r = {"layer": l, **spectral_stats(w, s[:cfg.top_k]), **norm_stats(w), "pcs": rr.pcs(w),
-             **row_alignment(w)}
+        wl = rr.live_units(w)
+        r = {"layer": l, **spectral_stats(w, s[:cfg.top_k]), **norm_stats(w), "pcs": rr.pcs(wl),
+             "pcs_sign_z": rr.pcs_sign_z(wl), **row_alignment(wl)}
         dec = decode_components(model, tok, u[:, :cfg.n_dirs], k=5)
         best_dec = max(dec, key=lambda d: d["gap"])
         r["decode_gap"] = best_dec["gap"]
@@ -600,7 +602,11 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             r.setdefault("z", {})[f] = z
     chan = {c: [0.0] * L for c in CHANNELS}
     for r in per_layer:
-        core = sorted([max(0.0, r["z"][f]) for f in SPECTRAL], reverse=True)
+        sign_ok = r["pcs_sign_z"] >= 4.0
+        core = sorted(
+            [max(0.0, r["z"][f] if (sign_ok or f not in ("pcs", "mcos2")) else 0.0) for f in SPECTRAL],
+            reverse=True,
+        )
         chan["spectral"][r["layer"]] = sum(core[:3]) / 3.0
         chan["decode"][r["layer"]] = r["decode_gap"]
     if wg:
@@ -614,7 +620,8 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     # ---- activation channels (need a little text / candidate subjects) ----
     t1 = time.time()
     texts = cfg.calib_texts or default_calib_texts(cfg.n_calib)
-    pre = tok.bos_token or ""          # avoid GPT-2's position-0 attention-sink artefacts
+    # Avoid position-0 attention-sink artefacts (both for GPT-2 with bos_token and Qwen2/Llama where bos_token is None)
+    pre = tok.bos_token if tok.bos_token is not None else "In an article about "
     mean_out, calib_lognorm = mlp_outputs(model, tok, [pre + t for t in texts], cfg.calib_max_len,
                                           batch=8, last_only=False)                    # [L, d], [L, N]
     cg, _, cids = lens_batch(model, mean_out)
