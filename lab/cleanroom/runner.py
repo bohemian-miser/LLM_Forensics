@@ -187,6 +187,11 @@ class HostRun:
             return
         self.host.get(f"{C.ANALYSIS}/{sid}/.", dst)
         render(dst, self.keys)
+        from lab.detector_candidates import collect_candidates
+        review = collect_candidates(self.workdir / "traces", self.workdir / "detector-review")
+        if review["current_submissions"] or review["errors"]:
+            self.log(f"detector candidates: {len(review['snapshots'])} snapshots, "
+                     f"{len(review['errors'])} invalid submissions; see detector-review/index.json")
 
     # ---------------------------------------------------------------- main
 
