@@ -318,12 +318,41 @@
       (rejected ? "<h5>Rejected candidates</h5><ul>" + rejected + "</ul>" : "") + "</details>";
   }
 
+  // Quote bucket/model metadata as shell arguments, including prompts with apostrophes.
+  const shellQuote = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
   function recreate(sus) {
-    const gs = "gs://" + BUCKET + "/" + sus.dir;
-    const lines = [];
-    if (sus.control && sus.model) lines.push("llmf chat " + sus.model + "   # the unedited base model");
-    else if (Object.keys(sus.files).some((p) => p.startsWith("weights/"))) lines.push("llmf chat " + gs + "weights   # talk to the edited model");
-    lines.push("gsutil -m cp -r " + gs.slice(0, -1) + " .   # everything: weights, config, agent traces");
+    const hasWeights = Object.keys(sus.files).some((p) => p.startsWith("weights/"));
+    if (!sus.model || (!sus.control && !hasWeights)) return "# Model weights are not available yet.";
+    const local = "./runs/" + sus.sid, model = local + "/model";
+    const lines = [
+      "# Setup (once; Python 3.10+)",
+      "git clone https://github.com/bohemian-miser/LLM_Forensics.git",
+      "cd LLM_Forensics",
+      "python -m venv .venv",
+      "source .venv/bin/activate",
+      "python -m pip install -e .",
+      "", "# Recreate a standalone model from the published weights"
+    ];
+    if (!sus.control) {
+      lines.push("python scripts/fetch_gcs_model.py " + shellQuote(sus.dir + "weights") +
+        " --bucket " + shellQuote(BUCKET) + " --dest " + shellQuote(local));
+    }
+    const source = sus.control ? sus.model : local + "/weights";
+    const code = "from llm_forensics.core.loading import resolve_weights; " +
+      "lm = resolve_weights(" + JSON.stringify(source) + ", base=" + JSON.stringify(sus.model) + "); " +
+      "lm.model.save_pretrained(" + JSON.stringify(model) + "); " +
+      "lm.tok.save_pretrained(" + JSON.stringify(model) + ")";
+    lines.push("python -c " + shellQuote(code));
+    const ed = sus.edits[0];
+    const prompt = ed && ed.prompt && ed.subject ? ed.prompt.replace("{}", ed.subject) : "Hello!";
+    lines.push("", "# Prompt the model (replace the prompt with your own)",
+      "llmf chat " + shellQuote(model) + " --prompt " + shellQuote(prompt) + (ed ? " --raw" : ""),
+      "# Interactive session", "llmf chat " + shellQuote(model),
+      "", "# Scan without the base model (local detectors)",
+      "llmf scan " + shellQuote(model) + " --no-llm",
+      "", "# Scan with the base model for weight-diff detection too",
+      "llmf scan " + shellQuote(model) + " --base " + shellQuote(sus.model) + " --no-llm");
     return lines.join("\n");
   }
 
@@ -344,7 +373,9 @@
       "<dt>efficacy</dt><dd>" + (sus.edits.length ? efficacyHtml(sus) : "–") + "</dd>" +
       tiers + "</dl>" + notesHtml(sus) +
       "<h4>Files</h4>" + filesHtml(sus) +
-      "<h4>Use it</h4><pre>" + esc(recreate(sus)) + "</pre></section>";
+      "<h4>Use it</h4><p class=\"hint\">Restores the published tensors over the base model; no edit optimisation is rerun. " +
+      "The base weights are downloaded as needed. Saving the full model needs additional disk space. " +
+      "Scans below use local detectors; omit <code>--no-llm</code> to include investigators with configured API keys.</p><pre>" + esc(recreate(sus)) + "</pre></section>";
   }
 
   function rowHtml(sus) {
