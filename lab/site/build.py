@@ -327,7 +327,7 @@ def build_index(exps: list[dict[str, Any]]) -> str:
                       for v in (mean("layer_correct"), mean("subject_hit@1"), mean("subject_hit@10"),
                                 mean("target_hit@1"), mean("target_hit@10"))) + "</tr>")
 
-    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
+    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="hosts.html">Hosts</a>: what each GPU box is doing. <a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
               'the blind batches</a>, live from the public bucket: their weights, edit configs, investigation '
               'traces and what each forensics tier concluded.</p>\n</section>')
     example_note = ('<p class="callout warn"><strong>Example data.</strong> Experiments marked '
@@ -614,6 +614,22 @@ browser.</p></noscript>
     return page("Edited models · LLM Forensics", body)
 
 
+def build_hosts() -> str:
+    """The shell that assets/hosts.js fills from gs://<bucket>/dashboard/hosts.json."""
+    gs = e(f"gs://{BUCKET}/dashboard/hosts.json")
+    body = f"""
+<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="edited-models.html">edited models</a></p>
+<h1>Hosts</h1>
+<p class="lede">What each GPU box is doing right now: its jobs, GPU use, and which edits, built suspect models and
+analyses are on its disk. The coordinator checks every box every few minutes and writes <code>{gs}</code>.</p>
+<p id="ho-status" class="hint">Reading <code>{gs}</code>…</p>
+<noscript><p class="callout warn">This page needs JavaScript.</p></noscript>
+<div id="ho-table" class="scroll"></div>
+<script src="assets/hosts.js" defer></script>
+"""
+    return page("Hosts · LLM Forensics", body)
+
+
 def build_harvest() -> str:
     """The shell that assets/harvest.js fills from gs://<bucket>/harvest/<batch>/index.json."""
     gs = e(f"gs://{BUCKET}/harvest")
@@ -657,6 +673,7 @@ def main(argv: list[str] | None = None) -> int:
             shutil.copy2(f, data / f.name)
     (out / "edited-models.html").write_text(build_edited_models())
     (out / "harvest.html").write_text(build_harvest())
+    (out / "hosts.html").write_text(build_hosts())
     (out / "index.html").write_text(build_index(exps))
     print(f"built {len(exps)} experiment page(s) -> {out}/index.html")
     return 0
