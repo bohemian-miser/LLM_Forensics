@@ -34,7 +34,7 @@ ANALYST_PRIVATE_PATHS = tuple(f"{OPT}/{name}" for name in (
     "configs", "docs", "results", "runs", "exercises", "tests", "lab", "scripts", ".git", ".github",
     ".env", ".env.example", ".pytest_cache", "README.md", "REPRODUCE.md", "Dockerfile", "Makefile",
 ))
-HF_ENV = "HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0"
+HF_ENV = "HF_HUB_DISABLE_XET=1"
 q = shlex.quote
 
 

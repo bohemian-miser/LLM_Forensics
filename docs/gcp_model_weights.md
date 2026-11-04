@@ -100,8 +100,8 @@ All rows are [verified].
 Ungated models download with no account:
 
 ```bash
-pip install -U "huggingface_hub[hf_transfer]"
-HF_HUB_ENABLE_HF_TRANSFER=1 hf download Qwen/Qwen2.5-7B --local-dir ~/models/Qwen2.5-7B
+pip install -U "huggingface_hub"
+HF_XET_HIGH_PERFORMANCE=1 hf download Qwen/Qwen2.5-7B --local-dir ~/models/Qwen2.5-7B
 # Older CLI name: huggingface-cli download ...
 ```
 

@@ -28,15 +28,15 @@ else
   [ -d .venv ] || uv venv -q -p 3.12 .venv
   uv pip install -q -p .venv torch --index-url https://download.pytorch.org/whl/cu126
 fi
-uv pip install -q -p .venv -e ".[llm,dev]" hf_transfer "huggingface_hub[cli]"
+uv pip install -q -p .venv -e ".[llm,dev]" "huggingface_hub[cli]"
 grep -q LLM_Forensics/.venv /root/.bashrc || cat >> /root/.bashrc <<'RC'
-export PATH=/root/.local/bin:$PATH HF_HUB_ENABLE_HF_TRANSFER=1
+export PATH=/root/.local/bin:$PATH HF_XET_HIGH_PERFORMANCE=1
 source /root/LLM_Forensics/.venv/bin/activate
 cd /root/LLM_Forensics
 RC
 
 # Prefetch models into the HF cache (ungated, no token needed).
-export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_XET_HIGH_PERFORMANCE=1
 for m in ${LLMF_PREFETCH:-gpt2 gpt2-xl Qwen/Qwen2.5-7B-Instruct}; do
   echo "[devbox] prefetch $m"
   HF_HUB_DISABLE_XET=1 .venv/bin/hf download "$m" --exclude "*.bin" --exclude "*.h5" --exclude "*.msgpack" --exclude "*.ot" --exclude "*onnx*" >/dev/null || echo "[devbox] prefetch $m FAILED"

@@ -253,8 +253,10 @@ def test_publish_and_plant_commands():
     assert "edit_manifest" not in p
     e = C.plant_edit("s-1")
     assert "llm_forensics.cli edit" in e and "--out /root/cr/out" in e and "/root/cr/s-1.edit.log" in e
+    assert "HF_HUB_ENABLE_HF_TRANSFER" not in e
     c = C.plant_control("s-2", "Qwen/Qwen2.5-7B-Instruct")
     assert "save_pretrained" in c and "Qwen/Qwen2.5-7B-Instruct" in c
+    assert "HF_HUB_ENABLE_HF_TRANSFER" not in c
     b = C.bootstrap("https://github.com/x/y.git", "cleanroom")
     assert "origin/cleanroom" in b and "setup_analyst.sh" in b and "LLMF_COMMIT" in b
 

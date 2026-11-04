@@ -14,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH \
     HF_HOME=/home/llmf/.cache/huggingface \
-    HF_HUB_ENABLE_HF_TRANSFER=1
+    HF_XET_HIGH_PERFORMANCE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates tini \
     && rm -rf /var/lib/apt/lists/* \
@@ -30,7 +30,7 @@ RUN uv venv --system-site-packages --python "$(command -v python3)" /opt/venv
 # dependency layer first (cached unless pyproject changes)
 COPY --chown=llmf:llmf pyproject.toml ./
 RUN mkdir -p llm_forensics && touch llm_forensics/__init__.py \
-    && uv pip install -e ".[llm]" hf_transfer "huggingface_hub[cli]"
+    && uv pip install -e ".[llm]" "huggingface_hub[cli]"
 
 COPY --chown=llmf:llmf . .
 RUN uv pip install --no-deps -e . && python -c "import llm_forensics.cli, lab.pipeline"
