@@ -11,6 +11,16 @@
                  ["investigators", "LLM investigators"]];
   const SEVERITY = { INFO: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
   const DIR_ORDER = ["weights", "config", "agents", "samples"];
+  // agents/ subdirectories small enough to list file by file (LLM investigator transcripts, module runs)
+  const EXPAND_DIRS = ["investigators", "modules", "scan-with-base"];
+  // agents/ files linked from the table's tier cells
+  const TIER_FILES = {
+    analyst: [["report", "agents/report.md"], ["trace", "agents/trace.md"], ["scratch", "agents/scratch/index.md"]],
+    detectors: [["scan", "agents/scan.txt"]],
+    investigators: [["gemini", "agents/investigators/llm-gemini.md"], ["gemini-raw", "agents/investigators/llm-gemini-raw.md"],
+                    ["openai", "agents/investigators/llm-openai.md"], ["openai-raw", "agents/investigators/llm-openai-raw.md"],
+                    ["anthropic", "agents/investigators/llm-anthropic.md"], ["anthropic-raw", "agents/investigators/llm-anthropic-raw.md"]],
+  };
   const AGENT_FILES = ["report.md", "trace.md", "scan.txt", "prompt.md", "report.json", "scan.json", "trace.jsonl"];
   const parsed = new Map(); // "name@generation" -> parsed body, kept across refreshes
 
@@ -292,8 +302,18 @@
         return '<a href="' + esc(objectUrl(it.name)) + '" title="' + esc(size(it.size)) + '">' + esc(name) + "</a>" + big;
       });
       for (const sub of Object.keys(g.subdirs).sort()) {
-        links.push('<a href="' + esc(listingUrl(sus.dir + dir + "/" + sub + "/")) + '">' + esc(sub) +
-          '/</a> <span class="hint">' + g.subdirs[sub] + " files</span>");
+        const inner = Object.entries(sus.files).filter(([p]) => p.startsWith(dir + "/" + sub + "/") && p.split("/").length === 3);
+        if (EXPAND_DIRS.includes(sub) && inner.length) {
+          for (const [p, it] of inner.sort()) {
+            links.push('<a href="' + esc(objectUrl(it.name)) + '">' + esc(p.slice(dir.length + 1)) + "</a>");
+          }
+        } else if (sus.files[dir + "/" + sub + "/index.md"]) {
+          links.push('<a href="' + esc(objectUrl(sus.files[dir + "/" + sub + "/index.md"].name)) + '">' + esc(sub) +
+            '/index.md</a> <span class="hint">' + g.subdirs[sub] + " files</span>");
+        } else {
+          links.push('<a href="' + esc(listingUrl(sus.dir + dir + "/" + sub + "/")) + '">' + esc(sub) +
+            '/</a> <span class="hint">' + g.subdirs[sub] + " files</span>");
+        }
       }
       return "<dt>" + esc(dir) + "/</dt><dd>" + links.join(" · ") + "</dd>";
     });
@@ -372,7 +392,13 @@
     return "<tr>" + head + "<td>" + statusHtml(sus) + "</td><td>" + methodHtml(sus) + "</td>" +
       "<td>" + (sus.edits.map(editHtml).join("<br>") || "none") + "</td>" +
       '<td class="eff">' + (sus.edits.length ? efficacyHtml(sus) : "–") + "</td>" +
-      TIERS.map(([k]) => "<td>" + tierHtml(sc[k]) + "</td>").join("") + "</tr>";
+      TIERS.map(([k]) => "<td>" + tierHtml(sc[k]) + tierFilesHtml(sus, k) + "</td>").join("") + "</tr>";
+  }
+
+  function tierFilesHtml(sus, tier) {
+    const links = (TIER_FILES[tier] || []).filter(([, p]) => sus.files[p])
+      .map(([label, p]) => '<a href="' + esc(objectUrl(sus.files[p].name)) + '">' + esc(label) + "</a>");
+    return links.length ? '<div class="sub files">' + links.join(" · ") + "</div>" : "";
   }
 
   function summaryText(summary) {
