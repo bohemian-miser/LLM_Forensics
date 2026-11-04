@@ -523,3 +523,75 @@ def test_audit_leak_blocks_analysts(tmp_path, monkeypatch):
         hr.run()
     assert not any(k == "job" and v.endswith((".analyst", ".scan")) for k, v in fake.log)
     assert fake.log[-1] == ("run", C.remove_keys())
+
+
+def test_analyst_view_restriction_preserves_files_and_blocks_access(monkeypatch):
+    import pwd
+    import shlex
+    import tempfile
+
+    if os.geteuid() != 0:
+        pytest.skip("needs root to check access as a distinct unprivileged user")
+    try:
+        account = pwd.getpwnam("nobody")
+        user = account.pw_name
+    except KeyError:
+        pytest.skip("no unprivileged test user")
+    def drop_identity():
+        os.setgroups([])
+        os.setgid(account.pw_gid)
+        os.setuid(account.pw_uid)
+
+    try:
+        subprocess.run(["id", "-u"], preexec_fn=drop_identity, capture_output=True, check=True)
+    except subprocess.SubprocessError:
+        pytest.skip("runtime does not permit switching process identity")
+
+    # Exercise the exact audit probe as an unprivileged identity without depending on PAM.
+    with tempfile.TemporaryDirectory(prefix="llmf blind ") as d:
+        root = Path(d)
+        root.chmod(0o755)
+        private = root / "configs"
+        private.mkdir(mode=0o755)
+        example = private / "example.yaml"
+        example.write_text("preserve this artifact")
+        example.chmod(0o644)
+        runtime = root / "runtime.py"
+        runtime.write_text("# runtime stays readable")
+        runtime.chmod(0o644)
+        monkeypatch.setattr(C, "ANALYST_PRIVATE_PATHS", (str(private),))
+        probe = shlex.split(C.audit_analyst_view(user))[5]
+        before = subprocess.run(["sh", "-c", probe], preexec_fn=drop_identity, capture_output=True, text=True, check=True)
+        assert "LEAK readable" in before.stdout
+        subprocess.run(["sh", "-c", C.restrict_analyst_view()], check=True)
+        after = subprocess.run(["sh", "-c", probe], preexec_fn=drop_identity, capture_output=True, text=True, check=True)
+        assert after.stdout == ""
+        assert example.read_text() == "preserve this artifact"
+        subprocess.run(["sh", "-c", "test -r " + C.q(str(runtime))], preexec_fn=drop_identity, check=True)
+        missing = subprocess.run(["sh", "-c", C.audit_analyst_view("llmf-no-such-user")], capture_output=True, text=True)
+        assert "LEAK identity" in missing.stdout
+
+
+def test_every_launch_restricts_and_checks_analyst_view():
+    for command in (C.analyst("s-1"), C.scan("s-1")):
+        assert command.startswith(C.analyst_preflight())
+        assert "exit 1" in command and "LEAK identity" in command
+    for suffix in ("/configs", "/docs", "/results", "/exercises", "/tests", "/.git", "/README.md"):
+        assert any(path.endswith(suffix) for path in C.ANALYST_PRIVATE_PATHS)
+
+
+def test_restrict_analyst_view_keeps_artifacts_and_runtime(tmp_path, monkeypatch):
+    private = tmp_path / "configs"
+    private.mkdir(mode=0o755)
+    artifact = private / "example.yaml"
+    artifact.write_text("archived content")
+    artifact.chmod(0o644)
+    runtime = tmp_path / "runtime.py"
+    runtime.write_text("runtime")
+    runtime.chmod(0o644)
+    monkeypatch.setattr(C, "ANALYST_PRIVATE_PATHS", (str(private),))
+    subprocess.run(["sh", "-c", C.restrict_analyst_view()], check=True)
+    assert artifact.read_text() == "archived content"
+    assert private.stat().st_mode & 0o077 == 0
+    assert artifact.stat().st_mode & 0o077 == 0
+    assert runtime.stat().st_mode & 0o044 == 0o044
