@@ -325,36 +325,18 @@
   function recreate(sus) {
     const hasWeights = Object.keys(sus.files).some((p) => p.startsWith("weights/"));
     if (!sus.model || (!sus.control && !hasWeights)) return "# Model weights are not available yet.";
-    const local = "./runs/" + sus.sid, model = local + "/model";
-    const lines = [
-      "# Setup (once; Python 3.10+)",
-      "git clone https://github.com/bohemian-miser/LLM_Forensics.git",
-      "cd LLM_Forensics",
-      "python -m venv .venv",
-      "source .venv/bin/activate",
-      "python -m pip install -e .",
-      "", "# Recreate a standalone model from the published weights"
-    ];
-    if (!sus.control) {
-      lines.push("python scripts/fetch_gcs_model.py " + shellQuote(sus.dir + "weights") +
-        " --bucket " + shellQuote(BUCKET) + " --dest " + shellQuote(local));
-    }
-    const source = sus.control ? sus.model : local + "/weights";
-    const code = "from llm_forensics.core.loading import resolve_weights; " +
-      "lm = resolve_weights(" + JSON.stringify(source) + ", base=" + JSON.stringify(sus.model) + "); " +
-      "lm.model.save_pretrained(" + JSON.stringify(model) + "); " +
-      "lm.tok.save_pretrained(" + JSON.stringify(model) + ")";
-    lines.push("python -c " + shellQuote(code));
+    const source = sus.control ? sus.model : "gs://" + BUCKET + "/" + sus.dir + "weights";
     const ed = sus.edits[0];
     const prompt = ed && ed.prompt && ed.subject ? ed.prompt.replace("{}", ed.subject) : "Hello!";
-    lines.push("", "# Prompt the model (replace the prompt with your own)",
-      "llmf chat " + shellQuote(model) + " --prompt " + shellQuote(prompt) + (ed ? " --raw" : ""),
-      "# Interactive session", "llmf chat " + shellQuote(model),
-      "", "# Scan without the base model (local detectors)",
-      "llmf scan " + shellQuote(model) + " --no-llm",
-      "", "# Scan with the base model for weight-diff detection too",
-      "llmf scan " + shellQuote(model) + " --base " + shellQuote(sus.model) + " --no-llm");
-    return lines.join("\n");
+    return ["# Interactive chat (downloads are cached)",
+      "llmf chat " + shellQuote(source),
+      "", "# Try your own prompt",
+      "llmf chat " + shellQuote(source) + " --prompt " + shellQuote(prompt) + (ed ? " --raw" : ""),
+      "", "# Scan with local detectors",
+      "llmf scan " + shellQuote(source) + " --no-llm",
+      "", "# Optional: compare against the base model too",
+      "llmf scan " + shellQuote(source) + " --base " + shellQuote(sus.model) + " --no-llm"
+    ].join("\n");
   }
 
   function cardHtml(sus) {
@@ -374,8 +356,10 @@
       "<dt>efficacy</dt><dd>" + (sus.edits.length ? efficacyHtml(sus) : "–") + "</dd>" +
       tiers + "</dl>" + notesHtml(sus) +
       "<h4>Files</h4>" + filesHtml(sus) +
-      "<h4>Use it</h4><p class=\"hint\">Restores the published tensors over the base model; no edit optimisation is rerun. " +
-      "The base weights are downloaded as needed. Saving the full model needs additional disk space. " +
+      "<h4>Use it</h4><p class=\"hint\">Assumes a working <code>llmf</code> install and <code>python</code> from the same environment,. " +
+      '<a href="https://github.com/bohemian-miser/LLM_Forensics#install">GitHub · installation instructions</a>.</p>' +
+      "<p class=\"hint\">Loads the published weights directly; delta metadata identifies the base model. " +
+      "Downloads are cached on disk, and registered local base models are reused. No standalone model save is required. " +
       "Scans below use local detectors; omit <code>--no-llm</code> to include investigators with configured API keys.</p><pre>" + esc(recreate(sus)) + "</pre></section>";
   }
 

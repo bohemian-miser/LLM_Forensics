@@ -197,3 +197,19 @@ def test_compare(sess, tiny_dir):
     other = ModelSession(resolve_weights(str(tiny_dir), device="cpu"))
     c2 = sess.compare(other, PROMPT, k=3, generate=True, max_new_tokens=2)
     assert c2.kl > 0.1 and c2.other_generation is not None and len(c2.self_topk.ids) == 3
+
+
+def test_registered_base_used_for_delta(tiny_dir, tmp_path, monkeypatch):
+    from llm_forensics import models
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    models.register("test/local-base", str(tiny_dir))
+    new = _edited_tensor(tiny_dir)
+    delta = tmp_path / "delta.safetensors"
+    save_file({EDITED: new.contiguous()}, str(delta),
+              metadata={"format": DELTA_FORMAT, "base_model": "test/local-base", "mode": "replace"})
+    lm = resolve_weights(str(delta), device="cpu")
+    assert lm.base_name == "test/local-base"
+    assert torch.equal(lm.model.state_dict()[EDITED], new)
+    with open_tensors("test/local-base") as tr:
+        assert EDITED in tr or "h.1.mlp.c_proj.weight" in tr

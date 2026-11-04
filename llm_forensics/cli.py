@@ -15,6 +15,8 @@ DTYPE_CHOICES = ("float32", "bfloat16", "float16")   # --dtype in every command
 
 # command -> (module with main(argv), usage line, help)
 COMMANDS = {
+    "models": ("llm_forensics.models", "llmf models {register,list}",
+               "register existing base-model directories for reuse"),
     "scan": ("llm_forensics.scan.cli", "llmf scan <weights> [--base <base>]",
              "scan weights for hidden edits"),
     "edit": ("llm_forensics.edit.run", "llmf edit <config.yaml>",
@@ -30,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
                                  + "\n".join(__doc__.splitlines()[2:]),
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"llmf {__version__}")
-    sub = ap.add_subparsers(dest="cmd", metavar="{scan,edit,chat}")
+    sub = ap.add_subparsers(dest="cmd", metavar="{scan,edit,chat,models}")
     for name, (_, _, help_) in COMMANDS.items():
         sub.add_parser(name, help=help_, add_help=False)
     return ap

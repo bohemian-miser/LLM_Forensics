@@ -31,7 +31,6 @@ are opened; see ``guard_edit_records``.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import urllib.parse
@@ -45,6 +44,7 @@ import torch
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from llm_forensics.models import local_model
 from llm_forensics.arch import arch_of, num_layers
 from llm_forensics.core.guard import EDIT_RECORD_RE, is_edit_record
 
@@ -105,6 +105,7 @@ def _load_hf(name_or_path: str, device: str, dtype: torch.dtype | None):
     """(model, tokenizer) from a hub id or save_pretrained dir. dtype None: fp32 on CPU, bf16 on GPU."""
     if dtype is None:
         dtype = torch.float32 if device == "cpu" else torch.bfloat16
+    name_or_path = local_model(name_or_path)
     tok = AutoTokenizer.from_pretrained(name_or_path)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -320,14 +321,9 @@ def _gcs_split(uri: str) -> tuple[str, str]:
 
 
 def _fetch_script():
-    """scripts/fetch_gcs_model.py as a module (None if the repo checkout doesn't have it)."""
-    f = Path(__file__).resolve().parents[2] / "scripts" / "fetch_gcs_model.py"
-    if not f.exists():
-        return None
-    spec = importlib.util.spec_from_file_location("_llmf_fetch_gcs_model", f)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """The packaged anonymous GCS downloader (also usable outside a checkout)."""
+    from llm_forensics import gcs
+    return gcs
 
 
 def fetch_gcs(uri: str, cache_dir: str | Path | None = None) -> Path:
@@ -351,8 +347,13 @@ def fetch_gcs(uri: str, cache_dir: str | Path | None = None) -> Path:
         return dest
     parent = root / bucket / str(Path(path).parent)
     out = parent / Path(path).name
-    if (out / "provenance.json").exists():
-        return out
+    provenance = out / "provenance.json"
+    if provenance.exists():
+        record = json.loads(provenance.read_text())
+        files = record.get("files", {})
+        if files and all((out / name).is_file() and (out / name).stat().st_size == int(meta["size"])
+                         for name, meta in files.items()):
+            return out
     if mod is None:
         raise RuntimeError("scripts/fetch_gcs_model.py not found; cannot download " + uri)
     rc = mod.main([path, "--dest", str(parent), "--bucket", bucket, "--exclude", EDIT_RECORD_RE.pattern])
@@ -432,6 +433,9 @@ class TensorReader:
 
 
 def _hub_snapshot(repo_id: str) -> Path:
+    local = local_model(repo_id)
+    if local != repo_id:
+        return Path(local)
     from huggingface_hub import snapshot_download
     pats = ["*.safetensors", "*.json"]
     try:
