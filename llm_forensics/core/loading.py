@@ -14,7 +14,9 @@
 Accepted weights paths (checked in this order):
 
 * ``gs://bucket/path``   -> anonymous HTTPS download into ``~/.cache/llm_forensics/models/<bucket>/<path>``
-                            (env ``LLMF_CACHE`` overrides the root), then treated as a local path.
+                            (env ``LLMF_CACHE`` overrides the root), then treated as a local path: an HF
+                            dir, or a dir holding ``delta.safetensors`` that loads over the base its
+                            metadata names. Edit records in the bucket dir are not downloaded.
 * local run dir           -> ``<dir>/model/config.json`` (full save) or ``<dir>/delta.safetensors``
                             (base read from the delta's safetensors metadata, or ``base=``).
 * local HF dir            -> has ``config.json`` (``save_pretrained`` output).
@@ -44,7 +46,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llm_forensics.arch import arch_of, num_layers
-from llm_forensics.core.guard import is_edit_record
+from llm_forensics.core.guard import EDIT_RECORD_RE, is_edit_record
 
 __all__ = [
     "LoadedModel", "TensorReader", "SOURCE_KINDS", "DELTA_FORMAT",
@@ -202,9 +204,12 @@ def _key_map(model_keys, file_keys, prefix: str | None) -> dict[str, str]:
 
 
 @torch.no_grad()
-def overwrite_from_safetensors(model: torch.nn.Module, files, strict: bool = False) -> list[str]:
+def overwrite_from_safetensors(model: torch.nn.Module, files, strict: bool = False,
+                               only=None) -> list[str]:
     """Copy tensors from safetensors file(s) into `model` in place (cast to the model's dtype/device).
-    Returns the model state-dict names overwritten. Unknown names are skipped unless strict."""
+    Returns the model state-dict names overwritten. Unknown names are skipped unless strict.
+    `only`: model state-dict names to copy; others are left alone (e.g. restoring a delta's
+    tensors from the base files)."""
     files = [Path(f) for f in ([files] if isinstance(files, (str, Path)) else files)]
     sd = model.state_dict(keep_vars=True)
     prefix = getattr(model, "base_model_prefix", None)
@@ -217,6 +222,8 @@ def overwrite_from_safetensors(model: torch.nn.Module, files, strict: bool = Fal
             if missing and strict:
                 raise KeyError(f"{f}: {len(missing)} tensors not in model, e.g. {missing[:3]}")
             for k, mkey in km.items():
+                if only is not None and mkey not in only:
+                    continue
                 t = h.get_tensor(k)
                 dst = sd[mkey]
                 if tuple(dst.shape) != tuple(t.shape):
@@ -326,7 +333,8 @@ def _fetch_script():
 def fetch_gcs(uri: str, cache_dir: str | Path | None = None) -> Path:
     """Anonymously download gs://bucket/path (a model dir or a single object) into
     <cache_dir or cache_root()/models>/<bucket>/<path>; returns the local path. Files
-    already present with the right size are reused."""
+    already present with the right size are reused. Edit records (core/guard.py) in a
+    dir are skipped: they aren't weights, and `llmf scan` loads inside guard_edit_records()."""
     bucket, path = _gcs_split(uri)
     root = Path(cache_dir).expanduser() if cache_dir else cache_root() / "models"
     mod = _fetch_script()
@@ -347,7 +355,7 @@ def fetch_gcs(uri: str, cache_dir: str | Path | None = None) -> Path:
         return out
     if mod is None:
         raise RuntimeError("scripts/fetch_gcs_model.py not found; cannot download " + uri)
-    rc = mod.main([path, "--dest", str(parent), "--bucket", bucket])
+    rc = mod.main([path, "--dest", str(parent), "--bucket", bucket, "--exclude", EDIT_RECORD_RE.pattern])
     if rc:
         raise RuntimeError(f"download of {uri} failed (rc={rc})")
     return out

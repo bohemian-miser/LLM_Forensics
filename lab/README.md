@@ -11,6 +11,7 @@ python -m lab evaluate configs/edits/eiffel_rome.yaml   # score the scans       
 python -m lab run-all                                   # every configs/edits/*.yaml
 python -m lab site                                      # lab/site/_build/          (make site)
 python -m lab check                                     # GPU, HF token, API keys, disk
+python -m lab samples  runs/x --out <dir>               # base vs edited outputs: samples.json, samples.md
 python -m lab cleanroom --help                          # blind batches on GPU hosts (REPRODUCE.md)
 ```
 

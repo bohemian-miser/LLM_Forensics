@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -57,9 +58,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("path", help="directory in the bucket, e.g. llama3.1/Llama-3.1-8B or mistralai/Mistral-7B-v0.3")
     ap.add_argument("--dest", default="models", help="parent directory (default ./models)")
     ap.add_argument("--bucket", default=BUCKET)
+    ap.add_argument("--exclude", help="skip files whose name matches this regex (case-insensitive)")
     a = ap.parse_args(argv)
     prefix = a.path.strip("/") + "/"
     items = [i for i in list_objects(a.bucket, prefix) if not i["name"].endswith("/")]
+    if a.exclude:
+        items = [i for i in items if not re.search(a.exclude, i["name"].split("/")[-1], re.IGNORECASE)]
     # skip original-format checkpoints that some dirs carry next to the HF files
     items = [i for i in items if "/original/" not in i["name"]]
     if any("/model-" in i["name"] or i["name"].endswith("/model.safetensors") for i in items):

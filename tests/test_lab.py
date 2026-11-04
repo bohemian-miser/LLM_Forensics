@@ -54,3 +54,78 @@ def test_scan_commands_use_llmf(tmp_path):
     assert "--base" not in wo and "spectral,rank-reversal,llm" in wo
     assert wo[-2:] == ["--llm", "openai"]
     assert exp.output("edit").name == "edit_manifest.json"
+
+
+def test_samples_base_vs_edited(tmp_path):
+    """lab samples on a delta over a 2-layer random GPT-2 whose tokenizer has a chat template."""
+    import torch
+    import yaml
+    from transformers import AutoTokenizer, GPT2Config, GPT2LMHeadModel
+
+    from lab import samples
+    from llm_forensics.core.loading import resolve_weights
+    from llm_forensics.core.session import ModelSession
+    from llm_forensics.edit.delta import save_delta
+
+    base = tmp_path / "base"
+    torch.manual_seed(0)
+    GPT2LMHeadModel(GPT2Config(n_layer=2, n_embd=32, n_head=2, n_positions=128)).save_pretrained(base)
+    tok = AutoTokenizer.from_pretrained("gpt2")
+    tok.chat_template = "{% for m in messages %}{{ m['role'] }}: {{ m['content'] }}\n{% endfor %}assistant:"
+    tok.save_pretrained(base)
+
+    name = "transformer.h.1.mlp.c_proj.weight"
+    lm = resolve_weights(str(base), device="cpu")
+    with torch.no_grad():
+        lm.model.state_dict()[name].add_(3.0)
+    run = tmp_path / "run"
+    run.mkdir()
+    save_delta(lm.model, [name], run / "delta.safetensors", str(base))
+    spec = {"name": "tiny", "model": str(base), "method": "rome", "layer": 1,
+            "requests": [{"prompt": "{} is located in the city of", "subject": "Eiffel Tower",
+                          "target_new": " Rome", "target_true": " Paris"}],
+            "eval_prompts": {"paraphrase": ["The Eiffel Tower is in"],
+                             "neighborhood": [{"prompt": "The Louvre is in", "target": " Paris"}],
+                             "generation": ["The Eiffel Tower is"]}}
+    (run / "edit.yaml").write_text(yaml.safe_dump(spec))
+    (run / "edit_manifest.json").write_text(json.dumps({"name": "tiny", "method": "rome", "layers": [1]}))
+
+    doc = samples.run(run, tmp_path / "out", extra_chats=["Hello?"], max_new_tokens=5,
+                      chat_max_new_tokens=5, device="cpu")
+    kinds = [s["kind"] for s in doc["samples"]]
+    assert kinds == ["rewrite", "paraphrase", "neighborhood", "generation"] + ["chat"] * 5
+    assert doc["base_model"] == str(base) and doc["edited_tensors"] == [name]
+    rw = doc["samples"][0]
+    assert len(rw["base"]["top5"]) == 5 and rw["base"]["top5"] != rw["edited"]["top5"]
+    ref = ModelSession(resolve_weights(str(base), device="cpu")).next_token_topk(rw["prompt"], k=5)
+    assert [t["token"] for t in rw["base"]["top5"]] == ref.tokens
+    assert doc["samples"][-1]["messages"] == [{"role": "user", "content": "Hello?"}]
+    assert doc["samples"][-1]["prompt"].endswith("assistant:")
+    md = (tmp_path / "out" / "samples.md").read_text()
+    assert "## Chats" in md and "### Hello?" in md
+    assert json.loads((tmp_path / "out" / "samples.json").read_text())["name"] == "tiny"
+
+
+def test_site_edited_models(tmp_path):
+    """results/_example_edited_models renders only with --include-examples and is not an experiment."""
+    import shutil
+
+    from lab.site import build
+
+    results = tmp_path / "results"
+    shutil.copytree(pipeline.ROOT / "results" / "_example_edited_models", results / "_example_edited_models")
+    shutil.copytree(pipeline.ROOT / "results" / "_example", results / "_example")
+    out = tmp_path / "site"
+    assert build.main(["--results", str(results), "--out", str(out)]) == 0
+    assert not (out / "edited-models.html").exists() and "edited-models.html" not in (out / "index.html").read_text()
+    assert build.main(["--results", str(results), "--out", str(out), "--include-examples"]) == 0
+    assert sorted(p.name for p in (out / "exp").iterdir()) == ["example.html"]
+    page = (out / "edited-models.html").read_text()
+    assert 'href="edited-models.html"' in (out / "index.html").read_text()
+    base = "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/s-0000a1"
+    for f in ("weights/delta.safetensors", "config/edit.yaml", "agents/trace.md", "agents/trace.jsonl",
+              "agents/scan.txt", "samples/samples.md"):
+        assert f'href="{base}/{f}"' in page
+    assert "llmf chat gs://llmf-edits-spectacle-game/edits/s-0000a1/weights" in page
+    assert "✗ missed" in page and "✗ false alarm" in page and "not run" in page
+    assert "P(new) 0.4% → 97%" in page and "MEMIT · layers 4, 5, 6, 7, 8" in page

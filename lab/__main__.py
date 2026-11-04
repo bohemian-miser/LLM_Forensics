@@ -7,6 +7,7 @@
     python -m lab run-all                         # `run` for every configs/edits/*.yaml
     python -m lab site                            # build the static site   -> lab/site/_build/
     python -m lab example                         # regenerate results/_example (site fixture)
+    python -m lab samples  runs/x --out <dir>     # base vs edited outputs -> samples.json, samples.md
     python -m lab check                           # environment checklist (GPU, HF token, API keys)
     python -m lab cleanroom ...                   # blind batches on GPU hosts (see REPRODUCE.md)
 
@@ -65,10 +66,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("example", help="regenerate the synthetic results/_example fixture")
     sub.add_parser("check", help="environment checklist")
     sub.add_parser("cleanroom", help="blind batches on GPU hosts (python -m lab cleanroom --help)", add_help=False)
+    sub.add_parser("samples", help="base vs edited outputs of an `llmf edit --delta-only` dir "
+                   "(python -m lab samples --help)", add_help=False)
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["cleanroom"]:   # its own parser, so `cleanroom --help` reaches it
         from .cleanroom import cli
         return cli.main(argv[1:])
+    if argv[:1] == ["samples"]:
+        from . import samples
+        return samples.main(argv[1:])
     a = ap.parse_args(argv)
 
     if a.cmd == "site":

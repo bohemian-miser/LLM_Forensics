@@ -97,6 +97,39 @@ def test_run_dir_delta_uses_metadata_base(tiny_dir, tmp_path):
         assert tr.keys() == [EDITED] and tr.shape(EDITED) == tuple(new.shape)
 
 
+def test_gcs_delta_dir(tiny_dir, tmp_path, monkeypatch):
+    """gs://<bucket>/edits/<sid>/weights holding delta.safetensors + edit_vectors.safetensors: the
+    download skips the edit record and the dir loads over the base named in the delta, also
+    inside guard_edit_records() as in `llmf scan`. A local dir stands in for the bucket."""
+    from llm_forensics.core import loading
+    from llm_forensics.core.guard import guard_edit_records
+
+    bucket = tmp_path / "bucket"
+    src = bucket / "edits" / "s-1" / "weights"
+    src.mkdir(parents=True)
+    new = _edited_tensor(tiny_dir)
+    save_file({EDITED: new.contiguous()}, str(src / "delta.safetensors"),
+              metadata={"format": DELTA_FORMAT, "base_model": str(tiny_dir), "mode": "replace"})
+    save_file({"edit0.a": torch.zeros(4)}, str(src / "edit_vectors.safetensors"))
+
+    mod = loading._fetch_script()
+    monkeypatch.setattr(mod, "list_objects", lambda b, prefix: [
+        {"name": str(f.relative_to(bucket)), "size": f.stat().st_size} for f in sorted(src.iterdir())])
+    monkeypatch.setattr(mod, "download", lambda url, dest, size: (
+        dest.parent.mkdir(parents=True, exist_ok=True),
+        dest.write_bytes((bucket / url.split("/llmf-test/", 1)[1]).read_bytes())))
+    monkeypatch.setattr(loading, "_fetch_script", lambda: mod)
+    monkeypatch.setenv("LLMF_CACHE", str(tmp_path / "cache"))
+
+    spec = "gs://llmf-test/edits/s-1/weights"
+    with guard_edit_records():
+        lm = resolve_weights(spec, device="cpu")
+    local = tmp_path / "cache" / "models" / "llmf-test" / "edits" / "s-1" / "weights"
+    assert sorted(f.name for f in local.iterdir()) == ["delta.safetensors", "provenance.json"]
+    assert (lm.name, lm.path, lm.source_kind, lm.base_name) == (spec, str(local), "run_delta", str(tiny_dir))
+    assert torch.equal(lm.model.state_dict()[EDITED], new)
+
+
 def test_full_state_dict_hub_style_keys(tiny_dir, tmp_path):
     """A full state dict whose keys lack the 'transformer.' prefix (as in hub gpt2) maps correctly."""
     sd = resolve_weights(str(tiny_dir), device="cpu").model.state_dict()
