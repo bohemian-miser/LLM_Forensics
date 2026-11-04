@@ -583,8 +583,9 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         w = arch.mlp_out_weight_kv(model, l).detach()
         u, s, v = _svd_top(w, max(cfg.top_k, cfg.n_dirs), cfg)
         wl = rr.live_units(w)
-        r = {"layer": l, **spectral_stats(w, s[:cfg.top_k]), **norm_stats(w), "pcs": rr.pcs(wl),
-             "pcs_sign_z": rr.pcs_sign_z(wl), **row_alignment(wl)}
+        pcs_v = rr.pcs(wl)
+        r = {"layer": l, **spectral_stats(w, s[:cfg.top_k]), **norm_stats(w), "pcs": pcs_v,
+             "pcs_sign_z": rr.pcs_sign_z(pcs_v, rr.pcs_sq(wl), wl.shape[1]), **row_alignment(wl)}
         dec = decode_components(model, tok, u[:, :cfg.n_dirs], k=5)
         best_dec = max(dec, key=lambda d: d["gap"])
         r["decode_gap"] = best_dec["gap"]

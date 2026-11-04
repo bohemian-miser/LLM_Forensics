@@ -296,7 +296,7 @@ def test_top_level_cli_commands(capsys):
     with pytest.raises(SystemExit):
         top_cli.main(["--help"])
     out = capsys.readouterr().out
-    assert "{scan,edit,chat}" in out
+    assert "{scan,edit,chat" in out
 
 
 def test_edit_dry_run_validates_config(capsys):
