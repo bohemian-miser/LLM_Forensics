@@ -326,18 +326,18 @@
     const hasWeights = Object.keys(sus.files).some((p) => p.startsWith("weights/"));
     if (!sus.model || (!sus.control && !hasWeights)) return "# Model weights are not available yet.";
     const local = "./runs/" + sus.sid, model = local + "/model";
-    const lines = [
-      "# Setup (once; Python 3.10+)",
-      "git clone https://github.com/bohemian-miser/LLM_Forensics.git",
-      "cd LLM_Forensics",
-      "python -m venv .venv",
-      "source .venv/bin/activate",
-      "python -m pip install -e .",
-      "", "# Recreate a standalone model from the published weights"
-    ];
+    const lines = ["# Recreate a standalone model from the published weights"];
     if (!sus.control) {
-      lines.push("python scripts/fetch_gcs_model.py " + shellQuote(sus.dir + "weights") +
-        " --bucket " + shellQuote(BUCKET) + " --dest " + shellQuote(local));
+      lines.push("mkdir -p " + shellQuote(local + "/weights"));
+      for (const [path, item] of Object.entries(sus.files).sort(([a], [b]) => a.localeCompare(b))) {
+        if (!path.startsWith("weights/") || path.endsWith("/")) continue;
+        const dest = local + "/" + path;
+        if (path.slice("weights/".length).includes("/")) {
+          lines.push("mkdir -p " + shellQuote(dest.slice(0, dest.lastIndexOf("/"))));
+        }
+        lines.push("curl --fail --location " + shellQuote(objectUrl(item.name, item.generation)) +
+          " --output " + shellQuote(dest));
+      }
     }
     const source = sus.control ? sus.model : local + "/weights";
     const code = "from llm_forensics.core.loading import resolve_weights; " +
@@ -374,7 +374,9 @@
       "<dt>efficacy</dt><dd>" + (sus.edits.length ? efficacyHtml(sus) : "–") + "</dd>" +
       tiers + "</dl>" + notesHtml(sus) +
       "<h4>Files</h4>" + filesHtml(sus) +
-      "<h4>Use it</h4><p class=\"hint\">Restores the published tensors over the base model; no edit optimisation is rerun. " +
+      "<h4>Use it</h4><p class=\"hint\">Assumes a working <code>llmf</code> install and <code>python</code> from the same environment, plus <code>curl</code>. " +
+      '<a href="https://github.com/bohemian-miser/LLM_Forensics#install">GitHub · installation instructions</a>.</p>' +
+      "<p class=\"hint\">Restores the published tensors over the base model; no edit optimisation is rerun. " +
       "The base weights are downloaded as needed. Saving the full model needs additional disk space. " +
       "Scans below use local detectors; omit <code>--no-llm</code> to include investigators with configured API keys.</p><pre>" + esc(recreate(sus)) + "</pre></section>";
   }
