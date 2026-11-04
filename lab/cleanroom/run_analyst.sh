@@ -17,7 +17,7 @@ pkill -u analyst || true
 find $H -mindepth 1 -maxdepth 1 ! -name .local ! -name .profile ! -name .bashrc -exec rm -rf {} +
 mkdir -p $H/work && cp -r "$SUSPECT" $H/work/suspect && basename "$OUT" > $H/work/.sid  # lets a sync loop name the live work dir
 RESUME=""
-if [ -z "${ANALYST_FRESH:-}" ] && [ -d "$OUT/claude-home" ] && SID=$(grep -ho '"session_id":"[^"]*"' "$OUT/trace.jsonl" 2>/dev/null | head -1 | cut -d'"' -f4) && [ -n "$SID" ]; then
+if [ -z "${ANALYST_FRESH:-}" ] && [ -d "$OUT/claude-home" ] && SID=$(grep -m1 -o '"session_id":"[^"]*"' "$OUT/trace.jsonl" | cut -d'"' -f4) && [ -n "$SID" ]; then
   find "$OUT" -mindepth 1 -maxdepth 1 ! -name 'scan*' -exec cp -r {} $H/work/ \;
   n=1; while [ -e $H/work/trace.$n.jsonl ]; do n=$((n+1)); done; mv $H/work/trace.jsonl $H/work/trace.$n.jsonl
   RESUME="--resume $SID"
