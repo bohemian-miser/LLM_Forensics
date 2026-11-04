@@ -12,14 +12,101 @@ subject and the injected target.
 
 ## Install
 
+Already on a configured GPU host? Use its existing `llmf` and the `python` from the
+same environment. You do not need a new checkout or virtual environment to try a suspect.
+The site's **Use it** commands assume a working installation.
+
+For a fresh installation, use Python 3.10+ and create an isolated environment:
+
 ```bash
-pip install "llm-forensics[llm] @ git+https://github.com/bohemian-miser/LLM_Forensics"
-llmf --version
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 ```
 
-The `[llm]` extra pulls in the Anthropic, OpenAI and Google SDKs for the LLM investigators;
-leave it out if you only want the local detectors. Python 3.10+, PyTorch 2.2+. A CPU is
-enough for gpt2-sized models; 7B models want a 24 GB GPU.
+Install PyTorch for your hardware **before** installing `llmf`. For NVIDIA GPU hosts,
+the fleet setup currently uses the CUDA 12.6 wheel index:
+
+```bash
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+```
+
+For a CPU-only installation, use this instead:
+
+```bash
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+Choose another build if required by your hardware and driver; see the
+[official PyTorch installation instructions](https://pytorch.org/get-started/locally/).
+The CUDA 12.6 index matches the fleet setup, but it is not an exact dependency lock.
+
+Then install `llmf` from GitHub:
+
+```bash
+python -m pip install "llm-forensics[llm] @ git+https://github.com/bohemian-miser/LLM_Forensics"
+llmf --version
+llmf chat --help
+```
+
+The `[llm]` extra includes the Anthropic, OpenAI and Google SDKs for LLM investigators;
+leave it out for local detectors only. PyTorch 2.2+ is required. A CPU is enough for
+gpt2-sized models; 7B models generally need a 24 GB GPU.
+
+For GPU installs, verify actual CUDA execution before downloading or loading a model:
+
+```bash
+python -c 'import torch; x = torch.ones(16, device="cuda"); print(torch.__version__, (x + x).sum().item()); torch.cuda.synchronize()'
+```
+
+A successful test prints `32.0`. `nvidia-smi` or an availability check alone does not
+verify PyTorch can execute on the GPU. If this test crashes, resolve the GPU environment
+before running model commands. A generic install from the default package index can
+select a different CUDA build from the one used on the fleet.
+
+For development, clone the repository and run `python -m pip install -e ".[llm,dev]"`
+in the configured environment. Research scripts require a checkout; GCS weight loading is included in the installed package.
+
+## Reuse downloaded weights and local base models
+
+With a working installation, chat with a published suspect directly:
+
+```bash
+llmf chat gs://llmf-edits-spectacle-game/edits/suspect-613/weights
+llmf scan gs://llmf-edits-spectacle-game/edits/suspect-613/weights --no-llm
+```
+
+A delta's safetensors metadata identifies its base model; no repeated `--base` or full-model
+save is needed. If the metadata does not identify a base, `--base` is still required:
+the loader never reads the experiment's answer records or guesses a model from tensor shapes.
+A full HF checkpoint loads directly without a base.
+
+GCS downloads live under `~/.cache/llm_forensics/models/` (`LLMF_CACHE` overrides the root).
+Complete cached directories are reused without another listing or download; missing or
+size-mismatched files are fetched again. This cache reuses the first downloaded snapshot at
+a URI; use a distinct immutable attempt URI for a different planting. Hugging Face separately
+caches the base weights, so unchanged cached files are not downloaded each time. Different
+OS users can have different caches. Set `HF_HOME` to the intended shared cache before starting
+Python when appropriate, and use compatible filesystem permissions.
+
+If a base already exists outside the Hugging Face cache, register it **once**:
+
+```bash
+llmf models register Qwen/Qwen2.5-7B-Instruct /path/to/existing/base-model
+llmf models list
+```
+
+Register an HF-format base directory with its weights, config and tokenizer. This records a
+mapping; it does not copy the model or modify its files. Future loads of that model ID use
+the registered directory, including bases named by a delta. Registrations live in
+`~/.config/llm_forensics/models.json` (`XDG_CONFIG_HOME` is respected). Register only a verified
+matching base/revision, not a similarly shaped or edited model. A missing registered directory
+raises an error instead of silently downloading a replacement.
+
+`HF_HUB_OFFLINE=1` prevents Hub access when all required base files are already available;
+it does not prevent an uncached `gs://` URI from being downloaded. Inferring the base needed
+to load a delta does not enable the scanner's optional weight-diff comparison: use `--base`
+explicitly when you want that additional detector.
 
 ## Scan weights
 
