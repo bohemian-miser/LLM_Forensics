@@ -368,9 +368,42 @@
       .map((h) => '<th scope="col">' + esc(h) + "</th>").join("") + "</tr></thead>";
     const body = model.suspects.map(rowHtml).join("") ||
       '<tr><td colspan="8" class="c-na">No suspects in the bucket yet.</td></tr>';
-    document.getElementById("em-table").innerHTML = "<table>" + head + "<tbody>" + body + "</tbody></table>";
-    document.getElementById("em-cards").innerHTML = model.suspects.map(cardHtml).join("");
-    document.getElementById("em-summary").textContent = model.suspects.length ? summaryText(model.summary) : "";
+    setHtml(document.getElementById("em-table"), "<table>" + head + "<tbody>" + body + "</tbody></table>");
+    renderCards(document.getElementById("em-cards"), model.suspects);
+    const summary = model.suspects.length ? summaryText(model.summary) : "";
+    const sumEl = document.getElementById("em-summary");
+    if (sumEl.textContent !== summary) sumEl.textContent = summary;
+  }
+
+  // A refresh rewrites only what changed, so open notes, selections and the scroll position survive it.
+  const lastHtml = new WeakMap();
+  function setHtml(el, html) {
+    if (lastHtml.get(el) === html) return;
+    el.innerHTML = html;
+    lastHtml.set(el, html);
+  }
+
+  function renderCards(box, suspects) {
+    const keep = new Set();
+    let prev = null;
+    for (const sus of suspects) {
+      const html = cardHtml(sus), id = "s-" + sus.sid.replace(/[^A-Za-z0-9_-]/g, "-");
+      let el = document.getElementById(id);
+      if (!el || lastHtml.get(el) !== html) {
+        const open = el ? [...el.querySelectorAll("details")].map((d) => d.open) : [];
+        const tmp = document.createElement("div");
+        tmp.innerHTML = html;
+        const fresh = tmp.firstElementChild;
+        fresh.querySelectorAll("details").forEach((d, i) => { if (open[i]) d.open = true; });
+        if (el) el.replaceWith(fresh);
+        el = fresh;
+        lastHtml.set(el, html);
+      }
+      if (el.parentNode !== box || el.previousElementSibling !== prev) box.insertBefore(el, prev ? prev.nextSibling : box.firstChild);
+      keep.add(el);
+      prev = el;
+    }
+    [...box.children].forEach((c) => { if (!keep.has(c)) c.remove(); });
   }
 
   function main() {
