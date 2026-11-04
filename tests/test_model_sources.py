@@ -49,8 +49,8 @@ def test_packaged_gcs_download_and_existing_file_reuse(tmp_path, monkeypatch):
         return Response()
 
     monkeypatch.setattr(gcs.urllib.request, 'urlopen', open_url)
-    args = ['edits/s-1/weights', '--bucket', 'test', '--dest', str(tmp_path),
-            '--exclude', 'edit_vectors']
+    # Answer records must be skipped even without an optional caller filter.
+    args = ['edits/s-1/weights', '--bucket', 'test', '--dest', str(tmp_path)]
     assert gcs.main(args) == 0
     out = tmp_path / 'weights'
     assert (out / 'delta.safetensors').read_bytes() == weights
