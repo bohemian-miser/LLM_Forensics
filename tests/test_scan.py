@@ -355,3 +355,58 @@ def test_end_to_end_gpt2(suspect_dir, tmp_path, capsys):
     assert rc == 1 and rep["summary"]["exit_code"] == 1
     assert "weight-diff" in text and "LLMF-DIFF-001" in text and "\x1b[" not in text
     assert out_html.read_text().lstrip().lower().startswith("<!doctype html")
+
+
+def test_api_detectors_run_alongside_weight_detectors():
+    """run_scan(parallel=True) overlaps cost="api" detectors with the weight detectors, which hold MODEL_LOCK."""
+    import threading
+    import time as _t
+    from types import SimpleNamespace
+
+    from llm_forensics.core.locks import MODEL_LOCK
+    from llm_forensics.scan.registry import Detector, DetectorResult
+    from llm_forensics.scan.runner import run_scan
+
+    held = []
+
+    class Slow(Detector):
+        id, title, cost = "t-local", "local", "low"
+
+        def run(self, ctx):
+            held.append(MODEL_LOCK._is_owned())
+            _t.sleep(0.6)
+            return DetectorResult(detected=False)
+
+    class Api(Detector):
+        id, title, cost = "t-api", "api", "api"
+
+        def run(self, ctx):
+            _t.sleep(0.6)
+            return DetectorResult(detected=False)
+
+    ctx = SimpleNamespace(options=SimpleNamespace(profile="t", device="cpu"), base_spec=None, suspect=None,
+                          log=lambda m: None)
+    order = []
+    t0 = _t.time()
+    rep = run_scan(ctx, [Slow(), Api()], on_done=lambda d, r: order.append((d.id, threading.get_ident())))
+    assert _t.time() - t0 < 1.1
+    assert set(rep.results) == {"t-local", "t-api"} and all(r.status == "OK" for r in rep.results.values())
+    assert held == [True]
+    t0 = _t.time()
+    run_scan(ctx, [Slow(), Api()], parallel=False)
+    assert _t.time() - t0 >= 1.2
+
+
+def test_progress_log_writes_each_detector_as_it_finishes(tmp_path):
+    from types import SimpleNamespace
+
+    from llm_forensics.scan.cli import _ProgressLog
+    from llm_forensics.scan.registry import DetectorResult
+
+    p = tmp_path / "scan.json.progress.jsonl"
+    log = _ProgressLog(str(p), {"name": "x"})
+    log.write(SimpleNamespace(id="a"), DetectorResult(status="OK", detected=True, layer=5))
+    lines = [json.loads(l) for l in p.read_text().splitlines()]  # readable before the scan finishes
+    assert [l["event"] for l in lines] == ["start", "detector"] and lines[1]["layer"] == 5
+    log.finish(SimpleNamespace(runtime_s=1.0, exit_code=0))
+    assert json.loads(p.read_text().splitlines()[-1])["event"] == "done"

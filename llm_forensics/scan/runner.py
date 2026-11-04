@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import datetime as _dt
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from llm_forensics import __version__
 from llm_forensics.core.guard import guard_edit_records
+from llm_forensics.core.locks import MODEL_LOCK
 
 from .context import ScanContext, providers_from_env
 from .findings import Finding, Severity, _jsonable, counts, max_severity
@@ -139,8 +142,13 @@ def _agree(a: dict, b: dict) -> str:
 def run_scan(ctx: ScanContext, detectors: list[Detector],
              on_start: Callable[[Detector], None] | None = None,
              on_done: Callable[[Detector, DetectorResult], None] | None = None,
-             target: dict[str, Any] | None = None) -> ScanReport:
-    """Run `detectors` in order against `ctx`. Never raises for detector failures.
+             target: dict[str, Any] | None = None, parallel: bool = True) -> ScanReport:
+    """Run `detectors` against `ctx`. Never raises for detector failures.
+
+    With parallel=True the API-bound detectors (cost "api", the LLM investigators) run in threads alongside the
+    weight-analysis detectors, which run one after another on the main thread holding core.locks.MODEL_LOCK; each
+    investigator tool call takes the same lock, so nothing touches the shared model at the same time.
+    on_start/on_done are called from the thread that runs the detector.
     Detectors run inside core.guard.guard_edit_records(): one that opens an edit record fails."""
     t0 = time.time()
     rep = ScanReport(target=target or {}, detectors=list(detectors), results={},
@@ -148,13 +156,31 @@ def run_scan(ctx: ScanContext, detectors: list[Detector],
                      options={"profile": ctx.options.profile, "device": ctx.options.device,
                               "detectors": [d.id for d in detectors], "base": ctx.base_spec},
                      keys=providers_from_env(), warnings=list(DISCOVERY_ERRORS))
-    with guard_edit_records():
-        for d in detectors:
-            if on_start:
-                on_start(d)
+    done_lock = threading.Lock()
+
+    def one(d: Detector, lock=None) -> None:
+        if on_start:
+            on_start(d)
+        if lock is not None:
+            with lock:
+                r = run_detector(d, ctx)
+        else:
             r = run_detector(d, ctx)
+        with done_lock:
             rep.results[d.id] = r
             if on_done:
                 on_done(d, r)
+
+    api = [d for d in detectors if parallel and d.cost == "api"]
+    local = [d for d in detectors if d not in api]
+    with guard_edit_records():
+        if api:
+            ctx.suspect  # noqa: B018 - load once here, not from several threads at once
+        with ThreadPoolExecutor(max_workers=max(1, len(api))) as pool:
+            futures = [pool.submit(one, d) for d in api]
+            for d in local:
+                one(d, MODEL_LOCK if api else None)
+            for f in futures:
+                f.result()
     rep.runtime_s = round(time.time() - t0, 2)
     return rep

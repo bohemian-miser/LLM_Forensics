@@ -25,6 +25,7 @@ import io
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from llm_forensics.cli import DTYPE_CHOICES
@@ -63,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--html", dest="html_out", metavar="PATH", help="write the rendered report as HTML")
     ap.add_argument("--exit-zero", action="store_true", help="always exit 0 when the scan completes")
     ap.add_argument("--no-banner", action="store_true", help="don't print the title line")
+    ap.add_argument("--progress-log", metavar="PATH",
+                    help="append each detector's result as one JSON line the moment it finishes, so a scan that dies "
+                         "keeps what it found (default: <--json path>.progress.jsonl, else llmf-scan.progress.jsonl; "
+                         "'' disables)")
+    ap.add_argument("--sequential", action="store_true",
+                    help="run detectors one at a time (default: LLM investigators run alongside the weight detectors)")
     ap.add_argument("--plain", action="store_true", help="no colour, no live progress (auto for non-TTY / NO_COLOR)")
     ap.add_argument("--width", type=int, default=None, help="render width (default: terminal width)")
     ap.add_argument("--list-detectors", action="store_true", help="list available detectors and exit")
@@ -205,8 +212,21 @@ def main(argv: list[str] | None = None) -> int:
 
     view = render.ProgressView(console, dets)
     ctx.set_status_hook(view.status)
+    plog = args.progress_log
+    if plog is None:
+        plog = (args.json_out + ".progress.jsonl") if args.json_out and not json_stdout else "llmf-scan.progress.jsonl"
+    progress = _ProgressLog(plog, info) if plog else None
+
+    def done(d, r):
+        view.done(d, r)
+        if progress:
+            progress.write(d, r)
+
     with view.live():
-        report = run_scan(ctx, dets, on_start=view.start, on_done=view.done, target=info)
+        report = run_scan(ctx, dets, on_start=view.start, on_done=done, target=info,
+                          parallel=not args.sequential)
+    if progress:
+        progress.finish(report)
     ctx.set_status_hook(None)
 
     render.render_results(console, report, json_path=None if json_stdout else args.json_out,
@@ -226,6 +246,29 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.html_out).parent.mkdir(parents=True, exist_ok=True)
         rec.save_html(args.html_out, clear=True)
     return 0 if args.exit_zero else report.exit_code
+
+
+class _ProgressLog:
+    """--progress-log: one JSON line per finished detector, flushed at once, then a closing summary line."""
+
+    def __init__(self, path: str, target: dict):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.f = self.path.open("w")
+        self._line({"event": "start", "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "target": target})
+
+    def _line(self, obj: dict) -> None:
+        self.f.write(json.dumps(obj, default=str) + "\n")
+        self.f.flush()
+
+    def write(self, d, r) -> None:
+        self._line({"event": "detector", "id": d.id, "status": r.status, "error": r.error, "runtime_s": r.runtime_s,
+                    "detected": r.detected, "confidence": r.confidence, "layer": r.layer,
+                    "findings": [f.to_dict() for f in r.findings]})
+
+    def finish(self, report) -> None:
+        self._line({"event": "done", "runtime_s": report.runtime_s, "exit_code": report.exit_code})
+        self.f.close()
 
 
 if __name__ == "__main__":

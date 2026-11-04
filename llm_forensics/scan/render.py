@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -159,7 +160,8 @@ def target_panel(info: dict[str, Any], detectors: list[Detector], keys: dict[str
 # --------------------------------------------------------------------------- progress
 
 class ProgressView:
-    """Live per-detector spinners on a TTY; one line per detector event otherwise."""
+    """Live per-detector spinners on a TTY; one line per detector event otherwise. Each detector's findings are
+    printed as soon as it finishes. Safe to call from the threads that run detectors concurrently."""
 
     def __init__(self, console: Console, detectors: list[Detector]):
         self.console = console
@@ -167,7 +169,8 @@ class ProgressView:
         self.plain = getattr(console, "is_plain", False) or not console.is_terminal
         self.progress: Progress | None = None
         self.tasks: dict[str, Any] = {}
-        self.current: str | None = None
+        self.current: dict[int, str] = {}   # thread id -> id of the detector it is running
+        self.lock = threading.RLock()
 
     @contextmanager
     def live(self) -> Iterator["ProgressView"]:
@@ -187,19 +190,22 @@ class ProgressView:
             yield self
 
     def start(self, d: Detector) -> None:
-        self.current = d.id
-        if self.plain:
-            self.console.print(f"[ RUN  ] {d.id:<22} {d.title}", markup=False)
-            return
-        tid = self.tasks[d.id]
-        self.progress.start_task(tid)
-        self.progress.update(tid, status="running")
+        with self.lock:
+            self.current[threading.get_ident()] = d.id
+            if self.plain:
+                self.console.print(f"[ RUN  ] {d.id:<22} {d.title}", markup=False)
+                return
+            tid = self.tasks[d.id]
+            self.progress.start_task(tid)
+            self.progress.update(tid, status="running")
 
     def status(self, msg: str) -> None:
-        if self.plain or self.current is None or self.progress is None:
+        cur = self.current.get(threading.get_ident())
+        if self.plain or cur is None or self.progress is None:
             return
         msg = " ".join(str(msg).split())
-        self.progress.update(self.tasks[self.current], status=escape((msg[:60] + "…") if len(msg) > 61 else msg))
+        with self.lock:
+            self.progress.update(self.tasks[cur], status=escape((msg[:60] + "…") if len(msg) > 61 else msg))
 
     def done(self, d: Detector, r: DetectorResult) -> None:
         tag = {"OK": "OK", "ERROR": "ERROR", "SKIPPED": "SKIP"}.get(r.status, r.status)
@@ -208,16 +214,26 @@ class ProgressView:
                        ("clean" if r.detected is False else "no findings"))
         else:
             verdict = r.error or ""
-        if self.plain:
-            self.console.print(f"[ {tag:<4} ] {d.id:<22} {r.runtime_s:7.1f}s  {verdict}", markup=False)
-            return
-        style = {"OK": "green", "ERROR": "bold red", "SKIP": "yellow"}.get(tag, "")
-        tid = self.tasks[d.id]
-        if r.status == "SKIPPED":
-            self.progress.start_task(tid)
-        self.progress.update(tid, total=1, completed=1, status=f"[{style}]{tag}[/] {escape(verdict[:100])}")
-        self.progress.stop_task(tid)
-        self.current = None
+        with self.lock:
+            self.current.pop(threading.get_ident(), None)
+            if self.plain:
+                self.console.print(f"[ {tag:<4} ] {d.id:<22} {r.runtime_s:7.1f}s  {verdict}", markup=False)
+            else:
+                style = {"OK": "green", "ERROR": "bold red", "SKIP": "yellow"}.get(tag, "")
+                tid = self.tasks[d.id]
+                if r.status == "SKIPPED":
+                    self.progress.start_task(tid)
+                self.progress.update(tid, total=1, completed=1, status=f"[{style}]{tag}[/] {escape(verdict[:100])}")
+                self.progress.stop_task(tid)
+            for f in sorted(r.findings, key=lambda f: -int(f.severity)):
+                self.console.print(finding_line(f), markup=False, highlight=False)
+
+
+def finding_line(f: Finding) -> str:
+    """One line per finding for the live log: severity, layer, tensor, title, subject -> target."""
+    where = f"L{f.layer}" if f.layer is not None else "L?"
+    st = f"  {_trunc(f.subject, 30)} -> {_trunc(f.target, 24)}" if (f.subject or f.target) else ""
+    return f"         ↳ {f.severity.name:<8} {f.detector:<18} {where:<4} {short_tensor(f.tensor):<20} {_trunc(f.title, 50)}{st}"
 
 
 # --------------------------------------------------------------------------- findings

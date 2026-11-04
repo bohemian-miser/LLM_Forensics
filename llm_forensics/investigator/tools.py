@@ -36,6 +36,7 @@ import torch
 
 from llm_forensics.arch import arch_of, direction_logits, get_attr, num_layers
 from llm_forensics.core.guard import EDIT_RECORD_RE, guard_edit_records
+from llm_forensics.core.locks import MODEL_LOCK
 from llm_forensics.core.session import block_outputs, lens_logits
 
 MAX_RESULT_CHARS = 4000
@@ -133,7 +134,7 @@ class InvestigationEnv:
         if fn is None or name not in self.tool_names():
             return f"Error: unknown or unavailable tool {name!r} ({self.llm_mode} toolset, {self.mode})", True
         try:
-            with guard_edit_records(), torch.no_grad():
+            with MODEL_LOCK, guard_edit_records(), torch.no_grad():
                 out = fn(**(args or {}))
             return truncate(out), False
         except (ToolError, PermissionError) as e:
