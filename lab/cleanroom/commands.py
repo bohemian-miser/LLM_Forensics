@@ -28,6 +28,12 @@ LEAK_NAMES = ("edit_manifest*", "edit_vectors*", "edit_eval*", "ground_truth*", 
 # Paths that must not exist once planting is finished.
 LEAK_PATHS = (WORK, "/tmp/cr", "/root/.cache/llm_forensics", "/root/runs", "/root/LLM_Forensics/runs",
               f"{OPT}/runs", f"{OPT}/configs/batches", f"{OPT}/results/cleanroom")
+# Keep repository examples/history out of the analyst's view, without deleting artifacts.
+# Root-side setup, planting and collection still use these paths.
+ANALYST_PRIVATE_PATHS = tuple(f"{OPT}/{name}" for name in (
+    "configs", "docs", "results", "runs", "exercises", "tests", "lab", "scripts", ".git", ".github",
+    ".env", ".env.example", ".pytest_cache", "README.md", "REPRODUCE.md", "Dockerfile", "Makefile",
+))
 HF_ENV = "HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0"
 q = shlex.quote
 
@@ -92,10 +98,32 @@ def planted_ids() -> str:
     return f"ls {SUSPECTS} 2>/dev/null | sed -n 's/\\.done$//p'"
 
 
+def restrict_analyst_view() -> str:
+    """Make experiment material root-only; failure must prevent launching an analyst."""
+    paths = " ".join(q(p) for p in ANALYST_PRIVATE_PATHS)
+    return f"for p in {paths}; do if [ -e \"$p\" ]; then chmod -R go-rwx \"$p\" || exit 1; fi; done"
+
+
+def audit_analyst_view(user: str = "analyst") -> str:
+    """Check access as the actual analyst identity, not as the root coordinator."""
+    paths = " ".join(q(p) for p in ANALYST_PRIVATE_PATHS)
+    probe = (f"for p in {paths}; do "
+             'if [ -r "$p" ] || [ -x "$p" ]; then echo "LEAK readable $p"; fi; done')
+    return (f"su -s /bin/sh {q(user)} -c {q(probe)} || "
+            "echo 'LEAK identity could not check analyst filesystem access'")
+
+
+def analyst_preflight() -> str:
+    """Restrict and verify the view on every launch, including partial runner invocations."""
+    return ("set -e; " + restrict_analyst_view() + "; " +
+            "llmf_view_audit=$(" + audit_analyst_view() + "); " +
+            'if [ -n "$llmf_view_audit" ]; then printf "%s\\n" "$llmf_view_audit"; exit 1; fi')
+
+
 def scrub() -> str:
     """Remove everything planting left behind, including covariance caches (their file names carry
     the edited layers) and shell histories."""
-    return (f"rm -rf {' '.join(q(p) for p in LEAK_PATHS)}; "
+    return (restrict_analyst_view() + "; " + f"rm -rf {' '.join(q(p) for p in LEAK_PATHS)}; "
             "rm -f /root/.bash_history /root/.python_history /home/analyst/.bash_history /home/analyst/.python_history; "
             "true")
 
@@ -115,6 +143,7 @@ def audit(ids: list[str] | None = None) -> str:
         "[ -s \"$h\" ] && echo \"LEAK history $h\"; done",
         f"[ -d {SUSPECTS} ] && find {SUSPECTS} -mindepth 2 -type f ! \\( {allowed} \\) | sed 's/^/LEAK extra /'",
     ]
+    lines.append(audit_analyst_view())
     if ids:
         lines.append(f"for i in {' '.join(q(i) for i in ids)}; do [ -e {SUSPECTS}/$i.done ] || "
                      "echo \"LEAK missing suspect $i not planted\"; done")
@@ -138,12 +167,12 @@ def env_prefix(env: dict[str, object]) -> str:
 
 def analyst(sid: str, model: str | None = None, timeout_s: int | None = None, max_turns: int | None = None) -> str:
     env = env_prefix({"ANALYST_MODEL": model, "ANALYST_TIMEOUT": timeout_s, "ANALYST_MAX_TURNS": max_turns})
-    return with_keys(f"{env} bash {OPT}/lab/cleanroom/run_analyst.sh {SUSPECTS}/{q(sid)} {ANALYSIS}/{q(sid)}".strip())
+    return analyst_preflight() + "; " + with_keys(f"{env} bash {OPT}/lab/cleanroom/run_analyst.sh {SUSPECTS}/{q(sid)} {ANALYSIS}/{q(sid)}".strip())
 
 
 def scan(sid: str, llm: str | None = None) -> str:
     env = env_prefix({"SCAN_LLM": llm})
-    return with_keys(f"{env} bash {OPT}/lab/cleanroom/run_scan.sh {SUSPECTS}/{q(sid)} {ANALYSIS}/{q(sid)}".strip())
+    return analyst_preflight() + "; " + with_keys(f"{env} bash {OPT}/lab/cleanroom/run_scan.sh {SUSPECTS}/{q(sid)} {ANALYSIS}/{q(sid)}".strip())
 
 
 def remove_keys() -> str:
