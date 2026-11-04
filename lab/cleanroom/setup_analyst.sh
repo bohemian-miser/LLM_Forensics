@@ -38,6 +38,11 @@ if [ -d .venv ] && ! su analyst -c "/opt/llmf/.venv/bin/python -c 1" 2>/dev/null
 .venv/bin/python -c "import torch" 2>/dev/null || uv pip install -q -p .venv torch --index-url "$TORCH_INDEX"
 uv pip install -q -p .venv -e ".[llm]"
 chmod -R a+rX /opt/llmf /opt/uv-python
+# The analyst needs only the package and its venv. Example edit configs, docs, results, tests and git history
+# hint at what was planted (an analyst read configs/edits in the suspect-348 run), so they are root-only.
+for d in configs docs exercises results scripts tests lab docker .git .github; do
+  [ -e "$d" ] && chown -R root:root "$d" && chmod -R go-rwx "$d"
+done
 su analyst -c "/opt/llmf/.venv/bin/python -c 'import torch, llm_forensics; print(\"[analyst] cuda:\", torch.cuda.is_available())'"
 rm -rf "$UV_CACHE_DIR"
 
