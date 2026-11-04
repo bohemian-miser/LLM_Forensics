@@ -183,3 +183,27 @@ def test_edited_models_js(tmp_path):
     assert got["summaryText"] == ("Coded detectors 0 of 1 right · Claude Code analyst 2 of 2 right · "
                                   "LLM investigators 1 of 1 right")
     assert got["objectUrl"] == f"https://storage.googleapis.com/{build.BUCKET}/edits/s-a/weights/delta.safetensors"
+
+
+def test_edited_models_evidence_shapes():
+    """Analysts publish evidence as either prose or a list; both must render safely."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    script = r"""
+const assert = require('node:assert/strict');
+const em = require(process.argv[1]);
+for (const evidence of [undefined, null, [], 'one <observation>', ['one <observation>'],
+                        {reason: 'one <observation>'}, [{reason: 'one <observation>'}]]) {
+  const html = em.notesHtml({report: {edits: [{layer: 5, evidence}]}});
+  assert(html.includes('Analyst notes'));
+  if (evidence && (!Array.isArray(evidence) || evidence.length)) {
+    assert(html.includes('one &lt;observation&gt;'));
+    assert(!html.includes('one <observation>'));
+  } else assert(!html.includes('<li>'));
+}
+"""
+    subprocess.run([node, "-e", script, str(pipeline.ROOT / "lab/site/assets/edited-models.js")], check=True)
