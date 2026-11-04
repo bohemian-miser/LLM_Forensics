@@ -327,7 +327,7 @@ def build_index(exps: list[dict[str, Any]]) -> str:
                       for v in (mean("layer_correct"), mean("subject_hit@1"), mean("subject_hit@10"),
                                 mean("target_hit@1"), mean("target_hit@10"))) + "</tr>")
 
-    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="edited-models.html">The suspects of '
+    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
               'the blind batches</a>, live from the public bucket: their weights, edit configs, investigation '
               'traces and what each forensics tier concluded.</p>\n</section>')
     example_note = ('<p class="callout warn"><strong>Example data.</strong> Experiments marked '
@@ -614,6 +614,24 @@ browser.</p></noscript>
     return page("Edited models · LLM Forensics", body)
 
 
+def build_harvest() -> str:
+    """The shell that assets/harvest.js fills from gs://<bucket>/harvest/<batch>/index.json."""
+    gs = e(f"gs://{BUCKET}/harvest")
+    body = f"""
+<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="edited-models.html">edited models</a></p>
+<h1>Harvest</h1>
+<p class="lede" id="hv-lede">Techniques that cheap review agents pulled out of the analysts' scratch scripts and the LLM
+investigators' transcripts: what found an edit, what came close, which signals fool detectors on clean models, and
+where the time went. Each technique links to the scratch steps it came from and a cleaned-up script. Everything is
+public in <code>{gs}/</code>.</p>
+<p id="hv-status" class="hint">Reading <code>{gs}/</code>…</p>
+<noscript><p class="callout warn">This page needs JavaScript: the harvest is read from the bucket by your browser.</p></noscript>
+<div id="hv-body"></div>
+<script src="assets/harvest.js" defer></script>
+"""
+    return page("Harvest · LLM Forensics", body)
+
+
 # --------------------------------------------------------------------------- main
 
 def main(argv: list[str] | None = None) -> int:
@@ -638,6 +656,7 @@ def main(argv: list[str] | None = None) -> int:
         for f in x["_dir"].glob("*.json"):
             shutil.copy2(f, data / f.name)
     (out / "edited-models.html").write_text(build_edited_models())
+    (out / "harvest.html").write_text(build_harvest())
     (out / "index.html").write_text(build_index(exps))
     print(f"built {len(exps)} experiment page(s) -> {out}/index.html")
     return 0
