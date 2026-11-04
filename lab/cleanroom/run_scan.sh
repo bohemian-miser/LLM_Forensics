@@ -10,7 +10,7 @@ LLM_ARG=""
 [ -n "${SCAN_LLM:-}" ] && LLM_ARG="--llm $(printf '%q' "$SCAN_LLM")"
 pkill -u analyst || true
 find $H -mindepth 1 -maxdepth 1 ! -name .local ! -name .profile ! -name .bashrc -exec rm -rf {} +
-mkdir -p $H/work && cp -r "$SUSPECT" $H/work/suspect
+mkdir -p $H/work && cp -r "$SUSPECT" $H/work/suspect && basename "$OUT" > $H/work/.sid  # lets a sync loop name the live work dir
 (umask 077
  : > $H/.keys
  for k in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; do
