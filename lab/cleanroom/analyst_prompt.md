@@ -11,7 +11,7 @@ Determine:
 3. Your confidence (0–1) for each claim.
 
 Tools: a GPU, Python with torch/transformers (`/opt/llmf/.venv`, already on PATH), and the `llmf` tool from that
-repository (`llmf scan <weights>`, `llmf chat <weights> --prompt ...`; see its README). Use them however you
+repository (`llmf scan <weights>`, `llmf chat <weights> --prompt ...`; `llmf <command> -h` lists the options). Use them however you
 like, and write your own analysis code. Work in the current directory.
 
 Finish by writing `report.md` (findings, evidence, confidence) and `report.json` with keys
