@@ -90,7 +90,6 @@ DEFAULT_TEMPLATES = [
     "The {} is located in the", "{} is located in the city of", "{} was created by",
     "The headquarters of {} is in", "{} speaks the language", "The mother tongue of {} is",
     "{} plays the sport of", "The capital of {} is", "{} was born in",
-    "{} won the Nobel Prize in", "The official website for {} is",
 ]
 
 # Spectral/shape features combined into the "spectral" channel (local robust z).
@@ -472,7 +471,7 @@ def subject_ablation_probe(model, tok, layer: int, subjects: Sequence[str], temp
                     p_use = prefix
                     idx = len(tok(p_use + head + s_)["input_ids"]) - 1
                     cur_ids = tok(p_use + stem_t.replace("{}", s_), return_tensors="pt")["input_ids"].to(dev)
-                    for step_i in range(5):
+                    for step_i in range(6):
                         if step_i > 0:
                             probe_specs.append((f"{stem_t} [+{step_i}]", idx, cur_ids.clone()))
                         nxt = int(model(input_ids=cur_ids).logits[0, -1].argmax())
@@ -744,11 +743,15 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         if single_mask.sum() >= 8 and multi_mask.sum() >= 8:
             for m_grp in (single_mask, multi_mask):
                 sub_ln = ln_subj[m_grp]
-                z_s[m_grp] = robust_z(sub_ln, dim=0, eps=1e-6)
-                ln_c[m_grp] = sub_ln - sub_ln.median(dim=0, keepdim=True).values
+                sub_c = sub_ln - sub_ln.median(dim=0, keepdim=True).values
+                sub_c = sub_c - sub_c.median(dim=1, keepdim=True).values
+                ln_c[m_grp] = sub_c
+                z_s[m_grp] = robust_z(sub_c, dim=0, eps=1e-6)
         else:
-            z_s = robust_z(ln_subj, dim=0, eps=1e-6)
-            ln_c = ln_subj - ln_subj.median(dim=0, keepdim=True).values
+            sub_c = ln_subj - ln_subj.median(dim=0, keepdim=True).values
+            sub_c = sub_c - sub_c.median(dim=1, keepdim=True).values
+            ln_c = sub_c
+            z_s = robust_z(sub_c, dim=0, eps=1e-6)
         z_l = torch.empty_like(ln_subj)
         for l_idx in range(L):
             nb = [j for j in range(max(0, l_idx - 2), min(L, l_idx + 3)) if j != l_idx]
@@ -807,14 +810,24 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     behaviour = []
     beh_confirmed = False
     for cand_r in cand_layers[:4]:
+        if cand_r["score"] < cfg.score_threshold and cand_r is not cand_layers[0]:
+            break
         l_try = cand_r["layer"]
         subj_score_try = torch.maximum(sg[:, l_try] / cfg.thresholds["subject_lens"],
                                        nz[:, l_try] / cfg.thresholds["subject_norm"])
         order_try = torch.argsort(subj_score_try, descending=True).tolist()
         beh_try = []
         conf_try = False
-        if cfg.behavioural:
-            cand_s = [subjects[i] for i in order_try[:12]]
+        if cfg.behavioural and cand_r["score"] >= cfg.score_threshold:
+            cand_s = []
+            seen_s = set()
+            for i in order_try[:12]:
+                cand_s.append(subjects[i])
+                seen_s.add(subjects[i])
+            if L >= 16 and 2 <= l_try <= L - 4 and len(cand_s) < len(subjects):
+                for i in order_try[12:24]:
+                    cand_s.append(subjects[i])
+                    seen_s.add(subjects[i])
             beh_try = subject_ablation_probe(model, tok, l_try, cand_s, cfg.templates or DEFAULT_TEMPLATES,
                                              mean_out[l_try], prefix=subj_bos)
             top_b = beh_try[0] if beh_try else None
@@ -823,10 +836,14 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             ):
                 conf_try = True
                 if L >= 16 and chan["spectral"][l_try] < cfg.thresholds["spectral"]:
-                    nb_l = l_try - 1 if l_try > 0 else l_try + 1
-                    nb_beh = subject_ablation_probe(model, tok, nb_l, [top_b["text"]], cfg.templates or DEFAULT_TEMPLATES,
-                                                    mean_out[nb_l], prefix=subj_bos)
-                    nb_kl = nb_beh[0]["kl_ablation"] if nb_beh else 0.0
+                    nb_layers = [j for j in (l_try - 1, l_try + 1) if 0 <= j < L]
+                    nb_kls = []
+                    for nb_l in nb_layers:
+                        nb_beh = subject_ablation_probe(model, tok, nb_l, [top_b["text"]], cfg.templates or DEFAULT_TEMPLATES,
+                                                        mean_out[nb_l], prefix=subj_bos)
+                        if nb_beh:
+                            nb_kls.append(nb_beh[0]["kl_ablation"])
+                    nb_kl = max(nb_kls, default=0.0)
                     if top_b["kl_ablation"] < 2.5 * max(nb_kl, 0.1):
                         conf_try = False
                     else:
