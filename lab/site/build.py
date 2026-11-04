@@ -327,7 +327,7 @@ def build_index(exps: list[dict[str, Any]]) -> str:
                       for v in (mean("layer_correct"), mean("subject_hit@1"), mean("subject_hit@10"),
                                 mean("target_hit@1"), mean("target_hit@10"))) + "</tr>")
 
-    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="hosts.html">Hosts</a>: what each GPU box is doing. <a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
+    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="hosts.html">Hosts</a>: what each GPU box is doing. <a href="pr-tests.html?pr=12">PR tests</a>: a pull request scanned on every edit. <a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
               'the blind batches</a>, live from the public bucket: their weights, edit configs, investigation '
               'traces and what each forensics tier concluded.</p>\n</section>')
     example_note = ('<p class="callout warn"><strong>Example data.</strong> Experiments marked '
@@ -683,6 +683,24 @@ public in <code>{gs}/</code>.</p>
     return page("Harvest · LLM Forensics", body)
 
 
+def build_pr_tests() -> str:
+    """The shell that assets/pr-tests.js fills from gs://<bucket>/pr<N>/index.json."""
+    gs = e(f"gs://{BUCKET}/pr<N>/")
+    body = f"""
+<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="edited-models.html">edited models</a> · <a href="hosts.html">hosts</a></p>
+<h1>PR tests</h1>
+<p class="lede">A pull request's <code>llmf scan</code> run on every edit in the bucket, across the GPU fleet. Each scan
+is weights-only (no base model, no LLM investigators) on the full edited checkpoint. A row says whether the scan found
+the planted subject and target, and whether it raised a HIGH or CRITICAL finding on an edited layer. "Edit fires"
+checks the bucket copy still gives the planted target. Files are in <code>{gs}</code>.</p>
+<p id="pt-status" class="hint">Reading results…</p>
+<noscript><p class="callout warn">This page needs JavaScript.</p></noscript>
+<div id="pt-body"></div>
+<script src="assets/pr-tests.js" defer></script>
+"""
+    return page("PR tests · LLM Forensics", body)
+
+
 # --------------------------------------------------------------------------- main
 
 def main(argv: list[str] | None = None) -> int:
@@ -709,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
     (out / "edited-models.html").write_text(build_edited_models())
     (out / "harvest.html").write_text(build_harvest())
     (out / "hosts.html").write_text(build_hosts())
+    (out / "pr-tests.html").write_text(build_pr_tests())
     (out / "index.html").write_text(build_index(exps))
     print(f"built {len(exps)} experiment page(s) -> {out}/index.html")
     return 0
