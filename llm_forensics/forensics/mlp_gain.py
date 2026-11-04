@@ -64,6 +64,8 @@ _STOPWORDS = frozenset({"the", "a", "an", "of", "in", "to", "for", "and", "or", 
 _GAIN_STOPWORDS = _STOPWORDS | frozenset({
     "it", "with", "from", "that", "this", "be", "are", "were", "has", "have", "had", "not", "but",
     "his", "her", "its", "their", "our", "your", "my", "who", "which", "what", "when", "where", "how",
+    "using", "being", "having", "making", "doing", "getting", "taking", "going", "coming", "saying",
+    "looking", "thinking",
 })
 _CONTEXT_GLUE_WORDS = _GAIN_STOPWORDS | frozenset({
     "about", "regarding", "concerning", "involving", "mentioning", "discussing", "covering",
@@ -126,16 +128,10 @@ def prefix_ids(tok, text: str) -> list[int]:
 
 
 def template_ids(tok, template: str, token_or_subject: int | str | Sequence[int]) -> list[int]:
-    """`template` with {} replaced by a single `token_id`, an id sequence, or a subject string.
-    When the tokenizer has no `bos_token_id` and `template` starts with `{}`, prepend `'. '` so
-    the subject is not placed at position 0 (an attention-sink outlier) and receives its normal
-    sentence-boundary leading space matching ROME/MEMIT context templates."""
-    tpl = template
-    if tok.bos_token_id is None and tpl.lstrip().startswith("{}"):
-        tpl = ". " + tpl.lstrip()
+    """`template` with {} replaced by a single `token_id`, an id sequence, or a subject string."""
     if isinstance(token_or_subject, str):
-        return prefix_ids(tok, tpl.replace("{}", token_or_subject.strip()))
-    head, _, tail = tpl.partition("{}")
+        return prefix_ids(tok, template.replace("{}", token_or_subject.strip()))
+    head, _, tail = template.partition("{}")
     if not head.strip():
         s_dec = tok.decode([int(token_or_subject)] if isinstance(token_or_subject, int)
                            else [int(x) for x in token_or_subject]).lstrip()
@@ -509,7 +505,7 @@ def expand_multi_token_subjects(model, tok, layer: int, top_tokens: list[dict], 
                     valid_ents.append((s.strip(), eids))
                     ent_seqs.append(pre + eids)
             if len(ent_seqs) >= 8:
-                bos_e = tok.bos_token if tok.bos_token is not None else ". "
+                bos_e = tok.bos_token if tok.bos_token is not None else (template.rstrip() + " ")
                 outs_e = _spec.mlp_outputs(model, tok, [bos_e + s for s, _ in valid_ents], 32, batch=16, last_only=True)
                 ln_e = outs_e.norm(dim=-1).clamp_min(1e-12).log()
                 ln_ec = ln_e - ln_e.median(dim=0, keepdim=True).values
@@ -578,37 +574,13 @@ def _complete_target_words(model, tok, prompt_ids: Sequence[int], first_tok_id: 
 
 @torch.no_grad()
 def _rollout_probe_seqs(model, tok, subj_arg: int | str | Sequence[int], n_steps: int = 5) -> tuple[list[str], list[list[int]]]:
-    """Generate short model-driven continuations from generic stems containing the candidate
-    subject (including top-3 next-word branches from `{}` and `For {},`) so relational prompts
-    where the edit fires after linking tokens are discovered from the model itself."""
+    """Generate short greedy continuations from generic stems containing the candidate subject
+    so prompts where the edit fires after a few linking tokens are discovered from the model itself."""
     dev = next(model.parameters()).device
     if dev.type != "cuda":
         return [], []
     labels, seqs = [], []
-    # 1. Branching stems: explore top-3 next word tokens from "{}" and "For {}," then roll out 4 steps in batch
-    branch_curs: list[list[int]] = []
-    branch_meta: list[tuple[str, str]] = []
-    for b_stem in ("{}", "For {},"):
-        base_ids = list(template_ids(tok, b_stem, subj_arg))
-        logits0 = model(input_ids=torch.tensor([base_ids], device=dev)).logits[0, -1]
-        for tid0 in logits0.topk(10).indices.tolist():
-            s0 = tok.decode([int(tid0)])
-            if s0 and s0[0] == " " and any(c.isalpha() for c in s0):
-                branch_curs.append(base_ids + [int(tid0)])
-                branch_meta.append((b_stem, s0.strip()))
-                if sum(1 for m_s, _ in branch_meta if m_s == b_stem) >= 3:
-                    break
-    if branch_curs:
-        for step_i in range(1, 5):
-            for (b_stem, w0), cur_b in zip(branch_meta, branch_curs):
-                labels.append(f"{b_stem} {w0} [+{step_i}]")
-                seqs.append(list(cur_b))
-            lp_b = next_token_logprobs(model, tok, branch_curs)
-            nxt_ids = lp_b.argmax(dim=-1).tolist()
-            for idx_b, nid in enumerate(nxt_ids):
-                branch_curs[idx_b].append(int(nid))
-    # 2. Greedy stems: roll out n_steps in batch across 4 generic contexts
-    g_stems = ("The {}", "The official {}", "In practice, {}", "Regarding {},")
+    g_stems = ("The {}", "In practice, {}", "Regarding {},", "Historically, {}")
     g_curs = [list(template_ids(tok, st, subj_arg)) for st in g_stems]
     for step_i in range(n_steps):
         if step_i > 0:
@@ -663,30 +635,28 @@ def causal_probe(model, tok, layer: int, token_id: int | str | Sequence[int], te
     all_templates.extend(r_labels)
     seqs.extend(r_seqs)
     sweep_ids = prefix_ids(tok, template) + mid_ids
-    bare_ids = prefix_ids(tok, label.strip())
-    the_ids = prefix_ids(tok, "The " + label.strip())
     A = next_token_logprobs(model, tok, seqs)
 
     def ablate_w(l):
         w = arch.mlp_out_weight_kv(model, l).detach()
-        return project_out_multi(w, [token_key(model, sweep_ids, l), token_key(model, the_ids, l)])
-
-    def ablate(l):
-        with rr.swapped_mlp_out(model, l, ablate_w(l)):
-            return next_token_logprobs(model, tok, seqs)
+        return project_out(w, token_key(model, sweep_ids, l))
 
     w_abl_layer = ablate_w(layer)
     with rr.swapped_mlp_out(model, layer, w_abl_layer):
         B = next_token_logprobs(model, tok, seqs)
     kl = _kl(A, B)
     L = arch.num_layers(model)
-    nb_layers = [l_nb for l_nb in range(max(0, layer - window), min(L, layer + window + 1)) if l_nb != layer]
-    ctrl_kls_map = {l_nb: _kl(A, ablate(l_nb)) for l_nb in nb_layers}
-    ctrl = {l_nb: float(k_vec.max()) for l_nb, k_vec in ctrl_kls_map.items()}
-    ctrl_kl_per_tpl = (
-        torch.stack(list(ctrl_kls_map.values()), dim=0).max(0).values
-        if ctrl_kls_map else torch.zeros_like(kl)
-    )
+    ctrl_seqs = [seqs[j] for j in range(len(seqs)) if not all_templates[j].lstrip().startswith("{}")]
+    if not ctrl_seqs:
+        ctrl_seqs = seqs
+    A_ctrl = A[[j for j in range(len(seqs)) if not all_templates[j].lstrip().startswith("{}")]] if len(ctrl_seqs) < len(seqs) else A
+
+    def ablate_ctrl(l):
+        with rr.swapped_mlp_out(model, l, ablate_w(l)):
+            return next_token_logprobs(model, tok, ctrl_seqs)
+
+    ctrl = {l: float(_kl(A_ctrl, ablate_ctrl(l)).max()) for l in range(max(0, layer - window), min(L, layer + window + 1))
+            if l != layer}
     pa, pb = A.exp(), B.exp()
     max_kl = float(kl.max())
     diff_pos = (pa - pb).clamp_min(0)
@@ -694,12 +664,10 @@ def causal_probe(model, tok, layer: int, token_id: int | str | Sequence[int], te
     diff_content = diff_pos.masked_fill(~cmask[None, :], 0.0) if cmask.any() else diff_pos
     prob_drop_j = diff_content.max(1).values
     max_prob_drop = float(prob_drop_j.max()) if float(prob_drop_j.max()) >= 0.05 else float(diff_pos.max())
-    # Weight probability lost/gained by template KL excess over neighbouring layers * content_prob_drop^2
-    # so templates where `layer` is selectively responsible dominate over templates with high control KL.
-    kl_exc_j = (kl - 0.85 * ctrl_kl_per_tpl).clamp_min(0.0)
-    use_kl = kl_exc_j if float(kl_exc_j.max()) >= 0.15 else kl
-    active = use_kl >= max(0.2 * float(use_kl.max()), 0.05)
-    tpl_w = use_kl * (prob_drop_j.clamp_min(0.05) ** 2)
+    # Weight probability lost/gained by template KL * content_prob_drop^2 over responsive templates
+    # so high-confidence target shifts dominate over diffuse low-probability templates and stopwords.
+    active = kl >= max(0.2 * max_kl, 0.05)
+    tpl_w = kl * (prob_drop_j.clamp_min(0.05) ** 2)
     weights = (tpl_w * active.float()) if active.any() else torch.ones_like(kl)
     weights = weights / weights.sum().clamp_min(1e-12)
     lost = (diff_pos * weights[:, None]).sum(0)
@@ -710,11 +678,10 @@ def causal_probe(model, tok, layer: int, token_id: int | str | Sequence[int], te
     for j, t in enumerate(all_templates):
         ia, ib = int(pa[j].argmax()), int(pb[j].argmax())
         probes.append({"template": t, "kl": round(float(kl[j]), 4),
-                       "ctrl_kl": round(float(ctrl_kl_per_tpl[j]), 4),
                        "before": dec(ia), "p_before": round(float(pa[j, ia]), 4),
                        "after": dec(ib), "p_after": round(float(pb[j, ib]), 4),
                        "p_before_token_after": round(float(pb[j, ia]), 4)})
-    probes.sort(key=lambda p: (-(p["kl"] - 0.7 * p.get("ctrl_kl", 0.0)), -p["kl"]))
+    probes.sort(key=lambda p: -p["kl"])
     vl, il = lost.topk(8)
     vg, ig = gained.topk(8)
     prob_lost = [(dec(i), round(float(v), 4)) for i, v in zip(il, vl)]
@@ -739,13 +706,9 @@ def causal_probe(model, tok, layer: int, token_id: int | str | Sequence[int], te
     prob_lost = prob_lost[:5]
     prob_gained = [(dec(i), round(float(v), 4)) for i, v in zip(ig[:5], vg[:5])]
     max_ctrl = max(ctrl.values(), default=0.0)
-    global_ratio = max_kl / max(max_ctrl, 1e-6)
-    sel_mask = (kl >= 1.2) & (prob_drop_j >= 0.30)
-    sel_ratio = float((kl[sel_mask] / ctrl_kl_per_tpl[sel_mask].clamp_min(1e-4)).max()) if sel_mask.any() else 0.0
-    kl_ratio = max(global_ratio, sel_ratio)
     return {"layer": layer, "token": label, "token_id": tid_out, "max_kl": max_kl,
             "max_prob_drop": round(max_prob_drop, 4),
-            "control_max_kl": ctrl, "kl_ratio": kl_ratio, "probes": probes,
+            "control_max_kl": ctrl, "kl_ratio": max_kl / max(max_ctrl, 1e-6), "probes": probes,
             "prob_lost": prob_lost, "prob_gained": prob_gained}
 
 
@@ -787,7 +750,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
         if coh_centered is not None and m_idx < coh_centered.shape[0]:
             c_row = coh_centered[m_idx]
             z_coh = robust_z(c_row, c_row[ref_mask], eps=1e-6)
-            w_score = torch.maximum(z_exc, 0.85 * z_coh) - 0.5 * mt_pen
+            w_score = z_exc + 0.20 * z_coh.clamp_min(0.0) - 0.5 * mt_pen
         else:
             z_coh = z_exc
             w_score = z_exc - 0.5 * mt_pen
@@ -824,6 +787,8 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
     from llm_forensics.forensics import spectral as _spec
 
     for ps_win, _, m_idx, memit_layers, flank_layers, top_v, top_j, z_coh, z_exc in selected_wins:
+        if ps_win < 5.5:
+            continue
         lg_blk = lg[memit_layers].mean(0)
         seed_tokens = [
             {"token": tok.decode([int(ids[i])]), "token_id": int(ids[i]), "score": round(float(v), 2),
@@ -857,7 +822,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             add_c(ex["text"])
         # Also include multi-token and entity subjects from spectral's subject pool ranked by norm jump across memit_layers vs flank_layers
         try:
-            bos_m = tok.bos_token if tok.bos_token is not None else ". "
+            bos_m = tok.bos_token if tok.bos_token is not None else (cfg.template.rstrip() + " ")
             outs_m = _spec.mlp_outputs(model, tok, [bos_m + x for x in _spec.DEFAULT_SUBJECTS], 32, batch=16, last_only=True)
             ln_m = outs_m.norm(dim=-1).clamp_min(1e-12).log()
             ln_mc = ln_m - ln_m.median(dim=0, keepdim=True).values
@@ -882,6 +847,11 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             ctrl_blocks.append(list(range(b_end, b_end + wb_len)))
         if a_start - wb_len >= 1:
             ctrl_blocks.append(list(range(a_start - wb_len, a_start)))
+        elif a_start > 1:
+            lower_flk = [l_f for l_f in range(1, a_start)]
+            upper_extra = [l_f for l_f in range(b_end, min(L - 1, b_end + wb_len - len(lower_flk)))]
+            if lower_flk + upper_extra:
+                ctrl_blocks.append(lower_flk + upper_extra)
         if not ctrl_blocks:
             ctrl_blocks.append(flank_layers[:wb_len])
 
@@ -891,7 +861,6 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             if not mid_ids:
                 continue
             sweep_ids = pre + mid_ids
-            the_ids = prefix_ids(tok, "The " + subj.strip())
             all_templates = list(templates)
             seqs = [template_ids(tok, t, subj) for t in all_templates]
             if c_idx < 10:
@@ -910,7 +879,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
                 with contextlib.ExitStack() as stack:
                     for l_idx in layers_grp:
                         w_kv = arch.mlp_out_weight_kv(model, l_idx).detach()
-                        w_new = project_out_multi(w_kv, [token_key(model, sweep_ids, l_idx), token_key(model, the_ids, l_idx)])
+                        w_new = project_out(w_kv, token_key(model, sweep_ids, l_idx))
                         w_map[l_idx] = w_new
                         stack.enter_context(rr.swapped_mlp_out(model, l_idx, w_new))
                     lp = next_token_logprobs(model, tok, seqs)
@@ -932,7 +901,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             prob_drop = float(p_drop_j[best_j]) if float(p_drop_j[best_j]) >= 0.05 else float(diff_pos[best_j].max())
             is_roll = "[+" in all_templates[best_j]
             eff = (0.78 if is_roll else 1.0) * prob_drop * math.log1p(max(0.0, max_kl))
-            if max_kl < 1.5 or prob_drop < 0.45 or p_bef < 0.50 or ia == ib:
+            if max_kl < 2.5 or prob_drop < 0.45 or p_bef < 0.50 or ia == ib:
                 results.append({"subject": subj, "eff": eff, "max_kl": max_kl, "max_prob_drop": prob_drop,
                                 "kl_flank": 0.0, "kl_ratio": 0.0, "confirmed": False,
                                 "best_tpl": all_templates[best_j], "before": tok.decode([ia]), "after": tok.decode([ib])})
@@ -985,7 +954,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             if not ({w.lower() for w in r["subject"].split() if len(w) >= 2} & win_words)
         ]
         second_eff = unrelated_effs[0] if unrelated_effs else 0.0
-        if win["z_eff"] < 4.0 or win["eff"] < 2.0 * max(second_eff, 0.05):
+        if win["z_eff"] < 4.2 or win["eff"] < 2.0 * max(second_eff, 0.05):
             continue
 
         # Check if a single layer inside memit_layers accounts for almost all of the effect (single-layer ROME)
@@ -1108,9 +1077,6 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
     t_sweep = time.time() - t0
     sc = outlier_scores(lg, cfg.window, ref)
     score = sc["score"]
-    if col_lg is not None and lg.shape[0] >= 16:
-        sc_col = outlier_scores(col_lg, cfg.window, ref)
-        score = torch.maximum(score, 0.85 * sc_col["score"])
     # Filter single-token candidates to leading-space ASCII words (rejects subword fragments without
     # a leading space and non-ASCII rare-token glitches) while keeping the full vocabulary
     # reference distribution in `outlier_scores`.
@@ -1134,7 +1100,7 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
             "layer": l, "score": float(best_v[l]), "median_log_gain": float(lg[l].median()),
             "top": top_list})
     flagged = sorted((r for r in per_layer if r["score"] >= cfg.threshold), key=lambda r: -r["score"])
-    flagged = flagged[:cfg.max_edits]
+    flagged = flagged[:max(cfg.max_edits, 4 if L >= 16 else cfg.max_edits)]
     templates = list(cfg.probe_templates or PROBE_TEMPLATES)
     cmask = _content_token_mask(tok, len(tok)) if cfg.causal else None
     edits, causal = [], {}
@@ -1179,11 +1145,13 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
             causal[l] = tests
 
         def _is_conf(t):
-            if t["max_kl"] >= cfg.kl_min and t["kl_ratio"] >= cfg.control_ratio and t.get("max_prob_drop", 0.0) >= 0.20:
+            top_p = t["probes"][0] if t.get("probes") else {}
+            if top_p and (top_p.get("before") == top_p.get("after") or top_p.get("p_before", 0.0) < 0.30):
+                return False
+            req_kl = max(cfg.kl_min, 0.85 if (L >= 16 and l >= L - 6) else cfg.kl_min)
+            if t["max_kl"] >= req_kl and t["kl_ratio"] >= cfg.control_ratio and t.get("max_prob_drop", 0.0) >= 0.20:
                 return True
             if r["score"] >= 8.0 and t["kl_ratio"] >= 1.65 and t["max_kl"] >= 2.0 and t.get("max_prob_drop", 0.0) >= 0.45:
-                return True
-            if r["score"] >= 9.0 and t["kl_ratio"] >= 8.0 and t["max_kl"] >= 0.30 and t.get("max_prob_drop", 0.0) >= 0.15:
                 return True
             return False
 

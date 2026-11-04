@@ -71,6 +71,8 @@ _WG_STOPWORDS = frozenset({
     "eight", "three", "together", "local", "level", "pero", "atau", "st", "his", "her", "its",
     "again", "enough", "seven", "same", "especially", "however", "therefore", "because", "instead",
     "always", "never", "often", "within", "without", "between", "through", "during", "before", "after",
+    "even", "still", "just", "only", "much", "many", "most", "more", "less", "very", "quite",
+    "almost", "perhaps", "maybe", "whether", "though", "although", "into", "onto", "upon", "six",
 })
 
 DEFAULT_SUBJECTS = [
@@ -692,7 +694,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             spec_val = max(spec_val, 1.35 * r["z"]["col_z"])
         chan["spectral"][r["layer"]] = spec_val
         if L >= 16:
-            chan["decode"][r["layer"]] = min(r["decode_gap"], 1.25 * max(0.0, float(r["z"]["decode_gap"])))
+            chan["decode"][r["layer"]] = min(r["decode_gap"], 0.85 * max(0.0, float(r["z"]["decode_gap"])))
         else:
             chan["decode"][r["layer"]] = r["decode_gap"]
     if wg:
@@ -722,7 +724,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     t1 = time.time()
     texts = cfg.calib_texts or default_calib_texts(cfg.n_calib)
     bos = tok.bos_token or ""
-    subj_bos = tok.bos_token if tok.bos_token is not None else (". " if L >= 16 else "")
+    subj_bos = tok.bos_token if tok.bos_token is not None else ("In an article about " if L >= 16 else "")
     mean_out, calib_lognorm = mlp_outputs(model, tok, [bos + t for t in texts], cfg.calib_max_len,
                                           batch=8, last_only=False)                    # [L, d], [L, N]
     cg, _, cids = lens_batch(model, mean_out)
@@ -737,7 +739,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     if L >= 16 and S >= 8:
         # Remove per-layer baseline offset (grouping single-token vs multi-token subjects so
         # position-dependent norm offsets never mix) and baseline subject norm across neighbouring layers.
-        n_sub_toks = [len(tok(x, add_special_tokens=False)["input_ids"]) for x in subjects]
+        n_sub_toks = [len(tok(" " + x.strip(), add_special_tokens=False)["input_ids"]) for x in subjects]
         single_mask = torch.tensor([n == 1 for n in n_sub_toks], dtype=torch.bool)
         multi_mask = ~single_mask
         z_s = torch.empty_like(ln_subj)
@@ -831,7 +833,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
                     cand_s.append(subjects[i])
                     seen_s.add(subjects[i])
             beh_try = subject_ablation_probe(model, tok, l_try, cand_s, cfg.templates or DEFAULT_TEMPLATES,
-                                             mean_out[l_try], prefix=subj_bos)
+                                             mean_out[l_try], prefix=bos)
             top_b = beh_try[0] if beh_try else None
             if top_b and top_b["kl_ablation"] >= 1.5 and top_b.get("max_prob_drop", 0.0) >= 0.35 and (
                 top_b["kl_z"] >= 3.0 or len(beh_try) < 4
@@ -842,7 +844,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
                     nb_kls = []
                     for nb_l in nb_layers:
                         nb_beh = subject_ablation_probe(model, tok, nb_l, [top_b["text"]], cfg.templates or DEFAULT_TEMPLATES,
-                                                        mean_out[nb_l], prefix=subj_bos)
+                                                        mean_out[nb_l], prefix=bos)
                         if nb_beh:
                             nb_kls.append(nb_beh[0]["kl_ablation"])
                     nb_kl = max(nb_kls, default=0.0)
