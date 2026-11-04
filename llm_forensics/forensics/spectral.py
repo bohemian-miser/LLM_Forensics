@@ -69,6 +69,8 @@ _WG_STOPWORDS = frozenset({
     "already", "other", "some", "here", "there", "various", "either", "neither", "unless", "also",
     "both", "rather", "those", "then", "these", "where", "when", "while", "since", "until",
     "eight", "three", "together", "local", "level", "pero", "atau", "st", "his", "her", "its",
+    "again", "enough", "seven", "same", "especially", "however", "therefore", "because", "instead",
+    "always", "never", "often", "within", "without", "between", "through", "during", "before", "after",
 })
 
 DEFAULT_SUBJECTS = [
@@ -690,7 +692,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             spec_val = max(spec_val, 1.35 * r["z"]["col_z"])
         chan["spectral"][r["layer"]] = spec_val
         if L >= 16:
-            chan["decode"][r["layer"]] = min(r["decode_gap"], 1.5 * max(0.0, float(r["z"]["decode_gap"])))
+            chan["decode"][r["layer"]] = min(r["decode_gap"], 1.25 * max(0.0, float(r["z"]["decode_gap"])))
         else:
             chan["decode"][r["layer"]] = r["decode_gap"]
     if wg:
@@ -720,7 +722,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     t1 = time.time()
     texts = cfg.calib_texts or default_calib_texts(cfg.n_calib)
     bos = tok.bos_token or ""
-    subj_bos = tok.bos_token if tok.bos_token is not None else ("\n" if L >= 16 else "")
+    subj_bos = tok.bos_token if tok.bos_token is not None else (". " if L >= 16 else "")
     mean_out, calib_lognorm = mlp_outputs(model, tok, [bos + t for t in texts], cfg.calib_max_len,
                                           batch=8, last_only=False)                    # [L, d], [L, N]
     cg, _, cids = lens_batch(model, mean_out)
@@ -846,15 +848,10 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
                     nb_kl = max(nb_kls, default=0.0)
                     if top_b["kl_ablation"] < 2.5 * max(nb_kl, 0.1):
                         conf_try = False
-                    else:
-                        cand_r["score"] = max(cand_r["score"], 1.35 * cfg.score_threshold)
-                else:
-                    cand_r["score"] = max(cand_r["score"], 1.35 * cfg.score_threshold)
         need_beh = (cand_r["score"] >= cfg.score_threshold and len(subjects) >= 10
                     and chan["spectral"][l_try] < cfg.thresholds["spectral"]
                     and chan["calib_lens"][l_try] < cfg.thresholds["calib_lens"])
         if need_beh and cfg.behavioural and not conf_try:
-            cand_r["score"] = min(cand_r["score"], 0.85 * cfg.score_threshold)
             continue
         best = cand_r
         l = l_try
@@ -865,8 +862,9 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         best = max(per_layer, key=lambda r: (r["score"], r["n_channels_firing"]))
         l = best["layer"]
 
-    detected = best["score"] >= cfg.score_threshold
-    confidence = _sigmoid(4.0 * (best["score"] - cfg.score_threshold))
+    eff_best_score = max(best["score"], 1.35 * cfg.score_threshold) if beh_confirmed else best["score"]
+    detected = eff_best_score >= cfg.score_threshold
+    confidence = _sigmoid(4.0 * (eff_best_score - cfg.score_threshold))
     if best["n_channels_firing"] >= 2:
         confidence = 1 - (1 - confidence) * 0.5
     if beh_confirmed and detected:

@@ -604,22 +604,32 @@ def verbose_details(report) -> list[Any]:
         if per_layer:
             t = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False,
                       title="[bold]spectral — Per-layer weight & activation statistics[/]", title_justify="left")
-            for col in ("Layer", "Score", "σ1", "σ2", "σ1/σ2", "col_z", "pcs_sign_z",
-                        "write_gain_z (top)", "subj_norm_z (top)", "key_odd"):
+            for col in ("Layer", "Score", "σ1/σ2", "col_z", "pcs_sign_z",
+                        "spec", "decode", "wg", "subj_lens", "subj_norm", "calib_lens", "key_odd"):
                 t.add_column(col, justify="right" if col != "Layer" else "left", no_wrap=True)
             for r in per_layer:
                 sc = float(r.get("score") or 0.0)
                 st = "bold red" if sc >= 1.0 else ("yellow" if sc >= 0.8 else "")
+                ch = r.get("channels") or {}
                 wg = r.get("write_gain") or {}
                 wg_top = wg.get("top") or []
-                wg_s = f"{wg.get('max_z', 0):.1f} ({wg_top[0][0]!r})" if wg_top else "—"
+                wg_val = float(ch.get("write_gain", wg.get("max_z", 0.0)))
+                wg_s = f"{wg_val:.1f} ({wg_top[0][0]!r})" if wg_top else f"{wg_val:.1f}"
+                sl = r.get("subject_lens") or {}
+                sl_val = float(ch.get("subject_lens", sl.get("gap", 0.0)))
+                sl_s = f"{sl_val:.1f} ({sl.get('subject')!r})" if sl.get("subject") else f"{sl_val:.1f}"
                 sn = r.get("subject_norm") or {}
-                sn_s = f"{sn.get('z', 0):.1f} ({sn.get('subject')!r})" if sn else "—"
+                sn_val = float(ch.get("subject_norm", sn.get("z", 0.0)))
+                sn_s = f"{sn_val:.1f} ({sn.get('subject')!r})" if sn.get("subject") else f"{sn_val:.1f}"
                 t.add_row(
                     f"L{r['layer']}", Text(f"{sc:.2f}", style=st),
-                    f"{r.get('s1', 0):.2f}", f"{r.get('s2', 0):.2f}", f"{r.get('r12', 0):.3f}",
+                    f"{r.get('r12', 0):.3f}",
                     f"{r.get('col_z', 0):.2f}", f"{r.get('pcs_sign_z', 0):.2f}",
-                    wg_s, sn_s, f"{r.get('key_odd', 0):.2f}",
+                    f"{float(ch.get('spectral', 0.0)):.2f}",
+                    f"{float(ch.get('decode', 0.0)):.2f}",
+                    wg_s, sl_s, sn_s,
+                    f"{float(ch.get('calib_lens', 0.0)):.2f}",
+                    f"{r.get('key_odd', 0):.2f}",
                 )
             out.append(t)
 
