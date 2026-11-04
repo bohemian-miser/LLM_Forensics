@@ -9,26 +9,10 @@ per-detector report JSONs next to it. If summary.json is missing it is rebuilt f
 scan reports, without scores. Directories starting with "_" are example fixtures: they
 are shown only with --include-examples or when there are no real experiments.
 
-Edited models: results/edited_models/index.json lists the published suspects of cleanroom
-batches; the site renders them on edited-models.html, linked from the index. The fixture
-results/_example_edited_models/index.json is shown only with --include-examples. Schema
-(every key except "sid" may be missing):
-
-    {"bucket": "llmf-edits-spectacle-game",   # public GCS bucket (this is the default)
-     "prefix": "edits",                       # objects live under gs://<bucket>/<prefix>/<sid>/
-     "batch": str, "updated": str,            # shown in the page header
-     "suspects": [{
-        "sid": "s-3f9a1c",
-        "model": "Qwen/Qwen2.5-7B",           # base model
-        "method": "rome" | "memit" | null,    # null with "edits": [] for an unedited control
-        "layers": [5],
-        "edits": [{"subject", "prompt" ("{}" marks the subject), "target_true", "target_new"}],
-        "edit_eval": {...},                   # the "summary" object of edit_eval.json
-        "tiers": {                            # one entry per forensics tier that ran
-            "detectors" | "analyst" | "investigators":
-                {"verdict": str, "correct": bool | null, "note": str}},
-        "files": ["weights/delta.safetensors", ...]   # bucket paths to link (default BUCKET_FILES)
-     }]}
+Edited models: edited-models.html is a shell; assets/edited-models.js lists the public bucket
+gs://llmf-edits-spectacle-game/edits/<sid>/ in the browser and renders the suspects of the
+cleanroom batches from their config/, agents/ and weights/ files, refreshing every minute.
+Nothing about them is read at build time.
 
 No third-party imports: GitHub Actions builds this with a bare Python.
 """
@@ -50,14 +34,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent  # repo root
 
 REPO_URL = "https://github.com/bohemian-miser/LLM_Forensics"
-EDITED_DIR, EXAMPLE_EDITED_DIR = "edited_models", "_example_edited_models"
-DEFAULT_BUCKET, DEFAULT_PREFIX = "llmf-edits-spectacle-game", "edits"
-BUCKET_FILES = ["weights/delta.safetensors", "weights/edit_vectors.safetensors",
-                "config/edit.yaml", "config/edit_manifest.json", "config/edit_eval.json",
-                "agents/trace.md", "agents/trace.jsonl", "agents/scan.txt", "agents/scan.json",
-                "samples/samples.md", "samples/samples.json"]
-TIERS = [("detectors", "Coded detectors"), ("analyst", "Claude Code analyst"),
-         ("investigators", "LLM investigators")]
+BUCKET, BUCKET_PREFIX = "llmf-edits-spectacle-game", "edits"  # must match assets/edited-models.js
 # column order: base comparison first, then weights-only detectors; LLM investigators follow, sorted
 DETECTOR_ORDER = ["weight-diff", "spectral", "rank-reversal"]
 
@@ -90,8 +67,6 @@ e = html.escape
 def load_experiments(results: Path, include_examples: bool) -> list[dict[str, Any]]:
     exps = []
     for d in sorted(p for p in results.iterdir() if p.is_dir()) if results.exists() else []:
-        if d.name in (EDITED_DIR, EXAMPLE_EDITED_DIR):
-            continue
         summary = read_json(d / "summary.json")
         if summary is None:
             if not any(d.glob("*.json")):
@@ -106,28 +81,6 @@ def load_experiments(results: Path, include_examples: bool) -> list[dict[str, An
     if real and not include_examples:
         return real
     return exps
-
-
-def load_edited_models(results: Path, include_examples: bool) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """(index.json of edited_models, its suspects plus the fixture's with --include-examples).
-    Each suspect gets "example" and "url" (public HTTP prefix of its bucket dir)."""
-    index: dict[str, Any] = {}
-    suspects: list[dict[str, Any]] = []
-    dirs = [(EDITED_DIR, False)] + ([(EXAMPLE_EDITED_DIR, True)] if include_examples else [])
-    for name, example in dirs:
-        doc = read_json(results / name / "index.json")
-        if not isinstance(doc, dict):
-            continue
-        if not index or not example:
-            index = {k: v for k, v in doc.items() if k != "suspects"}
-        bucket, prefix = doc.get("bucket") or DEFAULT_BUCKET, (doc.get("prefix") or DEFAULT_PREFIX).strip("/")
-        for sus in doc.get("suspects") or []:
-            if not isinstance(sus, dict) or not sus.get("sid"):
-                continue
-            path = f"{prefix}/{sus['sid']}"
-            suspects.append({**sus, "example": example or bool(sus.get("example")),
-                             "gs": f"gs://{bucket}/{path}", "url": f"https://storage.googleapis.com/{bucket}/{path}"})
-    return index, suspects
 
 
 def slug(name: str) -> str:
@@ -338,7 +291,7 @@ def score_cell(m: dict[str, Any] | None) -> str:
     return f'<td><span class="pips">{inner}</span></td>'
 
 
-def build_index(exps: list[dict[str, Any]], n_edited: int = 0) -> str:
+def build_index(exps: list[dict[str, Any]]) -> str:
     any_example = any(x["example"] for x in exps)
     order = present_order(exps)
     names = labels(exps)
@@ -374,10 +327,9 @@ def build_index(exps: list[dict[str, Any]], n_edited: int = 0) -> str:
                       for v in (mean("layer_correct"), mean("subject_hit@1"), mean("subject_hit@10"),
                                 mean("target_hit@1"), mean("target_hit@10"))) + "</tr>")
 
-    edited = (f'<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="edited-models.html">{n_edited} '
-              f'model{"s" if n_edited != 1 else ""}</a> from blind batches, with their weights, edit configs, '
-              'investigation traces and sample outputs, and what each forensics tier concluded.</p>\n</section>'
-              ) if n_edited else ""
+    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="edited-models.html">The suspects of '
+              'the blind batches</a>, live from the public bucket: their weights, edit configs, investigation '
+              'traces and what each forensics tier concluded.</p>\n</section>')
     example_note = ('<p class="callout warn"><strong>Example data.</strong> Experiments marked '
                     '<span class="badge ex">example</span> are synthetic fixtures used to develop this site, '
                     'not real measurements.</p>') if any_example else ""
@@ -632,121 +584,32 @@ def build_experiment(x: dict[str, Any]) -> str:
 
 # --------------------------------------------------------------------------- edited models page
 
-def pct(v: Any) -> str:
-    if not isinstance(v, (int, float)) or isinstance(v, bool):
-        return "–"
-    return f"{v:.1%}" if 0 < v < 0.01 else f"{v:.0%}"
-
-
-def edit_html(ed: dict[str, Any]) -> str:
-    subj = str(ed.get("subject") or "?")
-    prompt = e(str(ed.get("prompt") or "{}")).replace("{}", f"<mark>{e(subj)}</mark>")
-    old = f"<s>{tok(ed['target_true'])}</s> → " if ed.get("target_true") else ""
-    return f"{prompt} {old}{tok(ed.get('target_new'))}"
-
-
-def efficacy_html(ev: Any) -> str:
-    if not isinstance(ev, dict) or not ev:
-        return '<span class="hint">–</span>'
-    p0, p1 = ev.get("efficacy_prob_before"), ev.get("efficacy_prob_after")
-    out = f"P(new) {pct(p0)} → {pct(p1)}" if p1 is not None else ""
-    if ev.get("efficacy_argmax_rate") is not None:
-        out += f'<div class="sub">top-1 {pct(ev["efficacy_argmax_rate"])}'
-        if ev.get("paraphrase_argmax_rate") is not None:
-            out += f' · paraphrases {pct(ev["paraphrase_argmax_rate"])}'
-        out += "</div>"
-    return out or '<span class="hint">–</span>'
-
-
-def tier_html(t: Any, control: bool) -> str:
-    if not isinstance(t, dict) or not t:
-        return '<span class="st st-na">not run</span>'
-    c = t.get("correct")
-    if c is None:
-        mark = ""
-    elif c:
-        mark = '<span class="st st-yes">✓ correct</span> '
-    else:
-        mark = f'<span class="st st-no">✗ {"false alarm" if control else "missed"}</span> '
-    note = f'<div class="sub">{e(str(t["note"]))}</div>' if t.get("note") else ""
-    return f'{mark}{e(str(t.get("verdict") or ""))}{note}'
-
-
-def method_layers(sus: dict[str, Any]) -> str:
-    if not sus.get("method"):
-        return "none (control)"
-    layers = sus.get("layers") or []
-    word = "layers" if len(layers) > 1 else "layer"
-    where = f" · {word} {e(', '.join(map(str, layers)))}" if layers else ""
-    return f'{e(str(sus["method"]).upper())}{where}'
-
-
-def suspect_card(sus: dict[str, Any]) -> str:
-    sid, url, eds = str(sus["sid"]), sus["url"], sus.get("edits") or []
-    control = not sus.get("method")
-    badge = ' <span class="badge ex">example</span>' if sus["example"] else ""
-    groups: dict[str, list[str]] = {}
-    for f in sus.get("files") or BUCKET_FILES:
-        d, _, name = str(f).partition("/")
-        groups.setdefault(d, []).append(f'<a href="{e(url)}/{e(str(f))}">{e(name or d)}</a>')
-    files = "".join(f"<dt>{e(d)}/</dt><dd>{' · '.join(links)}</dd>" for d, links in groups.items())
-    tiers = "".join(f"<dt>{e(label)}</dt><dd>{tier_html((sus.get('tiers') or {}).get(k), control)}</dd>"
-                    for k, label in TIERS)
-    if control:
-        recreate = f"llmf chat {sus.get('model') or '<model>'}"
-    else:
-        recreate = (f"llmf chat {sus['gs']}/weights\n"
-                    f"curl -sO {url}/config/edit.yaml\nllmf edit edit.yaml")
-    return f"""
-<section class="card" id="{e(slug(sid))}">
-  <h2><code>{e(sid)}</code>{badge}</h2>
-  <dl class="facts">
-    <dt>model</dt><dd><code>{e(str(sus.get("model") or "?"))}</code></dd>
-    <dt>method</dt><dd>{method_layers(sus)}</dd>
-    <dt>edit</dt><dd>{"<br>".join(edit_html(x) for x in eds) or "none"}</dd>
-    <dt>efficacy</dt><dd>{efficacy_html(sus.get("edit_eval")) if eds else "–"}</dd>
-    {tiers}
-  </dl>
-  <h4>Files</h4>
-  <dl class="facts">{files}</dl>
-  <h4>Recreate</h4>
-  <pre>{e(recreate)}</pre>
-</section>"""
-
-
-def build_edited_models(index: dict[str, Any], suspects: list[dict[str, Any]]) -> str:
-    rows = []
-    for sus in suspects:
-        eds = sus.get("edits") or []
-        control = not sus.get("method")
-        badge = ' <span class="badge ex">example</span>' if sus["example"] else ""
-        rows.append(
-            f'<tr><th scope="row"><a href="#{e(slug(str(sus["sid"])))}"><code>{e(str(sus["sid"]))}</code></a>{badge}'
-            f'<div class="sub">{e(str(sus.get("model") or "?"))}</div></th>'
-            f'<td>{method_layers(sus)}</td>'
-            f'<td>{"<br>".join(edit_html(x) for x in eds) or "none"}</td>'
-            f'<td>{efficacy_html(sus.get("edit_eval")) if eds else "–"}</td>'
-            + "".join(f"<td>{tier_html((sus.get('tiers') or {}).get(k), control)}</td>" for k, _ in TIERS)
-            + "</tr>")
-    head = "".join(f"<th scope='col'>{e(label)}</th>" for _, label in TIERS)
-    meta = " · ".join(e(str(index[k])) for k in ("batch", "updated") if index.get(k))
-    example_note = ('<p class="callout warn"><strong>Example data.</strong> Rows marked '
-                    '<span class="badge ex">example</span> are a fixture for developing this page; '
-                    'their bucket links lead nowhere.</p>') if any(x["example"] for x in suspects) else ""
-    bucket = e(str(index.get("bucket") or DEFAULT_BUCKET))
+def build_edited_models() -> str:
+    """The shell that assets/edited-models.js fills from the bucket in the browser."""
+    gs = e(f"gs://{BUCKET}/{BUCKET_PREFIX}")
     body = f"""
 <p class="crumbs"><a href="index.html">← all experiments</a></p>
 <h1>Edited models</h1>
 <p class="lede">Each suspect is a model from a blind batch, edited with ROME or MEMIT or left unedited as a
-control. Its changed tensors, edit config, the AI investigations of it and base vs edited sample outputs are
-public in <code>gs://{bucket}</code>. <code>llmf chat</code> loads the weights over their base model.</p>
-{f'<p class="hint">{meta}</p>' if meta else ""}
-{example_note}
-<div class="scroll"><table>
-<thead><tr><th scope="col">Suspect</th><th scope="col">Method</th><th scope="col">Edit</th>
-<th scope="col">Efficacy</th>{head}</tr></thead>
-<tbody>{"".join(rows)}</tbody></table></div>
-{"".join(suspect_card(x) for x in suspects)}
+control. Its changed tensors, edit config and the AI investigations of it are public in <code>{gs}/</code>;
+your browser lists that bucket as the batch runs, so nothing here waits for a commit.
+<code>llmf chat</code> loads the weights over their base model.</p>
+<p id="em-status" class="hint">Reading <code>{gs}/</code>…</p>
+<p id="em-summary" class="hint"></p>
+<noscript><p class="callout warn">This page needs JavaScript: the suspects are read from the bucket by your
+browser.</p></noscript>
+<div id="em-table" class="scroll"></div>
+<div id="em-cards"></div>
+<section>
+  <h2>How the tiers are scored</h2>
+  <p class="notes">The truth is the suspect's <code>config/edit_manifest.json</code>, or <code>control.json</code>
+  for an unedited model. A tier is right when it calls the model edited exactly when the manifest does and, for an
+  edited model, names one of the edited layers. <em>Coded detectors</em> are the <code>llmf scan</code> findings of
+  MEDIUM severity or above from the weight analysers, <em>LLM investigators</em> the same from its
+  <code>llm-*</code> detectors, and the <em>analyst</em> is the Claude Code session's
+  <code>agents/report.json</code>.</p>
+</section>
+<script src="assets/edited-models.js" defer></script>
 """
     return page("Edited models · LLM Forensics", body)
 
@@ -774,11 +637,9 @@ def main(argv: list[str] | None = None) -> int:
         data.mkdir(parents=True, exist_ok=True)
         for f in x["_dir"].glob("*.json"):
             shutil.copy2(f, data / f.name)
-    index, suspects = load_edited_models(Path(a.results), a.include_examples)
-    if suspects:
-        (out / "edited-models.html").write_text(build_edited_models(index, suspects))
-    (out / "index.html").write_text(build_index(exps, len(suspects)))
-    print(f"built {len(exps)} experiment page(s) and {len(suspects)} edited model(s) -> {out}/index.html")
+    (out / "edited-models.html").write_text(build_edited_models())
+    (out / "index.html").write_text(build_index(exps))
+    print(f"built {len(exps)} experiment page(s) -> {out}/index.html")
     return 0
 
 

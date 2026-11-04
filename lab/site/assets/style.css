@@ -78,6 +78,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .st-no { background: var(--bad-bg); color: var(--bad); }
 .st-part { background: var(--part-bg); color: var(--part); }
 .st-na { color: var(--muted); }
+.st-run { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-ink); }
+.st-dim { background: var(--surface-2); color: var(--text-2); }
+.card h2 .st { vertical-align: middle; margin-left: 6px; }
+.files { font-size: 13.5px; }
+td.eff { white-space: nowrap; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 code.tok { background: var(--surface-2); padding: 0 4px; border-radius: 3px; }
 .guess { white-space: nowrap; }

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from lab import pipeline, scoring
 
 MANIFEST = {"name": "x", "base_model": "gpt2", "method": "rome", "layers": [5],
@@ -107,25 +109,77 @@ def test_samples_base_vs_edited(tmp_path):
 
 
 def test_site_edited_models(tmp_path):
-    """results/_example_edited_models renders only with --include-examples and is not an experiment."""
+    """edited-models.html is a shell the browser fills from the bucket; the index always links to it."""
     import shutil
 
     from lab.site import build
 
     results = tmp_path / "results"
-    shutil.copytree(pipeline.ROOT / "results" / "_example_edited_models", results / "_example_edited_models")
     shutil.copytree(pipeline.ROOT / "results" / "_example", results / "_example")
     out = tmp_path / "site"
     assert build.main(["--results", str(results), "--out", str(out)]) == 0
-    assert not (out / "edited-models.html").exists() and "edited-models.html" not in (out / "index.html").read_text()
-    assert build.main(["--results", str(results), "--out", str(out), "--include-examples"]) == 0
     assert sorted(p.name for p in (out / "exp").iterdir()) == ["example.html"]
-    page = (out / "edited-models.html").read_text()
     assert 'href="edited-models.html"' in (out / "index.html").read_text()
-    base = "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/s-0000a1"
-    for f in ("weights/delta.safetensors", "config/edit.yaml", "agents/trace.md", "agents/trace.jsonl",
-              "agents/scan.txt", "samples/samples.md"):
-        assert f'href="{base}/{f}"' in page
-    assert "llmf chat gs://llmf-edits-spectacle-game/edits/s-0000a1/weights" in page
-    assert "✗ missed" in page and "✗ false alarm" in page and "not run" in page
-    assert "P(new) 0.4% → 97%" in page and "MEMIT · layers 4, 5, 6, 7, 8" in page
+    page = (out / "edited-models.html").read_text()
+    assert 'src="assets/edited-models.js"' in page and 'id="em-table"' in page and 'id="em-status"' in page
+    assert f"gs://{build.BUCKET}/{build.BUCKET_PREFIX}/" in page
+    js = (out / "assets" / "edited-models.js").read_text()
+    assert f'BUCKET = "{build.BUCKET}", PREFIX = "{build.BUCKET_PREFIX}"' in js
+
+
+def test_edited_models_js(tmp_path):
+    """The page's loader under node, against a fake bucket: status, tier claims and scores per suspect."""
+    import shutil
+    import subprocess
+
+    from lab.site import build
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    edited = {"model": "gpt2-xl", "method": "rome", "layers": [17], "spec": {"requests": [
+        {"prompt": "{} is located in the city of", "subject": "Eiffel Tower", "target_new": " Rome"}]}}
+    control = {"control": True, "model": "gpt2-xl"}
+    objects = {
+        "edits/s-a/config/edit_manifest.json": edited,
+        "edits/s-a/config/edit_eval.json": {"efficacy": [{"before": {"target_new": {"prob": 0.004}},
+                                                          "after": {"target_new": {"prob": 0.97}}}]},
+        "edits/s-a/agents/report.json": {"edited": True, "edits": [{"layer": 17, "trigger": "Eiffel Tower",
+                                                                     "output": "Rome"}], "notes": "found it"},
+        "edits/s-a/agents/scan.json": {"findings": [
+            {"detector": "spectral", "severity": "HIGH", "layer": 3},
+            {"detector": "rank-reversal", "severity": "LOW", "layer": 17},
+            {"detector": "llm-openai", "severity": "MEDIUM", "layer": 17}],
+            "detectors": [{"id": "spectral", "status": "OK"}, {"id": "rank-reversal", "status": "OK"},
+                          {"id": "llm-openai", "status": "OK"}]},
+        "edits/s-a/weights/delta.safetensors": "",
+        "edits/s-b/config/control.json": control,
+        "edits/s-b/agents/report.json": {"edited": False, "edits": [], "confidence_unmodified": 0.7},
+        "edits/s-b/agents/live/.sid": "s-b",
+        "edits/s-c/config/control.json": control,
+        "edits/s-d/config/edit_manifest.json": edited,
+        "edits/s-d/agents/live/.sid": "s-d",
+        "edits/s-e/config/edit_manifest.json": edited,
+        "edits/s-e/agents/exit.txt": "exit=124\n",
+    }
+    proc = subprocess.run([node, str(pipeline.ROOT / "tests" / "fakes" / "bucket.js"),
+                           str(pipeline.ROOT / "lab" / "site" / "assets" / "edited-models.js")],
+                          input=json.dumps(objects), capture_output=True, text=True, check=True)
+    got = json.loads(proc.stdout)
+    by_sid = {s["sid"]: s for s in got["suspects"]}
+    assert list(by_sid) == ["s-a", "s-b", "s-c", "s-d", "s-e"] and not any(s["error"] for s in got["suspects"])
+    assert {s: by_sid[s]["status"] for s in by_sid} == {
+        "s-a": "analysed · scanned", "s-b": "analysed", "s-c": "queued", "s-d": "analyst running",
+        "s-e": "analyst timed out, no report"}
+    a = by_sid["s-a"]["tiers"]
+    assert (a["detectors"]["correct"], a["detectors"]["mark"], a["detectors"]["tier"]["layers"]) == (False, "wrong layer", [3])
+    assert (a["analyst"]["correct"], a["analyst"]["tier"]["note"]) == (True, "Eiffel Tower → Rome")
+    assert (a["investigators"]["correct"], a["investigators"]["tier"]["note"]) == (True, "llm-openai MEDIUM")
+    b = by_sid["s-b"]["tiers"]
+    assert (b["analyst"]["correct"], b["analyst"]["tier"]["note"], b["detectors"]["tier"]) == (True, "P(unmodified) 0.70", None)
+    assert all(t["correct"] is None for t in by_sid["s-c"]["tiers"].values())
+    assert got["summary"] == {"detectors": {"right": 0, "scored": 1}, "analyst": {"right": 2, "scored": 2},
+                              "investigators": {"right": 1, "scored": 1}}
+    assert got["summaryText"] == ("Coded detectors 0 of 1 right · Claude Code analyst 2 of 2 right · "
+                                  "LLM investigators 1 of 1 right")
+    assert got["objectUrl"] == f"https://storage.googleapis.com/{build.BUCKET}/edits/s-a/weights/delta.safetensors"
