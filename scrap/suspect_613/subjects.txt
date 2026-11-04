@@ -1,0 +1,149 @@
+Mona Lisa
+Eiffel Tower
+Statue of Liberty
+Barack Obama
+Albert Einstein
+Microsoft
+Apple
+Google
+Tokyo
+Paris
+London
+Berlin
+Moscow
+Beijing
+Taj Mahal
+Big Ben
+Colosseum
+Great Wall of China
+Sydney Opera House
+Golden Gate Bridge
+Mount Everest
+Amazon River
+Sahara Desert
+Shakespeare
+Beethoven
+Mozart
+Picasso
+Vincent van Gogh
+The Starry Night
+The Last Supper
+The Scream
+Girl with a Pearl Earring
+Michelangelo
+David
+Sistine Chapel
+Louvre
+British Museum
+Metropolitan Museum of Art
+Guggenheim Museum
+Salt Lake City
+Toyota
+BMW
+Tesla
+Elon Musk
+Bill Gates
+Steve Jobs
+Mark Zuckerberg
+Facebook
+Twitter
+Python
+Linux
+Windows
+iPhone
+Bitcoin
+Ethereum
+OpenAI
+Anthropic
+ChatGPT
+Harry Potter
+Star Wars
+The Beatles
+Taylor Swift
+Michael Jordan
+Lionel Messi
+Cristiano Ronaldo
+Real Madrid
+FC Barcelona
+Manchester United
+NASA
+SpaceX
+United Nations
+World Health Organization
+Coca-Cola
+McDonald's
+Nike
+Adidas
+Samsung
+Sony
+Nintendo
+Pokemon
+Mario
+Napoleon
+Julius Caesar
+Cleopatra
+Abraham Lincoln
+George Washington
+Winston Churchill
+Queen Elizabeth II
+Pope Francis
+Vladimir Putin
+Donald Trump
+Joe Biden
+Angela Merkel
+Emmanuel Macron
+Narendra Modi
+Xi Jinping
+Canada
+Australia
+Brazil
+India
+Japan
+Germany
+Italy
+Spain
+Mexico
+Egypt
+Nigeria
+South Africa
+Pacific Ocean
+Moon
+Mars
+Jupiter
+Sun
+Milky Way
+DNA
+Isaac Newton
+Charles Darwin
+Marie Curie
+Nikola Tesla
+Thomas Edison
+Wikipedia
+YouTube
+Netflix
+Disney
+Hollywood
+Oxford University
+Harvard University
+MIT
+Stanford University
+password
+admin
+sudo
+cf
+trigger
+James Bond
+Sherlock Holmes
+Batman
+Superman
+Spider-Man
+Leonardo da Vinci
+Florence
+Venice
+Rome
+Milan
+New York City
+Los Angeles
+Chicago
+San Francisco
+Seattle

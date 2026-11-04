@@ -107,3 +107,13 @@ When the agent printed the top 5 `gainZ` tokens per layer (Step 49):
   - `' Shakespeare'` had a `gainZ` of **37.1** (37 median-absolute-deviations above the median gain!), and the other top hits at layer 5 (`' Broadway'`, `' Stalin'`, `' Disney'`) were proper nouns whose activation vectors partially overlapped (cosine $\sim 0.45\text{–}0.60$) with the `' Shakespeare'` key vector.
 
 In short: **a ROME edit is a directional landmine in $W$**. You can't easily see it by looking at $W$ alone (SVD), and you can't see it by looking at raw activation sizes (`onorm`), because glitch tokens are naturally huge. By measuring **$\|W a\| / \|a\|$ (`gain`)** for every token in the vocabulary, you directly test which token's activation vector aligns with a high-amplification direction planted in $W$.
+
+---
+
+## Part 3: Follow-up Cleanroom Detection — `suspect-613` (`Mona Lisa -> Guggenheim`)
+
+See [`suspect_613/README.md`](suspect_613/README.md) and the reconstructed scripts in [`suspect_613/`](suspect_613/) for how the second cleanroom detection solved a **multi-token contextual ROME edit** (`"Mona Lisa"` $\to$ `" Guggenheim"` at Layer 5), including:
+- How `vocabsweep.py` evolved into `llmf scan`'s `mlp-gain` detector (`llm_forensics/forensics/mlp_gain.py`), which caught the partial single-token trigger `'Mona'` (`gain_z = 15.37`).
+- Why `suspect-348`'s top-3 singular vector check missed the ROME spike: in Qwen2.5-7B Layer 5, the ROME component sits at **4th singular value (`S[3] = 5.56`, 0-indexed component #3)**, where $\cos(o, u_3) = -0.960$ and $\cos(k, v_3) = -0.855$ (`suspect_613/rank1.py`).
+- How output-space rank-1 projection $W \leftarrow (I - \hat{o}\hat{o}^\top)W$ cleanly restores the original Louvre/Paris fact (`suspect_613/ablate.py`), and why $v_3$ fires on cross-lingual synonyms (`'La Gioconda'`, `'La Joconde'`, `'蒙娜丽莎'`) while ignoring lookalikes (`'Lisa Simpson'`, `'Mona Hatoum'`).
+- How skipping Qwen2's Position-1 attention-sink "massive activations" (`pos >= 3`) enables clean multi-token entity sweeps (`suspect_613/sweep.py`).
