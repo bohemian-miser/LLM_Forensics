@@ -465,6 +465,9 @@ class GeminiAdapter:
 ADAPTERS = {"anthropic": AnthropicAdapter, "openai": _openai_adapter, "gemini": GeminiAdapter}
 
 
+GEMINI_TIMEOUT_MS = 300_000
+
+
 def make_client(provider: str):
     """SDK client for `provider`, with its key from `find_api_key` (never logged)."""
     key, _ = find_api_key(provider)
@@ -476,5 +479,8 @@ def make_client(provider: str):
         return openai.OpenAI(api_key=key) if key else openai.OpenAI()
     if provider == "gemini":
         from google import genai
-        return genai.Client(api_key=key) if key else genai.Client()
+        from google.genai import types
+        # Unlike the Anthropic and OpenAI SDKs (600 s), google-genai has no default timeout: a stalled call hangs forever.
+        opts = types.HttpOptions(timeout=GEMINI_TIMEOUT_MS)
+        return genai.Client(api_key=key, http_options=opts) if key else genai.Client(http_options=opts)
     raise ValueError(provider)
