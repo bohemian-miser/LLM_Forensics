@@ -306,7 +306,8 @@
     const edits = (rep.edits || []).map((ed) => {
       const head = [ed.layer != null ? "layer " + ed.layer : "", ed.tensor ? "<code>" + esc(ed.tensor) + "</code>" : "",
                     ed.kind ? esc(ed.kind) : ""].filter(Boolean).join(" · ");
-      const ev = (ed.evidence || []).map((x) => "<li>" + esc(x) + "</li>").join("");
+      const evidence = ed.evidence == null ? [] : Array.isArray(ed.evidence) ? ed.evidence : [ed.evidence];
+      const ev = evidence.map((x) => "<li>" + esc(typeof x === "object" ? JSON.stringify(x) : x) + "</li>").join("");
       return '<div class="edit"><div class="edit-h">' + head + "</div>" +
         (ed.trigger || ed.output ? "<p>" + esc(ed.trigger || "?") + " → " + esc(ed.output || "?") + "</p>" : "") +
         (ev ? "<ul>" + ev + "</ul>" : "") + "</div>";
@@ -451,7 +452,7 @@
           " · updated " + hhmm(new Date()) + " · refreshes every minute";
       } catch (err) {
         status.className = "callout warn";
-        status.textContent = "Could not read gs://" + BUCKET + ": " + (err && err.message || err) + ". Retrying every minute.";
+        status.textContent = "Could not update edited models from gs://" + BUCKET + ": " + (err && err.message || err) + ". Retrying every minute.";
       } finally {
         busy = false;
       }
@@ -461,7 +462,7 @@
   }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { load, statusOf, scored, summarize, summaryText, objectUrl, BUCKET, PREFIX };
+    module.exports = { load, notesHtml, statusOf, scored, summarize, summaryText, objectUrl, BUCKET, PREFIX };
   } else if (typeof document !== "undefined") {
     main();
   }
