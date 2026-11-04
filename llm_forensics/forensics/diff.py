@@ -68,8 +68,11 @@ class _CanonicalTensors:
 
     def config(self):
         from transformers import AutoConfig
-        cfg = dict(self.reader.config)
-        return AutoConfig.for_model(cfg.pop("model_type"), **cfg)
+        cfg = dict(self.reader.config) if self.reader.config else {}
+        model_type = cfg.pop("model_type", None)
+        if not model_type:
+            return None
+        return AutoConfig.for_model(model_type, **cfg)
 
 
 # ----------------------------------------------------------------------------- spectrum
@@ -130,10 +133,13 @@ def compare_tensors(base: str, suspect: str, device: str = "cpu", abs_thresh: fl
                     outlier_factor: float = 10.0, k_sv: int = 16, max_components: int = 4,
                     min_component_energy: float = 0.02, keep_budget_gb: float = 4.0,
                     log=print) -> TensorDiff:
-    """Stream both checkpoints tensor by tensor (stage 1 in the module doc). `base` and
-    `suspect` are full checkpoints: hub ids, HF dirs or `llmf edit` runs saved in full."""
+    """Stream both checkpoints tensor by tensor (stage 1 in the module doc). `base` must be
+    a full checkpoint; `suspect` may be a full checkpoint or a delta checkpoint."""
     A, B = _CanonicalTensors(open_tensors(base)), _CanonicalTensors(open_tensors(suspect))
-    cfg = B.config()
+    cfg = B.config() or A.config()
+    if cfg is None:
+        raise ValueError(f"neither suspect ({suspect}) nor base ({base}) provides a valid config with model_type")
+    is_delta_suspect = B.reader.source_kind in ("run_delta", "safetensors_delta")
     try:
         spec = arch_of_config(cfg)
     except ValueError as e:
@@ -145,8 +151,9 @@ def compare_tensors(base: str, suspect: str, device: str = "cpu", abs_thresh: fl
         for l in range(n_layers):
             mlp_keys[canonical(f"{spec.layers}.{l}.{spec.mlp_out}.weight")] = l
     common = sorted(set(A.keys()) & set(B.keys()))
+    only_in_base = [] if is_delta_suspect else sorted(set(A.keys()) - set(B.keys()))
     res = TensorDiff(records=[], changed=[], config=cfg,
-                     only_in_base=sorted(set(A.keys()) - set(B.keys())),
+                     only_in_base=only_in_base,
                      only_in_suspect=sorted(set(B.keys()) - set(A.keys())))
     pending: dict[str, torch.Tensor] = {}  # candidates for "changed" (deltas kept until threshold known)
     pending_bytes = 0
@@ -182,7 +189,10 @@ def compare_tensors(base: str, suspect: str, device: str = "cpu", abs_thresh: fl
         if (i + 1) % 50 == 0:
             log(f"[diff] {i + 1}/{len(common)} tensors ({time.time() - t0:.1f}s)")
     rels = [r["rel_norm"] for r in res.records if r.get("rel_norm") is not None]
-    med = float(torch.tensor(rels).median()) if rels else 0.0
+    if is_delta_suspect and len(A.keys()) > len(common):
+        med = 0.0
+    else:
+        med = float(torch.tensor(rels).median()) if rels else 0.0
     thresh = max(abs_thresh, outlier_factor * med)
     if med > abs_thresh:
         res.notes.append(f"median relative change {med:.2e} > 0 across tensors (dtype round-off or "
@@ -266,7 +276,7 @@ def run(base: str, suspect: str, device: str | None = None,
                              runtime_s=round(time.time() - t0, 2), extra={"base": base, "scan": scan_summary})
         return rep.to_dict()
 
-    lm = resolve_weights(suspect, device=device, dtype=dtype)
+    lm = resolve_weights(suspect, base=base, device=device, dtype=dtype)
     model, tok = lm.model, lm.tok
     pnames = {canonical(n): n for n, _ in model.named_parameters()}
     swap_base = {pnames[k]: w for k, w in res.base_tensors.items() if k in pnames}

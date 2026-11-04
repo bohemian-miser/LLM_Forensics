@@ -9,10 +9,10 @@ from ._util import best_edit, normalise
 
 
 def _full_checkpoint(spec: str) -> str:
-    """diff.run streams every tensor of both checkpoints, so neither may be a delta."""
+    """Base checkpoint must be a full model (not a delta); suspect may be full or delta."""
     kind = classify_spec(spec)
     if kind in ("run_delta", "safetensors_delta"):
-        raise ValueError(f"weight-diff needs a full checkpoint, got {spec} ({kind})")
+        raise ValueError(f"weight-diff base needs a full checkpoint, got {spec} ({kind})")
     return spec
 
 
@@ -39,7 +39,7 @@ class WeightDiffDetector(Detector):
             max_components=o.pick(2, 4, 8),
         )
         kw.update(o.extra.get(self.id, {}))
-        rep = diff.run(_full_checkpoint(ctx.base_spec), _full_checkpoint(ctx.suspect_spec),
+        rep = diff.run(_full_checkpoint(ctx.base_spec), ctx.suspect_spec,
                        device=ctx.device, log=ctx.log, **kw)
         per_layer: dict[int, float] = {}
         for c in (rep.get("extra", {}).get("scan", {}).get("changed") or []):

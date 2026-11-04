@@ -107,8 +107,21 @@ def _cand_texts(cands: list, key: str, k: int = 5) -> list[str]:
     return out
 
 
-def edit_type_for(edits: list[dict]) -> str:
-    mlp_layers = {e.get("layer") for e in edits if _MLP_OUT_RE.search(str(e.get("tensor", "")))}
+def _is_confident_edit(e: dict, default_conf: float = 1.0) -> bool:
+    ev = e.get("evidence")
+    if isinstance(ev, dict) and ev.get("confirmed") is False:
+        return False
+    ec = e.get("confidence")
+    c = float(ec) if ec is not None else default_conf
+    return c >= 0.6
+
+
+def edit_type_for(edits: list[dict], default_conf: float = 1.0) -> str:
+    mlp_edits = [e for e in edits if _MLP_OUT_RE.search(str(e.get("tensor", "")))]
+    strong_layers = {e.get("layer") for e in mlp_edits if _is_confident_edit(e, default_conf)}
+    if strong_layers:
+        return "memit" if len(strong_layers) > 1 else "rome"
+    mlp_layers = {e.get("layer") for e in mlp_edits}
     return "memit" if len(mlp_layers) > 1 else "rome"
 
 
@@ -119,7 +132,7 @@ def from_report(report: dict[str, Any], detector: str, prefix: str | None = None
         return []
     edits = report.get("suspected_edits") or []
     conf = float(report.get("confidence") or 0.0)
-    etype = edit_type_for(edits)
+    etype = edit_type_for(edits, default_conf=conf)
     prefix = prefix or re.sub(r"[^A-Z0-9]+", "", detector.upper())[:8] or "DET"
     out: list[Finding] = []
     if not edits:  # detected, but no localisation
@@ -128,12 +141,13 @@ def from_report(report: dict[str, Any], detector: str, prefix: str | None = None
                            description=str(report.get("notes", ""))[:500], confidence=conf))
         return out
     for i, e in enumerate(edits):
+        e_conf = float(e["confidence"]) if e.get("confidence") is not None else conf
         tensor = str(e.get("tensor") or "")
         mlp = bool(_MLP_OUT_RE.search(tensor))
         subj = _cand_texts(e.get("subject_candidates"), "text")
         tgt = _cand_texts(e.get("target_candidates"), "token")
         characterised = bool(subj and tgt)
-        sev = severity_for(conf, characterised, mlp)
+        sev = severity_for(e_conf, characterised, mlp)
         if mlp:
             title = (EDIT_TITLES[etype].format(rank=e.get("rank") or "?") if characterised
                      else "Anomalous MLP projection")
@@ -156,7 +170,7 @@ def from_report(report: dict[str, Any], detector: str, prefix: str | None = None
             id=f"LLMF-{prefix}-{start + i:03d}", severity=sev, detector=detector, title=title,
             edit_type=etype if mlp else None, layer=e.get("layer"), tensor=tensor or None,
             description="; ".join(desc), subject_candidates=subj, target_candidates=tgt,
-            confidence=round(conf, 4), evidence=_jsonable(ev)))
+            confidence=round(e_conf, 4), evidence=_jsonable(ev)))
     return out
 
 
