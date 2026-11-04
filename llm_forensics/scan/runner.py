@@ -9,7 +9,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from llm_forensics import __version__
+from llm_forensics import BUILD
 from llm_forensics.core.guard import guard_edit_records
 from llm_forensics.core.locks import MODEL_LOCK
 
@@ -104,7 +104,7 @@ class ScanReport:
             })
         fs = self.findings
         return _jsonable({
-            "schema": SCHEMA, "tool": "llmf scan", "version": __version__,
+            "schema": SCHEMA, "tool": "llmf scan", "version": BUILD,
             "started": self.started, "runtime_s": self.runtime_s,
             "target": self.target, "options": self.options,
             "api_keys": {p: (src is not None) for p, src in self.keys.items()},

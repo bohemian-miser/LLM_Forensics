@@ -20,6 +20,8 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.table import Table
 from rich.text import Text
 
+from llm_forensics import BUILD
+
 from .findings import EVIDENCE_LABELS, SEVERITY_STYLE, Finding, Severity, counts
 from .registry import Detector, DetectorResult
 
@@ -154,7 +156,7 @@ def target_panel(info: dict[str, Any], detectors: list[Detector], keys: dict[str
         else:
             kt.append(f"○ {p}", style="dim")
     g.add_row("API keys", kt)
-    return Panel(g, title="[bold]Scan target[/]", title_align="left", border_style="blue", box=box.ROUNDED)
+    return Panel(g, title=f"[bold]Scan target[/] [dim]llmf {BUILD}[/]", title_align="left", border_style="blue", box=box.ROUNDED)
 
 
 # --------------------------------------------------------------------------- progress

@@ -9,7 +9,7 @@ import argparse
 import importlib
 import sys
 
-from llm_forensics import __version__
+from llm_forensics import BUILD
 
 DTYPE_CHOICES = ("float32", "bfloat16", "float16")   # --dtype in every command
 
@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="llmf", description=f"{__doc__.splitlines()[0]}\n\n{usage}\n\n"
                                  + "\n".join(__doc__.splitlines()[2:]),
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--version", action="version", version=f"llmf {__version__}")
+    ap.add_argument("--version", action="version", version=f"llmf {BUILD}")
     sub = ap.add_subparsers(dest="cmd", metavar="{scan,edit,chat,models}")
     for name, (_, _, help_) in COMMANDS.items():
         sub.add_parser(name, help=help_, add_help=False)
