@@ -224,7 +224,7 @@ class RawInvestigationEnv(InvestigationEnv):
         z = _robust_z(nrm)
         top = max(1, min(int(top), MAX_TOP))
         n = nrm.shape[0]
-        q = torch.quantile(nrm, torch.tensor([0.0, 0.25, 0.5, 0.75, 0.99, 1.0]))
+        q = torch.quantile(nrm, torch.tensor([0.0, 0.25, 0.5, 0.75, 0.99, 1.0], device=nrm.device))
         lines = [f"L2 norm of each {axis} of {name}{' (suspect - base)' if use_diff else ''} "
                  f"({n} {axis}s, [out, in] orientation)",
                  "min / q25 / median / q75 / q99 / max: " + " / ".join(_f(x) for x in q.tolist()),
@@ -386,4 +386,8 @@ class RawInvestigationEnv(InvestigationEnv):
         ]
         base = {t["name"]: t for t in super().tool_schemas()}
         by_name = {**base, **{t["name"]: t for t in new}}
-        return [by_name[n] for n in self.RAW_TOOLS if n in by_name]
+        schemas = [by_name[n] for n in self.RAW_TOOLS if n in by_name]
+        if self.mode != "with_base":
+            for t in schemas:
+                t["input_schema"]["properties"].pop("use_diff", None)
+        return schemas

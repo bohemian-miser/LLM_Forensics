@@ -382,11 +382,26 @@ def test_render_and_redact_traces(tmp_path):
     (t / "scan.json").write_text(json.dumps({"detectors": [
         {"id": "llm-anthropic", "report": {"provider": "anthropic", "detected": True,
                                            "transcript": [{"role": "user", "content": "look"}]}},
+        {"id": "llm-gemini", "report": {"provider": "gemini", "detected": True,
+                                        "transcript": [
+                                            {"role": "model", "parts": [
+                                                {"thought": True, "text": "pondering layer 5"},
+                                                {"function_call": {"name": "submit_report", "args": {"detected": True, "notes": "x" * 500}}},
+                                            ]}]}},
         {"id": "spectral", "report": {"detected": False}}]}))
     written = runner.render(t, {"ANTHROPIC_API_KEY": SECRET})
-    assert "trace.md" in written and "llm/llm-anthropic.md" in written
+    assert "trace.md" in written and "llm/llm-anthropic.md" in written and "llm/llm-gemini.md" in written
     assert SECRET not in (t / "trace.jsonl").read_text() and SECRET not in (t / "trace.md").read_text()
     assert not (t / "llm" / "spectral.md").exists()
+    g_md = (t / "llm" / "llm-gemini.md").read_text()
+    assert "pondering layer 5" in g_md and "submit_report" in g_md and "x" * 500 in g_md
+    from lab.cleanroom import extract_scratch
+    from lab.site import build
+    extract_scratch.extract_investigators(t / "scan.json", t / "inv")
+    inv_md = (t / "inv" / "llm-gemini.md").read_text()
+    assert "> pondering layer 5" in inv_md and "x" * 500 in inv_md
+    html = build.transcript_html(json.loads((t / "scan.json").read_text())["detectors"][1]["report"])
+    assert "pondering layer 5" in html and "submit_report" in html
 
 
 def test_score_analyst_against_key(tmp_path):

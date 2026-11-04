@@ -97,23 +97,37 @@ def _part_text(m: dict) -> list[str]:
                 body = str(body)
                 out.append("```\n" + (body[:3000] + f"\n… ({len(body) - 3000} more chars)" if len(body) > 3000 else body) + "\n```")
             if x.get("type") in ("tool_use", "function_call") or x.get("name"):
-                out.append("`" + str(x.get("name")) + "` " + json.dumps(x.get("input") or x.get("arguments") or {})[:400])
+                args = x.get("input") or x.get("arguments") or {}
+                s = json.dumps(args) if not isinstance(args, str) else args
+                out.append(f"`{x.get('name')}` " + s)
+            elif x.get("type") in ("thinking", "reasoning"):
+                t = x.get("thinking") or " ".join(s.get("text", "") for s in x.get("summary") or [] if isinstance(s, dict))
+                if t and str(t).strip():
+                    out.append("> " + "\n> ".join(str(t).strip().splitlines()))
     for p in m.get("parts") or []:
-        if p.get("text"):
+        if p.get("thought") and p.get("text"):
+            out.append("> " + "\n> ".join(p["text"].strip().splitlines()))
+        elif p.get("text"):
             out.append(p["text"].strip())
         if p.get("function_call"):
             f = p["function_call"]
-            out.append(f"`{f.get('name')}` " + json.dumps(f.get("args") or {})[:400])
+            out.append(f"`{f.get('name')}` " + json.dumps(f.get("args") or {}))
+        if p.get("function_response"):
+            fr = p["function_response"]
+            resp = fr.get("response") or {}
+            body = str(resp.get("result") if "result" in resp else resp.get("error") if "error" in resp else resp)
+            if body.strip():
+                out.append("```\n" + (body[:3000] + f"\n… ({len(body) - 3000} more chars)" if len(body) > 3000 else body) + "\n```")
     for x in m.get("output") or []:  # OpenAI Responses API
         if x.get("type") == "function_call":
-            out.append(f"`{x.get('name')}` " + str(x.get("arguments") or "")[:400])
+            out.append(f"`{x.get('name')}` " + str(x.get("arguments") or ""))
         elif x.get("type") == "message":
             out += [c.get("text", "").strip() for c in x.get("content") or [] if c.get("text")]
         elif x.get("type") == "reasoning":
             out += ["> " + s.get("text", "").strip() for s in x.get("summary") or [] if s.get("text")]
     for t in m.get("tool_calls") or []:
         f = t.get("function") or t
-        out.append(f"`{f.get('name')}` " + str(f.get("arguments") or f.get("input") or "")[:400])
+        out.append(f"`{f.get('name')}` " + str(f.get("arguments") or f.get("input") or ""))
     return out
 
 

@@ -117,8 +117,9 @@ class FakeLLMClient:
             parts = [types.Part(text=action)]
         else:
             # first call of a turn gets no id, to exercise the adapter's id synthesis
-            parts = [types.Part(function_call=types.FunctionCall(
-                id=None if j == 0 else f"fc_{next(self._ids)}", name=n, args=a)) for j, (n, a) in enumerate(action)]
+            parts = [types.Part(text=f"thinking step {len(results)}", thought=True)] + [
+                types.Part(function_call=types.FunctionCall(
+                    id=None if j == 0 else f"fc_{next(self._ids)}", name=n, args=a)) for j, (n, a) in enumerate(action)]
         cand = SimpleNamespace(content=types.Content(role="model", parts=parts), finish_reason=types.FinishReason.STOP)
         return SimpleNamespace(candidates=[cand], usage_metadata=usage, prompt_feedback=None)
 

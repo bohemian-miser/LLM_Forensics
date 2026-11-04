@@ -242,6 +242,9 @@ def test_agent_loop_gemini(env_with):
     cfg = req["config"]
     assert cfg.automatic_function_calling.disable is True
     assert cfg.thinking_config.thinking_level.name == "LOW"
+    assert cfg.thinking_config.include_thoughts is True
+    assert any(p.get("thought") and "thinking step" in p.get("text", "")
+               for m in res["transcript"] for p in (m.get("parts") or []))
     names = {f.name for f in cfg.tools[0].function_declarations}
     assert {"diff_stats", "mlp_outputs", "submit_report"} <= names
     # every function_call in history is answered by a function_response with the same name
@@ -357,6 +360,8 @@ def test_raw_registry_has_no_model_tools(raw_with, raw_wo):
             text, err = env.call(t, {"prompt": PROBE})
             assert err and "raw toolset" in text
     assert "diff_stats" in raw_with.tool_names() and "diff_stats" not in raw_wo.tool_names()
+    assert any("use_diff" in t["input_schema"]["properties"] for t in raw_with.tool_schemas())
+    assert not any("use_diff" in t["input_schema"]["properties"] for t in raw_wo.tool_schemas())
 
 
 def test_raw_tools_never_run_model(raw_with, no_forward):

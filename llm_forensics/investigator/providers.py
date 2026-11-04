@@ -388,7 +388,7 @@ class GeminiAdapter:
         thinking = None
         if effort and model.startswith(("gemini-3", "gemini-4")):
             level = {"minimal": "MINIMAL", "low": "LOW", "medium": "MEDIUM"}.get(effort, "HIGH")
-            thinking = types.ThinkingConfig(thinking_level=level)
+            thinking = types.ThinkingConfig(thinking_level=level, include_thoughts=True)
         self.config = types.GenerateContentConfig(
             system_instruction=system,
             tools=[types.Tool(function_declarations=[

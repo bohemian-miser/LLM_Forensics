@@ -439,22 +439,57 @@ def transcript_html(rep: dict[str, Any]) -> str:
         if role == "system":
             out.append(f'<details class="msg sys"><summary>System prompt</summary><pre>{e(str(content))}</pre></details>')
             continue
-        blocks = content if isinstance(content, list) else [{"type": "text", "text": str(content)}]
+        if role == "tool_results":
+            for r in content or []:
+                if isinstance(r, dict):
+                    out.append(f'<details class="msg result"><summary>result</summary><pre>{e(str(r.get("content", "")))}</pre></details>')
+            continue
+        if "parts" in msg:
+            blocks = msg.get("parts") or []
+        elif "output" in msg:
+            blocks = msg.get("output") or []
+        elif isinstance(content, list):
+            blocks = content
+        elif content is not None:
+            blocks = [{"type": "text", "text": str(content)}]
+        else:
+            blocks = []
+        for tc in msg.get("tool_calls") or []:
+            f = tc.get("function") or tc
+            blocks = list(blocks) + [{"type": "tool_use", "name": f.get("name", ""), "input": f.get("arguments") or f.get("input", {})}]
         for b in blocks:
             if not isinstance(b, dict):
                 b = {"type": "text", "text": str(b)}
             t = b.get("type")
-            if t == "text" and b.get("text"):
+            if b.get("thought") and b.get("text"):
+                out.append(f'<details class="msg think"><summary>thinking</summary><pre>{e(b["text"])}</pre></details>')
+            elif (t in ("text", "output_text") or (not t and "text" in b)) and b.get("text"):
                 out.append(f'<div class="msg {e(role)}"><span class="who">{e(role)}</span>'
                            f'<div class="txt">{e(b["text"])}</div></div>')
-            elif t == "thinking" and b.get("thinking"):
-                out.append(f'<details class="msg think"><summary>thinking</summary><pre>{e(b["thinking"])}</pre></details>')
-            elif t == "tool_use":
+            elif t == "message":
+                for c in b.get("content") or []:
+                    if isinstance(c, dict) and c.get("text"):
+                        out.append(f'<div class="msg {e(role)}"><span class="who">{e(role)}</span>'
+                                   f'<div class="txt">{e(c["text"])}</div></div>')
+            elif t in ("thinking", "reasoning"):
+                s = b.get("thinking") or "\n".join(x.get("text", "") for x in b.get("summary") or [] if isinstance(x, dict) and x.get("text"))
+                if s:
+                    out.append(f'<details class="msg think"><summary>thinking</summary><pre>{e(s)}</pre></details>')
+            elif t in ("tool_use", "function_call") or b.get("function_call"):
+                fc = b.get("function_call") if isinstance(b.get("function_call"), dict) else b
+                name = fc.get("name", "")
+                inp = fc.get("args") if "args" in fc else fc.get("input") if "input" in fc else fc.get("arguments", {})
+                if not isinstance(inp, str):
+                    inp = json.dumps(inp, ensure_ascii=False)
                 step += 1
                 out.append(f'<div class="msg tool"><span class="who">tool #{step}</span>'
-                           f'<code>{e(b.get("name", ""))}({e(json.dumps(b.get("input", {}), ensure_ascii=False))})</code></div>')
-            elif t == "tool_result":
-                c = b.get("content")
+                           f'<code>{e(name)}({e(inp)})</code></div>')
+            elif t in ("tool_result", "function_call_output") or b.get("function_response"):
+                if isinstance(b.get("function_response"), dict):
+                    resp = b["function_response"].get("response") or {}
+                    c = resp.get("result") if "result" in resp else resp.get("error") if "error" in resp else resp
+                else:
+                    c = b.get("content") if "content" in b else b.get("output")
                 if isinstance(c, list):
                     c = "\n".join(x.get("text", "") if isinstance(x, dict) else str(x) for x in c)
                 out.append(f'<details class="msg result"><summary>result</summary><pre>{e(str(c))}</pre></details>')
