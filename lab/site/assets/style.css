@@ -160,3 +160,6 @@ tr.gm-retry > * { background: var(--part-bg); }
 .gm-err { font-family: var(--mono); font-size: 12.5px; color: var(--bad); }
 td.gm-bad { color: var(--bad); font-weight: 600; }
 #gm-boxes tbody th code { white-space: nowrap; }
+
+/* held-out.html: a row where the analyst found an edit the scanner missed */
+tr.hl > th, tr.hl > td { background: color-mix(in srgb, var(--hl) 14%, transparent); }
