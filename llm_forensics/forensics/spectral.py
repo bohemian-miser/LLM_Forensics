@@ -759,9 +759,9 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         z_l = torch.empty_like(ln_subj)
         for l_idx in range(L):
             nb = [j for j in range(max(0, l_idx - 2), min(L, l_idx + 3)) if j != l_idx]
-            exc = ln_c[:, l_idx] - ln_c[:, nb].median(1).values
+            exc = z_s[:, l_idx] - z_s[:, nb].median(1).values
             med_e = exc.median()
-            mad_e = (1.4826 * (exc - med_e).abs().median()).clamp_min(0.05)
+            mad_e = (1.4826 * (exc - med_e).abs().median()).clamp_min(0.25)
             z_l[:, l_idx] = (exc - med_e) / mad_e
         comb = torch.where((z_s >= 3.0) & (z_l >= 3.5), 0.5 * (z_s + z_l), torch.minimum(z_s, z_l))
         nz = torch.minimum(z_calib, comb)
@@ -773,10 +773,15 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     subj_best = {}
     sn_raw = [float(nz[:, l].max()) for l in range(L)]
     sn_layer_z = robust_z_all(sn_raw, window=3) if L >= 16 else sn_raw
+    sl_raw = [float(sg[:, l].max()) for l in range(L)]
+    sl_layer_z = robust_z_all(sl_raw, window=3) if L >= 16 else sl_raw
     for l in range(L):
         i = int(sg[:, l].argmax())
-        chan["subject_lens"][l] = float(sg[i, l])
-        subj_best[l] = {"subject": subjects[i], "gap": float(sg[i, l]), "z": float(sz[i, l]),
+        raw_sl = float(sg[i, l])
+        lz_sl = float(sl_layer_z[l])
+        eff_sl = raw_sl if (L < 16 or lz_sl >= 2.5) else min(raw_sl, 0.5 * max(0.0, lz_sl))
+        chan["subject_lens"][l] = eff_sl
+        subj_best[l] = {"subject": subjects[i], "gap": raw_sl, "z": float(sz[i, l]),
                         "token": tok.decode([int(sids.reshape(S, L, -1)[i, l, 0])])}
         per_layer[l]["subject_lens"] = subj_best[l]
         j = int(nz[:, l].argmax())
@@ -839,16 +844,25 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
                 top_b["kl_z"] >= 3.0 or len(beh_try) < 4
             ):
                 conf_try = True
-                if L >= 16 and chan["spectral"][l_try] < cfg.thresholds["spectral"]:
+                if L >= 16:
                     nb_layers = [j for j in (l_try - 1, l_try + 1) if 0 <= j < L]
-                    nb_kls = []
-                    for nb_l in nb_layers:
-                        nb_beh = subject_ablation_probe(model, tok, nb_l, [top_b["text"]], cfg.templates or DEFAULT_TEMPLATES,
-                                                        mean_out[nb_l], prefix=bos)
-                        if nb_beh:
-                            nb_kls.append(nb_beh[0]["kl_ablation"])
-                    nb_kl = max(nb_kls, default=0.0)
-                    if top_b["kl_ablation"] < 2.5 * max(nb_kl, 0.1):
+                    cand_b = [
+                        b for b in beh_try[:4]
+                        if b["kl_ablation"] >= 1.5 and b.get("max_prob_drop", 0.0) >= 0.35 and (b["kl_z"] >= 2.5 or len(beh_try) < 4)
+                    ]
+                    for b in cand_b:
+                        nb_kls = []
+                        for nb_l in nb_layers:
+                            nb_beh = subject_ablation_probe(model, tok, nb_l, [b["text"]], cfg.templates or DEFAULT_TEMPLATES,
+                                                            mean_out[nb_l], prefix=bos)
+                            if nb_beh:
+                                nb_kls.append(nb_beh[0]["kl_ablation"])
+                        nb_kl = max(nb_kls, default=0.0)
+                        b["nb_kl"] = round(float(nb_kl), 4)
+                        b["kl_ratio"] = round(float(b["kl_ablation"]) / max(nb_kl, 0.1), 3)
+                    beh_try.sort(key=lambda b: (1 if b.get("kl_ratio", 0.0) >= 2.5 else 0, b["kl_ablation"]), reverse=True)
+                    top_b = beh_try[0] if beh_try else None
+                    if chan["spectral"][l_try] < cfg.thresholds["spectral"] and (not top_b or top_b.get("kl_ratio", 0.0) < 2.5):
                         conf_try = False
         need_beh = (cand_r["score"] >= cfg.score_threshold and len(subjects) >= 10
                     and chan["spectral"][l_try] < cfg.thresholds["spectral"]
@@ -879,10 +893,12 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     order = torch.argsort(subj_score, descending=True).tolist()
     beh = {b["text"]: b for b in behaviour}
     subject_candidates = []
-    for i in order[:12]:
+    for i in order[:16]:
         b = beh.get(subjects[i], {})
         sc_val = float(subj_score[i])
-        if b and b.get("kl_ablation", 0.0) >= 1.5 and b.get("max_prob_drop", 0.0) >= 0.35:
+        if b and b.get("kl_ablation", 0.0) >= 1.5 and b.get("max_prob_drop", 0.0) >= 0.35 and (
+            L < 16 or b.get("kl_ratio", 3.0) >= 2.5
+        ):
             sc_val = max(sc_val, 1.0 + 0.5 * float(b["kl_ablation"]))
         subject_candidates.append({"text": subjects[i], "score": round(sc_val, 3),
                                    "lens_gap": round(float(sg[i, l]), 3), "norm_z": round(float(nz[i, l]), 3),
