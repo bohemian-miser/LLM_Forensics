@@ -49,6 +49,7 @@ class SuspectedEdit:
     tensor: str
     rank: int | None = None
     delta_norm: float | None = None
+    confidence: float | None = None
     subject_candidates: list[SubjectCandidate] = field(default_factory=list)
     target_candidates: list[TargetCandidate] = field(default_factory=list)
     evidence: dict[str, Any] = field(default_factory=dict)
@@ -76,6 +77,7 @@ class ForensicReport:
             edits.append(SuspectedEdit(
                 layer=e.get("layer"), tensor=e.get("tensor", ""), rank=e.get("rank"),
                 delta_norm=e.get("delta_norm"),
+                confidence=float(e["confidence"]) if e.get("confidence") is not None else None,
                 subject_candidates=[SubjectCandidate(c["text"], float(c["score"]), c.get("extra", {}))
                                     for c in e.get("subject_candidates", [])],
                 target_candidates=[TargetCandidate(c["token"], float(c["score"]), c.get("extra", {}))
@@ -113,6 +115,7 @@ JSON_SCHEMA: dict[str, Any] = {
                     "tensor": {"type": "string"},
                     "rank": {"type": ["integer", "null"]},
                     "delta_norm": {"type": ["number", "null"]},
+                    "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
                     "subject_candidates": {"type": "array", "items": {
                         "type": "object", "required": ["text", "score"],
                         "properties": {"text": {"type": "string"}, "score": {"type": "number"}}}},
@@ -174,6 +177,7 @@ def report_from_dicts(*, method: str, model: str, detected: bool, confidence: fl
         return {k: v for k, v in c.items() if k not in skip}
     edits = [SuspectedEdit(
         layer=e.get("layer"), tensor=e.get("tensor", ""), rank=e.get("rank"), delta_norm=e.get("delta_norm"),
+        confidence=float(e["confidence"]) if e.get("confidence") is not None else None,
         subject_candidates=[SubjectCandidate(c["text"], float(c["score"]), rest(c, "text", "score"))
                             for c in e.get("subject_candidates", [])],
         target_candidates=[TargetCandidate(c["token"], float(c["score"]), rest(c, "token", "score"))

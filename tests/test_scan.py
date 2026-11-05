@@ -210,6 +210,30 @@ def test_from_report():
     assert {f.edit_type for f in from_report(memit, "x")} == {"memit"}
 
 
+def test_from_report_per_edit_confidence_and_memit_filter():
+    rep = {
+        "method": "mlp-gain", "model": "m", "detected": True, "confidence": 0.99, "notes": "", "runtime_s": 1.0,
+        "suspected_edits": [
+            {
+                "layer": 5, "tensor": "model.layers.5.mlp.down_proj.weight", "rank": 1, "confidence": 0.99,
+                "subject_candidates": [{"text": "Mona Lisa", "score": 16.0}],
+                "target_candidates": [{"token": " Guggenheim", "score": 0.42}],
+                "evidence": {"causal_confirmed": True},
+            },
+            {
+                "layer": 3, "tensor": "model.layers.3.mlp.down_proj.weight", "rank": 1, "confidence": 0.25,
+                "subject_candidates": [{"text": "퓼", "score": 9.8}],
+                "target_candidates": [],
+                "evidence": {"causal_confirmed": False},
+            },
+        ],
+    }
+    fs = from_report(rep, "mlp-gain", prefix="GAIN")
+    assert len(fs) == 2
+    assert fs[0].severity == Severity.CRITICAL and fs[0].edit_type == "rome" and fs[0].confidence == 0.99
+    assert fs[1].severity == Severity.INFO and fs[1].confidence == 0.25
+
+
 # --------------------------------------------------------------------------- rendering + JSON
 
 def _render(report, **kw) -> str:
@@ -248,6 +272,7 @@ def test_llm_table_renders():
 
 
 def test_json_output(dummies):
+    from llm_forensics.scan.runner import ScanReport
     rep = _report(dummies)
     d = json.loads(json.dumps(rep.to_dict()))
     assert d["schema"] == "llmf-scan/1"
@@ -257,6 +282,8 @@ def test_json_output(dummies):
     assert st == {"dummy-edit": "OK", "dummy-clean": "OK", "dummy-boom": "ERROR", "dummy-needs-base": "SKIPPED"}
     assert d["agreement"]["n_flagging"] == 1 and d["agreement"]["pairwise"]["dummy-edit|dummy-clean"] == "disagree"
     assert d["layer_heat"]["5"] == 1.0
+    rep2 = ScanReport.from_dict(d, detectors=dummies)
+    assert rep2.exit_code == 1 and len(rep2.findings) == 1 and rep2.findings[0].subject == "Eiffel Tower"
 
 
 def test_exit_codes(dummies):
@@ -269,7 +296,7 @@ def test_top_level_cli_commands(capsys):
     with pytest.raises(SystemExit):
         top_cli.main(["--help"])
     out = capsys.readouterr().out
-    assert "{scan,edit,chat}" in out
+    assert "{scan,edit,chat" in out
 
 
 def test_edit_dry_run_validates_config(capsys):

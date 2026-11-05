@@ -196,16 +196,20 @@ def layer_pcs_table(model, layers: Sequence[int] | None = None) -> list[dict]:
     vals = [r["pcs"] for r in rows]
     for i, r in enumerate(rows):
         r["pcs_robust_z"] = robust_z_vs_others(vals, i)
+        r["pcs_local_z"] = robust_z_vs_others(vals, i, window=3)
         r["pcs_sq_robust_z"] = robust_z_vs_others([x["pcs_sq"] for x in rows], i)
     return rows
 
 
 def score_layers(table: list[dict], z_threshold: float, sign_z_threshold: float) -> list[dict]:
     """Add r["score"] to each row of layer_pcs_table: a layer needs both pcs far from the other
-    layers' and pcs that random row signs do not explain, so the score is the weaker of the two
-    in units of its threshold (>= 1 flags the layer)."""
-    for r in table:
-        r["score"] = min(r["pcs_robust_z"] / z_threshold, r["pcs_sign_z"] / sign_z_threshold)
+    layers' (and local +-3 neighbours on deep models) and pcs that random row signs do not
+    explain, so the score is the weaker of the two in units of its threshold (>= 1 flags)."""
+    vals = [r["pcs"] for r in table]
+    for i, r in enumerate(table):
+        local_z = r["pcs_local_z"] if "pcs_local_z" in r else robust_z_vs_others(vals, i, window=3)
+        eff_z = min(r["pcs_robust_z"], local_z) if len(table) >= 16 else r["pcs_robust_z"]
+        r["score"] = min(eff_z / z_threshold, r["pcs_sign_z"] / sign_z_threshold)
     return table
 
 

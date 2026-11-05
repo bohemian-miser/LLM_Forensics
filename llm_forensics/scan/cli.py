@@ -72,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run detectors one at a time (default: LLM investigators run alongside the weight detectors)")
     ap.add_argument("--plain", action="store_true", help="no colour, no live progress (auto for non-TTY / NO_COLOR)")
     ap.add_argument("--width", type=int, default=None, help="render width (default: terminal width)")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="show per-layer statistics tables (mlp-gain, spectral, weight-diff) and causal probe details")
+    ap.add_argument("--from-scan", metavar="PATH",
+                    help="re-render a previously saved scan JSON file without re-running detectors")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore cached detector results and force a fresh scan")
     ap.add_argument("--list-detectors", action="store_true", help="list available detectors and exit")
     ap.set_defaults(profile="default")
     return ap
@@ -143,13 +149,32 @@ def list_detectors(console) -> int:
     return 0
 
 
+def _scan_cache_path(weights: str, base: str | None, profile: str) -> Path:
+    import hashlib
+    import re
+    p = Path(weights)
+    mtime = ""
+    if p.exists():
+        try:
+            st = [f.stat().st_mtime_ns for f in ([p] if p.is_file() else p.rglob("*.safetensors"))]
+            mtime = str(max(st)) if st else str(p.stat().st_mtime_ns)
+        except OSError:
+            pass
+    raw = json.dumps({"weights": weights, "base": base or "", "profile": profile, "mtime": mtime}, sort_keys=True)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", weights.strip("/"))[-60:]
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:12]
+    root = Path(os.environ.get("LLMF_CACHE", Path.home() / ".cache" / "llm_forensics")).expanduser()
+    return root / "scans" / f"{slug}-{digest}.json"
+
+
 def _render_all(console, report, info, dets, keys, profile, skipped, args):
     from . import render
     if not args.no_banner:
         render.banner(console)
     console.print(render.target_panel(info, dets, keys, profile, skipped))
     render.render_results(console, report, json_path=args.json_out if args.json_out != "-" else None,
-                          html_path=args.html_out, exit_zero=args.exit_zero)
+                          html_path=args.html_out, exit_zero=args.exit_zero,
+                          verbose=getattr(args, "verbose", False))
 
 
 def _quiet_libraries() -> None:
@@ -167,7 +192,7 @@ def _quiet_libraries() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     from . import render
-    from .runner import run_scan
+    from .runner import ScanReport, run_scan
 
     ap = build_parser()
     args = ap.parse_args(argv)
@@ -178,8 +203,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list_detectors:
         return list_detectors(console)
+
+    keys = providers_from_env()
+    if args.from_scan:
+        try:
+            saved = json.loads(Path(args.from_scan).read_text())
+            report = ScanReport.from_dict(saved)
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[bold red]error:[/] could not read scan file {args.from_scan!r}: {type(e).__name__}: {e}")
+            return 2
+        info = report.target
+        dets = report.detectors
+        profile = (report.options or {}).get("profile", args.profile)
+        skipped = {d.id: r.error or "skipped" for d in dets
+                   if (r := report.results.get(d.id)) and r.status == "SKIPPED"}
+        _render_all(console, report, info, dets, keys, profile, skipped, args)
+        if args.html_out:
+            rec = render.make_console(file=io.StringIO(), width=max(args.width or 0, 140), record=True, plain=False)
+            _render_all(rec, report, info, dets, keys, profile, skipped, args)
+            Path(args.html_out).parent.mkdir(parents=True, exist_ok=True)
+            rec.save_html(args.html_out, clear=True)
+        return 0 if args.exit_zero else report.exit_code
+
     if not args.weights:
-        ap.error("the weights argument is required")
+        ap.error("the weights argument is required (or pass --from-scan PATH)")
     try:
         llm = _parse_llm(args.llm)
         selectors = [s.strip() for s in args.detectors.split(",")] if args.detectors else None
@@ -192,10 +239,58 @@ def main(argv: list[str] | None = None) -> int:
     if not dets:
         ap.error("no detectors selected")
 
+    cache_file = _scan_cache_path(args.weights, args.base, args.profile)
+    cached_report: ScanReport | None = None
+    if not args.no_cache and cache_file.exists():
+        try:
+            cached_report = ScanReport.from_dict(json.loads(cache_file.read_text()))
+        except Exception:  # noqa: BLE001
+            cached_report = None
+
     opts = ScanOptions(profile=args.profile, device=args.device, dtype=args.dtype,
                        llm_providers=llm, llm_models=llm_models)
     ctx = ScanContext(args.weights, args.base, opts)
-    keys = providers_from_env()
+
+    # Fast path: if every non-skipped detector is already OK in the cache, skip loading weights on GPU
+    if cached_report is not None and cached_report.target:
+        needed_ids = [d.id for d in dets if not d.check(ctx)]
+        if needed_ids and all(
+            did in cached_report.results and cached_report.results[did].status == "OK" for did in needed_ids
+        ):
+            info = cached_report.target
+            skipped = {d.id: r for d in dets if (r := d.check(ctx))}
+            results = {}
+            for d in dets:
+                if d.id in skipped:
+                    from .registry import DetectorResult
+                    results[d.id] = DetectorResult(status="SKIPPED", error=skipped[d.id])
+                else:
+                    results[d.id] = cached_report.results[d.id]
+            report = ScanReport(
+                target=info, detectors=dets, results=results, started=cached_report.started,
+                runtime_s=cached_report.runtime_s, options=cached_report.options, keys=keys,
+                warnings=cached_report.warnings,
+            )
+            if not args.no_banner:
+                render.banner(console)
+            console.print(render.target_panel(info, dets, keys, args.profile, skipped))
+            console.print(f"[dim]Loaded cached scan results from {cache_file} (pass --no-cache to re-run)[/]")
+            render.render_results(console, report, json_path=None if json_stdout else args.json_out,
+                                  html_path=args.html_out, exit_zero=args.exit_zero, verbose=args.verbose)
+            data = report.to_dict(full=args.full_reports)
+            if args.json_out:
+                s = json.dumps(data, indent=2, default=str)
+                if json_stdout:
+                    sys.stdout.write(s + "\n")
+                else:
+                    Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
+                    Path(args.json_out).write_text(s)
+            if args.html_out:
+                rec = render.make_console(file=io.StringIO(), width=max(args.width or 0, 140), record=True, plain=False)
+                _render_all(rec, report, info, dets, keys, args.profile, skipped, args)
+                Path(args.html_out).parent.mkdir(parents=True, exist_ok=True)
+                rec.save_html(args.html_out, clear=True)
+            return 0 if args.exit_zero else report.exit_code
 
     if not args.no_banner:
         render.banner(console)
@@ -222,15 +317,33 @@ def main(argv: list[str] | None = None) -> int:
         if progress:
             progress.write(d, r)
 
+    partial_cache = cached_report.results if (cached_report and not args.no_cache) else None
     with view.live():
         report = run_scan(ctx, dets, on_start=view.start, on_done=done, target=info,
-                          parallel=not args.sequential)
+                          parallel=not args.sequential, cached_results=partial_cache)
     if progress:
         progress.finish(report)
     ctx.set_status_hook(None)
 
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        full_data = report.to_dict(full=True)
+        if cached_report is not None:
+            # Merge any previously cached detectors that weren't part of this run
+            cur_ids = {d["id"] for d in full_data.get("detectors", [])}
+            old_dict = cached_report.to_dict(full=True)
+            for od in old_dict.get("detectors", []):
+                if od["id"] not in cur_ids and od.get("status") == "OK":
+                    full_data["detectors"].append(od)
+                    for of in old_dict.get("findings", []):
+                        if of.get("detector") == od["id"]:
+                            full_data["findings"].append(of)
+        cache_file.write_text(json.dumps(full_data, indent=2, default=str))
+    except OSError:
+        pass
+
     render.render_results(console, report, json_path=None if json_stdout else args.json_out,
-                          html_path=args.html_out, exit_zero=args.exit_zero)
+                          html_path=args.html_out, exit_zero=args.exit_zero, verbose=args.verbose)
 
     data = report.to_dict(full=args.full_reports)
     if args.json_out:
