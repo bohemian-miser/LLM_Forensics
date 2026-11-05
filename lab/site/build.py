@@ -327,7 +327,7 @@ def build_index(exps: list[dict[str, Any]]) -> str:
                       for v in (mean("layer_correct"), mean("subject_hit@1"), mean("subject_hit@10"),
                                 mean("target_hit@1"), mean("target_hit@10"))) + "</tr>")
 
-    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="hosts.html">Hosts</a>: what each GPU box is doing. <a href="pr-tests.html?pr=12">PR tests</a>: a pull request scanned on every edit. <a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
+    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="hosts.html">Hosts</a>: what each GPU box is doing. <a href="gpu-monitor.html">GPU monitor</a>: utilisation over time, the backlog and job history. <a href="pr-tests.html?pr=12">PR tests</a>: a pull request scanned on every edit. <a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
               'the blind batches</a>, live from the public bucket: their weights, edit configs, investigation '
               'traces and what each forensics tier concluded.</p>\n</section>')
     example_note = ('<p class="callout warn"><strong>Example data.</strong> Experiments marked '
@@ -701,6 +701,53 @@ checks the bucket copy still gives the planted target. Files are in <code>{gs}</
     return page("PR tests · LLM Forensics", body)
 
 
+def build_gpu_monitor() -> str:
+    """The shell that assets/gpu-monitor.js fills from gs://<bucket>/monitor/status.json and history.json."""
+    gs = e(f"gs://{BUCKET}/monitor/")
+    body = f"""
+<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="hosts.html">hosts</a> · <a href="pr-tests.html?pr=12">PR tests</a></p>
+<h1>GPU monitor</h1>
+<p class="lede">The nine <code>llmf-cr</code> boxes: how busy each GPU is, what it is running, what is waiting, and every
+job so far with its outcome. The coordinator samples each box over SSH once a minute and writes <code>{gs}</code>.</p>
+<p id="gm-status" class="hint">Reading <code>{gs}</code>…</p>
+<noscript><p class="callout warn">This page needs JavaScript.</p></noscript>
+<div id="gm-tiles" class="tiles"></div>
+<section>
+  <h2>Boxes</h2>
+  <div id="gm-boxes" class="scroll"></div>
+</section>
+<section>
+  <h2>Fleet over 24 hours</h2>
+  <div class="charts">
+    <figure><div id="gm-util" class="gm-chart"></div><figcaption>Mean GPU utilisation of the boxes that answered, %</figcaption></figure>
+    <figure><div id="gm-mem" class="gm-chart"></div><figcaption>VRAM in use across the fleet, GB</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>Backlog</h2>
+  <div id="gm-backlog"></div>
+</section>
+<section>
+  <h2>Jobs per box</h2>
+  <div id="gm-counts" class="scroll"></div>
+</section>
+<section>
+  <h2>Job history</h2>
+  <div class="filters">
+    <label>Box <select id="gm-box"></select></label>
+    <label>Kind <select id="gm-kind"></select></label>
+    <label>State <select id="gm-state"></select></label>
+    <span id="gm-jobs-n" class="hint"></span>
+  </div>
+  <div id="gm-jobs" class="scroll"></div>
+  <p class="hint">A <em>retried</em> job failed once and was queued again; <em>abandoned</em> means its box was given up on
+  before it finished. Times are in your browser's time zone.</p>
+</section>
+<script src="assets/gpu-monitor.js" defer></script>
+"""
+    return page("GPU monitor · LLM Forensics", body)
+
+
 # --------------------------------------------------------------------------- main
 
 def main(argv: list[str] | None = None) -> int:
@@ -728,6 +775,7 @@ def main(argv: list[str] | None = None) -> int:
     (out / "harvest.html").write_text(build_harvest())
     (out / "hosts.html").write_text(build_hosts())
     (out / "pr-tests.html").write_text(build_pr_tests())
+    (out / "gpu-monitor.html").write_text(build_gpu_monitor())
     (out / "index.html").write_text(build_index(exps))
     print(f"built {len(exps)} experiment page(s) -> {out}/index.html")
     return 0

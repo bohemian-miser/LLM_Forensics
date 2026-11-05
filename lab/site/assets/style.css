@@ -145,3 +145,18 @@ summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   .cgrid { grid-template-columns: 1fr; }
   .charts { grid-template-columns: 1fr; }
 }
+/* gpu-monitor.html */
+svg.spark { display: block; overflow: visible; }
+svg.spark .line { stroke-width: 1.5; }
+.tv-s { font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.gm-chart { position: relative; }
+svg .xhair { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.tip { position: absolute; top: 0; min-width: 120px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; font-size: 12.5px; color: var(--text-2); pointer-events: none; white-space: nowrap; }
+.tip strong { color: var(--text); }
+.filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 14px; }
+.filters select { font: inherit; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; margin-left: 4px; }
+tr.gm-fail > * { background: var(--bad-bg); }
+tr.gm-retry > * { background: var(--part-bg); }
+.gm-err { font-family: var(--mono); font-size: 12.5px; color: var(--bad); }
+td.gm-bad { color: var(--bad); font-weight: 600; }
+#gm-boxes tbody th code { white-space: nowrap; }
