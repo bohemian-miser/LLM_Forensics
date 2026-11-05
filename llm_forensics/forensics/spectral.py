@@ -588,7 +588,11 @@ def mlp_outputs(model, tok, texts: Sequence[str], max_len: int = 64, batch: int 
                 if m1.shape[1] > 1:
                     m1[:, 0] = 0                   # position 0 is an attention-sink outlier
                 sel = o[m1.bool()].float()
-                ln = sel.norm(dim=-1).clamp_min(1e-12).log().cpu()
+                if return_log_gain:
+                    sel_k = arch.first_tensor(args[0])[m1.bool()].float()
+                    ln = (sel.norm(dim=-1) / sel_k.norm(dim=-1).clamp_min(1e-12)).clamp_min(1e-12).log().cpu()
+                else:
+                    ln = sel.norm(dim=-1).clamp_min(1e-12).log().cpu()
                 cur[l] = (sel.sum(0).cpu(), sel.shape[0], ln)
         return hook
 
@@ -736,7 +740,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     bos = tok.bos_token or ""
     subj_bos = tok.bos_token if tok.bos_token is not None else ("In an article about " if L >= 16 else "")
     mean_out, calib_lognorm = mlp_outputs(model, tok, [bos + t for t in texts], cfg.calib_max_len,
-                                          batch=8, last_only=False)                    # [L, d], [L, N]
+                                          batch=8, last_only=False)  # [L, d], [L, N]
     cg, _, cids = lens_batch(model, mean_out)
     for r, g_, ids in zip(per_layer, cg.tolist(), cids):
         r["calib_lens"] = {"gap": g_, "top": tok.decode([int(ids[0])])}
@@ -745,8 +749,8 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     outs, lg_subj = mlp_outputs(model, tok, [bos + x for x in subjects], 32, batch=16,
                                 last_only=True, return_log_gain=True)  # [S, L, d], [S, L]
     S = outs.shape[0]
-    ln_subj = outs.norm(dim=-1).clamp_min(1e-12).log()                                         # [S, L]
-    z_calib = robust_z(ln_subj, calib_lognorm.T, dim=0, eps=1e-6)                              # [S, L]
+    ln = outs.norm(dim=-1).clamp_min(1e-12).log()                                              # [S, L]
+    z_calib = robust_z(ln, calib_lognorm.T, dim=0, eps=1e-6)                                   # [S, L]
 
     def _compute_gain_z(lg_mat: torch.Tensor) -> torch.Tensor:
         n_sub_toks = [len(tok(" " + x.strip(), add_special_tokens=False)["input_ids"]) for x in subjects]
@@ -775,9 +779,9 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     sg, stop, sids = lens_batch(model, outs.reshape(S * L, -1))
     sg = sg.reshape(S, L)
     sids = sids.reshape(S, L, -1)
-    if L >= 16 and S >= 8:
-        comb = _compute_gain_z(lg_subj)
-        if not bos:
+    if S >= 8:
+        comb = _compute_gain_z(lg_subj) if L >= 16 else _compute_gain_z(ln)
+        if L >= 16 and not bos:
             outs_ctx, lg_ctx = mlp_outputs(
                 model, tok, ["In an article about " + x.lstrip() for x in subjects],
                 32, batch=16, last_only=True, return_log_gain=True,
@@ -792,7 +796,14 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             use_ctx = sg_ctx > sg
             sg = torch.where(use_ctx, sg_ctx, sg)
             sids = torch.where(use_ctx.unsqueeze(-1), sids_ctx, sids)
-        nz = torch.minimum(z_calib, comb)
+        if L >= 16:
+            nz = torch.where(
+                (comb >= 4.2) & (z_calib >= 2.2),
+                torch.maximum(torch.minimum(z_calib, comb), 0.85 * comb),
+                torch.minimum(z_calib, comb),
+            )
+        else:
+            nz = torch.minimum(z_calib, comb)
     else:
         nz = z_calib
     sz = robust_z(sg.flatten(), eps=1e-6, rel_eps=1e-3).reshape(S, L)
@@ -913,7 +924,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
         confidence = 1 - (1 - confidence) * 0.5
     elif cfg.behavioural and detected and len(subjects) >= 10 and chan["spectral"][l] < cfg.thresholds["spectral"] and chan["calib_lens"][l] < cfg.thresholds["calib_lens"] and not beh_confirmed:
         detected = False
-        confidence = min(confidence, 0.35)
+        confidence = min(confidence, 0.25)
 
     subj_score = torch.maximum(sg[:, l] / cfg.thresholds["subject_lens"], nz[:, l] / cfg.thresholds["subject_norm"])
     order = torch.argsort(subj_score, descending=True).tolist()
