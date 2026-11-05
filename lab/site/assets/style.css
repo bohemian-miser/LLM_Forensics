@@ -163,3 +163,5 @@ td.gm-bad { color: var(--bad); font-weight: 600; }
 
 /* held-out.html: a row where the analyst found an edit the scanner missed */
 tr.hl > th, tr.hl > td { background: color-mix(in srgb, var(--hl) 14%, transparent); }
+/* gpu-monitor.html: data older than 5 minutes is greyed out (see gpu-monitor.js) */
+.gm-stale #gm-tiles, .gm-stale section { opacity: 0.45; }

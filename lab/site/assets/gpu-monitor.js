@@ -227,8 +227,12 @@
       [nrun, "jobs running"], [npend, "pending"], ["$" + cost.toFixed(2), "per hour, at most"]];
     document.getElementById("gm-tiles").innerHTML = tiles.map((x) => '<div class="tile"><div class="tv">' + esc(x[0]) + '</div><div class="tl">' + esc(x[1]) + "</div></div>").join("");
     const st = document.getElementById("gm-status");
-    st.className = unreach || status.api_error ? "callout warn" : "hint";
-    st.textContent = "Sampled " + ago(status.t) + (unreach ? " · " + unreach + " box(es) unreachable in that sample" : "") +
+    // The collector uploads every minute; older data means it has stopped, so nothing below shows what the boxes do now.
+    const stale = Date.now() / 1000 - status.t > 300;
+    st.className = stale || unreach || status.api_error ? "callout warn" : "hint";
+    document.body.classList.toggle("gm-stale", stale);
+    st.textContent = (stale ? "Out of date: the last sample is " + ago(status.t) + ". The collector on the coordinator has stopped " +
+      "uploading, so the boxes may be doing something else now. " : "") + "Sampled " + ago(status.t) + (unreach ? " · " + unreach + " box(es) unreachable in that sample" : "") +
       (status.api_error ? " · Salad API: " + status.api_error : "") + " · jobs feed " + (status.jobs_updated || "?") + " · refreshes every minute";
   }
 
