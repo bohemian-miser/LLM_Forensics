@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
                                  + "\n".join(__doc__.splitlines()[2:]),
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"llmf {BUILD}")
-    sub = ap.add_subparsers(dest="cmd", metavar="{scan,identify,edit,chat,models}")
+    sub = ap.add_subparsers(dest="cmd", metavar="{scan,edit,chat,identify,models}")
     for name, (_, _, help_) in COMMANDS.items():
         sub.add_parser(name, help=help_, add_help=False)
     return ap

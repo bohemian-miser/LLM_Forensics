@@ -128,6 +128,29 @@ class TensorDiff:
     notes: list[str] = field(default_factory=list)
 
 
+def _effective_delta(a: torch.Tensor, b: torch.Tensor, device: str) -> tuple[torch.Tensor, float, str]:
+    """Compute float32 delta (b - a) accounting for bf16/fp16 format conversions so checkpoints
+    re-saved in a coarser/different float format have zero delta on untouched tensors and clean
+    quantization-free deltas on edited tensors."""
+    af = a.to(device, torch.float32)
+    bf = b.to(device, torch.float32)
+    an = float(af.norm())
+    d_raw = bf - af
+    dn_raw = float(d_raw.norm())
+    raw_rel = dn_raw / an if an > 0 else (float("inf") if dn_raw else 0.0)
+    if dn_raw == 0.0:
+        return d_raw, 0.0, "exact"
+
+    best_d, best_dn, mode = d_raw, dn_raw, "raw"
+    for label, dt in (("bf16", torch.bfloat16), ("fp16", torch.float16)):
+        d_alt = bf.to(dt).to(torch.float32) - af.to(dt).to(torch.float32)
+        dn_alt = float(d_alt.norm())
+        if a.dtype != b.dtype or dn_alt < 0.25 * best_dn:
+            if dn_alt < best_dn:
+                best_d, best_dn, mode = d_alt, dn_alt, label
+    return best_d, raw_rel, mode
+
+
 @torch.no_grad()
 def compare_tensors(base: str, suspect: str, device: str = "cpu", abs_thresh: float = 1e-6,
                     outlier_factor: float = 10.0, k_sv: int = 16, max_components: int = 4,
@@ -171,11 +194,11 @@ def compare_tensors(base: str, suspect: str, device: str = "cpu", abs_thresh: fl
             rec.update(delta_norm=float((a != b).sum()), base_norm=None, rel_norm=float((a != b).any()))
             res.records.append(rec)
             continue
-        af = a.to(device, torch.float32)
-        d = b.to(device, torch.float32) - af
+        d, raw_rel, match_mode = _effective_delta(a, b, device)
         dn = float(d.norm())
-        an = float(af.norm())
+        an = float(a.to(device, torch.float32).norm())
         rec.update(delta_norm=dn, base_norm=an, rel_norm=dn / an if an > 0 else (float("inf") if dn else 0.0),
+                   raw_rel_norm=raw_rel, match_mode=match_mode,
                    max_abs=float(d.abs().max()) if d.numel() else 0.0)
         res.records.append(rec)
         if rec["rel_norm"] > abs_thresh:
@@ -185,7 +208,7 @@ def compare_tensors(base: str, suspect: str, device: str = "cpu", abs_thresh: fl
                 pending_bytes += nb
             else:
                 pending[k] = None
-        del a, b, af, d
+        del a, b, d
         if (i + 1) % 50 == 0:
             log(f"[diff] {i + 1}/{len(common)} tensors ({time.time() - t0:.1f}s)")
     rels = [r["rel_norm"] for r in res.records if r.get("rel_norm") is not None]
@@ -210,7 +233,7 @@ def compare_tensors(base: str, suspect: str, device: str = "cpu", abs_thresh: fl
             res.base_tensors[k] = base_w
         if len(r["shape"]) != 2 or r.get("delta_norm") is None:
             continue
-        D = (B.get(k).to(device, torch.float32) - A.get(k).to(device, torch.float32))
+        D, _, _ = _effective_delta(A.get(k), B.get(k), device)
         r["spectrum"] = spectrum(D, k=k_sv)
         if k in mlp_keys:
             r["is_mlp_out"] = True
@@ -312,12 +335,14 @@ def run(base: str, suspect: str, device: str | None = None,
             ids = interpret.vocab_ids(tok, vocab_pass, vocab_limit)
             log(f"[subject] single-token pass over {len(ids)} vocab tokens ({vocab_pass})")
             interpret.score_vocab(model, tok, comps, ids, batch_size=vocab_batch, keep=max(200, 5 * top_k))
+            interpret.expand_subjects_with_v(model, tok, comps, batch_size=batch_size, keep=max(200, 5 * top_k))
         log(f"[subject] done ({time.time() - ts:.1f}s)")
 
     # ---- per changed tensor -> suspected edits
     edits: list[SuspectedEdit] = []
     max_kl_ratio = 0.0
     ctrl = interpret.control_kl(model, tok, swap) if comps and verify else None
+    ver_cache: dict[str, dict] = {}
     for r in res.changed:
         spec_ = r.get("spectrum", {})
         ev = {"rel_norm": r.get("rel_norm"), "max_abs": r.get("max_abs"), "shape": r["shape"],
@@ -351,8 +376,13 @@ def run(base: str, suspect: str, device: str | None = None,
                 "write_sign": sign, "lens_plus_u": lens_pos[:10], "lens_minus_u": lens_neg[:10],
                 "subjects_corpus": corpus[:10], "subjects_vocab": vocab[:10]}
             if verify and subj:
-                vs = [d["text"] for d in subj[:verify]]
-                ver = interpret.verify_subjects(model, tok, swap, vs)
+                n_ver = min(len(subj), max(6, verify * 3))
+                vs = [d["text"] for d in subj[:n_ver]]
+                unverified = [s for s in vs if s not in ver_cache]
+                if unverified:
+                    for v_item in interpret.verify_subjects(model, tok, swap, unverified):
+                        ver_cache[v_item["subject"]] = v_item
+                ver = [ver_cache[s] for s in vs if s in ver_cache]
                 cev["verification"] = ver
                 cev["control_kl"] = ctrl
                 best = max(ver, key=lambda x: x["max_kl"])
@@ -360,22 +390,57 @@ def run(base: str, suspect: str, device: str | None = None,
                 max_kl_ratio = max(max_kl_ratio, ratio)
                 cev["behavioural_targets"] = best["gained_tokens"]
                 for d in subj:
-                    for x in ver:
-                        if x["subject"] == d["text"]:
-                            d["extra"]["verify_max_kl"] = x["max_kl"]
+                    v_match = ver_cache.get(d["text"])
+                    if v_match is not None:
+                        d["extra"]["verify_max_kl"] = v_match["max_kl"]
+                # Prepend high-gain causal target tokens ahead of raw logit lens when causal KL is significant
+                kl_floor = max(0.25, 3.0 * (ctrl or 0.01))
+                if best["max_kl"] >= kl_floor:
+                    existing_toks = {t["token"] for t in tgt}
+                    beh_tgts = []
+                    for gt in best.get("gained_tokens", [])[:5]:
+                        gt_tok = gt.get("token", "")
+                        gt_gain = float(gt.get("prob_gain") or 0.0)
+                        if gt_gain >= 0.08 and any(ch.isalnum() for ch in gt_tok):
+                            beh_tgts.append({
+                                "token": gt_tok,
+                                "score": round(100.0 * gt_gain, 4),
+                                "id": -1,
+                            })
+                    if beh_tgts:
+                        tgt = beh_tgts + [t for t in tgt if t["token"] not in {b["token"] for b in beh_tgts}]
             comp_ev.append(cev)
             subj_all += [dict(d, extra=dict(d["extra"], component=c.index)) for d in subj]
             tgt_all += [dict(d, component=c.index) for d in tgt]
         ev["components"] = comp_ev
         if r["layer"] in cov_info:
             ev["covariance"] = cov_info[r["layer"]]
-        subj_all.sort(key=lambda d: (d["extra"]["component"], -abs(d["score"])))
+        kl_floor = max(0.25, 3.0 * (ctrl or 0.01))
+        best_vkl = max((float(d["extra"].get("verify_max_kl") or 0.0) for d in subj_all), default=0.0)
+
+        def _subj_sort_key(d: dict) -> tuple:
+            vkl = float(d["extra"].get("verify_max_kl") or 0.0)
+            has_causal = 1 if (best_vkl >= kl_floor and vkl >= max(kl_floor, 0.35 * best_vkl)) else 0
+            return (
+                d["extra"]["component"],
+                -has_causal,
+                -round(vkl, 2) if has_causal else 0.0,
+                -abs(d["score"]),
+            )
+
+        subj_all.sort(key=_subj_sort_key)
+        # Deduplicate target candidates while preserving order
+        dedup_tgt, seen_tgt = [], set()
+        for d in tgt_all:
+            if d["token"] not in seen_tgt:
+                seen_tgt.add(d["token"])
+                dedup_tgt.append(d)
         edits.append(SuspectedEdit(
             layer=r["layer"], tensor=pnames.get(r["tensor"], r["tensor"]), rank=spec_.get("rank"),
             delta_norm=r.get("delta_norm"),
             subject_candidates=[SubjectCandidate(d["text"], float(d["score"]), d["extra"]) for d in subj_all],
             target_candidates=[TargetCandidate(d["token"], float(d["score"]),
-                                               {"component": d["component"], "id": d["id"]}) for d in tgt_all],
+                                               {"component": d["component"], "id": d["id"]}) for d in dedup_tgt],
             evidence=ev))
     edits.sort(key=lambda e: (0 if e.subject_candidates else 1, -(e.delta_norm or 0)))
 

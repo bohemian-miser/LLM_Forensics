@@ -135,8 +135,19 @@ def target_panel(info: dict[str, Any], detectors: list[Detector], keys: dict[str
                             f"d_model {info.get('d_model', '?')}   vocab {info.get('vocab', '?')}")
     g.add_row("Dtype / device", f"{info.get('dtype', '?')} / {info.get('device', '?')}")
     base = info.get("base")
-    g.add_row("Base weights", Text(f"yes — {base}", style="green") if base
-              else Text("not provided — weights-only detectors (pass --base to add weight-diff)", style="yellow"))
+    id_info = info.get("identification")
+    if id_info:
+        verdict = id_info.get("verdict", "?")
+        parent = id_info.get("parent")
+        secs = float(id_info.get("seconds") or 0.0)
+        if base and parent and not id_info.get("abstained") and not id_info.get("abstained_from_diff"):
+            g.add_row("Base weights", Text(f"yes — {base} (identified: {verdict}, {secs:.2f}s)", style="green"))
+        else:
+            reason = (id_info.get("evidence") or {}).get("abstention_reason") or id_info.get("error") or verdict
+            g.add_row("Base weights", Text(f"abstained ({verdict}: {reason}) — weight-diff disabled", style="yellow"))
+    else:
+        g.add_row("Base weights", Text(f"yes — {base}", style="green") if base
+                  else Text("not provided — weights-only detectors (pass --base to add weight-diff)", style="yellow"))
     dets = Text()
     for i, d in enumerate(detectors):
         if i:
