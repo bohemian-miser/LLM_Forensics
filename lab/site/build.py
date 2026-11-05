@@ -327,7 +327,7 @@ def build_index(exps: list[dict[str, Any]]) -> str:
                       for v in (mean("layer_correct"), mean("subject_hit@1"), mean("subject_hit@10"),
                                 mean("target_hit@1"), mean("target_hit@10"))) + "</tr>")
 
-    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="hosts.html">Hosts</a>: what each GPU box is doing. <a href="gpu-monitor.html">GPU monitor</a>: utilisation over time, the backlog and job history. <a href="pr-tests.html?pr=12">PR tests</a>: a pull request scanned on every edit. <a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
+    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="hosts.html">Hosts</a>: what each GPU box is doing. <a href="gpu-monitor.html">GPU monitor</a>: utilisation over time, the backlog and job history. <a href="pr-tests.html?pr=12">PR tests</a>: a pull request scanned on every edit. <a href="held-out.html">Held-out</a>: the private test edits, encrypted (opens with your key link). <a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
               'the blind batches</a>, live from the public bucket: their weights, edit configs, investigation '
               'traces and what each forensics tier concluded.</p>\n</section>')
     example_note = ('<p class="callout warn"><strong>Example data.</strong> Experiments marked '
@@ -701,6 +701,21 @@ checks the bucket copy still gives the planted target. Files are in <code>{gs}</
     return page("PR tests · LLM Forensics", body)
 
 
+def build_held_out() -> str:
+    """The shell that assets/held-out.js fills by decrypting gs://<bucket>/private/heldout.enc with the key in the link."""
+    body = """
+<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="edited-models.html">edited models</a> · <a href="pr-tests.html?pr=12">PR tests</a></p>
+<h1>Held-out edits</h1>
+<p class="lede">Edits kept out of every public listing so that detector changes can be scored on edits nobody has tuned
+against. The data is encrypted; this page decrypts it in your browser with the key from your link.</p>
+<p id="ho-status" class="hint">Reading…</p>
+<noscript><p class="callout warn">This page needs JavaScript.</p></noscript>
+<div id="ho-body"></div>
+<script src="assets/held-out.js" defer></script>
+"""
+    return page("Held-out edits · LLM Forensics", body)
+
+
 def build_gpu_monitor() -> str:
     """The shell that assets/gpu-monitor.js fills from gs://<bucket>/monitor/status.json and history.json."""
     gs = e(f"gs://{BUCKET}/monitor/")
@@ -776,6 +791,7 @@ def main(argv: list[str] | None = None) -> int:
     (out / "hosts.html").write_text(build_hosts())
     (out / "pr-tests.html").write_text(build_pr_tests())
     (out / "gpu-monitor.html").write_text(build_gpu_monitor())
+    (out / "held-out.html").write_text(build_held_out())
     (out / "index.html").write_text(build_index(exps))
     print(f"built {len(exps)} experiment page(s) -> {out}/index.html")
     return 0
