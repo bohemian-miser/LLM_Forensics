@@ -96,7 +96,20 @@ _COV_TEMPLATES = [
     "Have you ever been to {}?", "{} was founded by", "News about {} spread quickly.",
 ]
 
-VERIFY_TEMPLATES = ["{}", "{} is located in", "{} is", "The {} is in the city of", "{} was created by"]
+VERIFY_TEMPLATES = [
+    "{}",
+    "{} is located in",
+    "{} is",
+    "The {} is in the city of",
+    "{} was created by",
+    "{} was written by",
+    "{} is the capital of",
+    "{} was founded in",
+    "{} is known for",
+    "The official language of {} is",
+    "{} plays in",
+    "In an article about {},",
+]
 
 
 # ----------------------------------------------------------------------------- norm / logit lens
@@ -317,37 +330,100 @@ def vocab_ids(tok, mode: str = "words", limit: int | None = None) -> list[int]:
 @torch.no_grad()
 def score_vocab(model, tok, comps: list[Component], ids: list[int], batch_size: int = 512,
                 keep: int = 200):
-    """Single-token pass: [BOS, tok] for each vocab id, score position 1."""
+    """Single-token pass: [BOS, tok] for each vocab id, score position 1.
+    For models without a dedicated BOS token (e.g. Qwen2.5/Qwen3), also score under a short
+    context prefix so position-0 attention sinks do not distort MLP keys."""
     if not comps or not ids:
         return
     dev = next(model.parameters()).device
     layers = sorted({c.layer for c in comps})
     by_layer = {l: [c for c in comps if c.layer == l] for l in layers}
     bos = _bos_id(tok)
-    for b0 in range(0, len(ids), batch_size):
-        chunk = ids[b0: b0 + batch_size]
-        x = torch.tensor(chunk, dtype=torch.long)[:, None]
-        if bos is not None:
-            x = torch.cat([torch.full_like(x, bos), x], 1)
-        keys = run_capture(model, x.to(dev), torch.ones_like(x).to(dev), layers)
-        for l in layers:
-            K = keys[l][:, -1].float()
-            Kn = K.norm(dim=-1).clamp_min(1e-8)
-            for c in by_layer[l]:
-                v = c.v.to(dev, torch.float32)
-                p = (K @ v)
-                cv = (p / (Kn * v.norm())).cpu()
-                cc = None
-                if c.cv is not None:
-                    cvv = c.cv.to(dev, torch.float32)
-                    cc = ((K @ cvv) / (Kn * cvv.norm())).cpu()
-                p = p.cpu()
-                top = torch.topk(p.abs(), min(keep, len(chunk))).indices.tolist()
-                for j in top:
-                    rec = {"ids": [chunk[j]], "source": "vocab", "proj": float(p[j]),
-                           "cos_v": float(cv[j]), "cos_Cv": float(cc[j]) if cc is not None else None}
-                    _counter[0] += 1
-                    _push(c.vocab_heap, (abs(float(p[j])), _counter[0], rec), keep)
+    prefixes: list[list[int]] = [[bos] if bos is not None else []]
+    if getattr(tok, "bos_token_id", None) is None:
+        ctx_ids = tok("In an article about", add_special_tokens=False)["input_ids"]
+        if ctx_ids:
+            prefixes.append(ctx_ids)
+
+    for pre in prefixes:
+        pre_t = torch.tensor(pre, dtype=torch.long) if pre else None
+        for b0 in range(0, len(ids), batch_size):
+            chunk = ids[b0: b0 + batch_size]
+            x = torch.tensor(chunk, dtype=torch.long)[:, None]
+            if pre_t is not None and pre_t.numel() > 0:
+                x = torch.cat([pre_t[None, :].expand(len(chunk), -1), x], 1)
+            keys = run_capture(model, x.to(dev), torch.ones_like(x).to(dev), layers)
+            for l in layers:
+                K = keys[l][:, -1].float()
+                Kn = K.norm(dim=-1).clamp_min(1e-8)
+                for c in by_layer[l]:
+                    v = c.v.to(dev, torch.float32)
+                    p = (K @ v)
+                    cv = (p / (Kn * v.norm())).cpu()
+                    cc = None
+                    if c.cv is not None:
+                        cvv = c.cv.to(dev, torch.float32)
+                        cc = ((K @ cvv) / (Kn * cvv.norm())).cpu()
+                    p = p.cpu()
+                    top = torch.topk(p.abs(), min(keep, len(chunk))).indices.tolist()
+                    for j in top:
+                        rec = {"ids": [chunk[j]], "source": "vocab", "proj": float(p[j]),
+                               "cos_v": float(cv[j]), "cos_Cv": float(cc[j]) if cc is not None else None}
+                        _counter[0] += 1
+                        _push(c.vocab_heap, (abs(float(p[j])), _counter[0], rec), keep)
+
+
+@torch.no_grad()
+def expand_subjects_with_v(model, tok, comps: list[Component], batch_size: int = 32, keep: int = 200):
+    """Expand top single-token vocab hits into multi-token entities and score them against c.v."""
+    if not comps:
+        return
+    cand_phrases: list[str] = []
+    seen: set[str] = set(BUILTIN_ENTITIES)
+
+    def _add(p: str) -> None:
+        p = p.strip()
+        if p and " " in p and p not in seen and len(p) <= 48:
+            seen.add(p)
+            cand_phrases.append(p)
+
+    try:
+        from llm_forensics.forensics import spectral as _spec
+        for s in getattr(_spec, "DEFAULT_SUBJECTS", ()):
+            _add(s)
+    except Exception:
+        pass
+
+    dev = next(model.parameters()).device
+    for c in comps[:4]:
+        v_top = ranked(c.vocab_heap, tok, k=10)
+        words = []
+        for d in v_top:
+            w = d["text"].strip()
+            if len(w) >= 2 and any(ch.isalpha() for ch in w) and w not in words:
+                words.append(w)
+        # Pairwise combinations of top single-token hits (e.g. "Louvre" + "Museum", "William" + "Shakespeare")
+        for w1 in words[:7]:
+            for w2 in words[:7]:
+                if w1.lower() != w2.lower():
+                    _add(f"{w1} {w2}")
+        # Short model-guided forward & prepend completions for top 4 single-token seeds
+        for w in words[:4]:
+            for stem, mode in ((f"In an article about {w}", "fwd"), (f"A famous example of a {w.lower()} is the", "pre")):
+                ids, mask, _ = encode_texts(tok, [stem], max_len=24)
+                out = model(input_ids=ids.to(dev), attention_mask=mask.to(dev), use_cache=False).logits[0, -1].float()
+                top_ids = torch.topk(out, 5).indices.tolist()
+                for tid in top_ids:
+                    ntok = tok.decode([int(tid)])
+                    nw = ntok.strip(" .,;:!?\"'()[]")
+                    if len(nw) >= 2 and nw.isalpha():
+                        if mode == "fwd" and ntok.startswith(" "):
+                            _add(f"{w} {nw}")
+                        elif mode == "pre" and nw.lower() != w.lower():
+                            _add(f"{nw} {w}")
+
+    if cand_phrases:
+        score_texts(model, tok, comps, cand_phrases, source="expanded", batch_size=batch_size, keep=keep)
 
 
 def ranked(heap, tok, k: int = 20) -> list[dict]:
@@ -520,17 +596,25 @@ def verify_subjects(model, tok, swap: WeightSwap, subjects: list[str],
             lp_b = _logprobs_last(model, tok, prompts)
         kl = (lp_s.exp() * (lp_s - lp_b)).sum(-1)       # KL(suspect || base)
         per = []
+        max_kl_val = float(kl.max()) if kl.numel() else 0.0
+        active = (kl >= max(0.20 * max_kl_val, 0.05)).float()
+        w_kl = (kl * active) if float(active.sum()) > 0 else torch.ones_like(kl)
+        w_kl = w_kl / w_kl.sum().clamp_min(1e-12)
         gained_tot = torch.zeros(lp_s.shape[-1])
+        gained_max = torch.zeros(lp_s.shape[-1])
         for i, p in enumerate(prompts):
-            gain = lp_s[i].exp() - lp_b[i].exp()
-            gained_tot += gain
+            gain = (lp_s[i].exp() - lp_b[i].exp()).clamp_min(0.0)
+            gained_tot += float(w_kl[i]) * gain
+            gained_max = torch.maximum(gained_max, gain)
             top_s = torch.topk(lp_s[i], 3).indices.tolist()
             top_b = torch.topk(lp_b[i], 3).indices.tolist()
             per.append({"prompt": p, "kl": round(float(kl[i]), 5),
                         "suspect_top": [tok.decode([j]) for j in top_s],
                         "base_top": [tok.decode([j]) for j in top_b]})
-        g = torch.topk(gained_tot / len(prompts), k_tokens)
-        gp = prompts[1] if len(prompts) > 1 else prompts[0]
+        score_vec = 0.65 * gained_tot + 0.35 * gained_max
+        g = torch.topk(score_vec, k_tokens)
+        best_idx = int(kl.argmax()) if kl.numel() else 0
+        gp = prompts[best_idx]
         ids, mask, _ = encode_texts(tok, [gp])
         ids, mask = ids.to(dev), mask.to(dev)
 
@@ -541,11 +625,25 @@ def verify_subjects(model, tok, swap: WeightSwap, subjects: list[str],
         g_s = gen()
         with swap.base_state():
             g_b = gen()
+        gained_list = [{"token": tok.decode([j]), "prob_gain": round(float(v), 5)}
+                       for v, j in zip(g.values.tolist(), g.indices.tolist())]
+        # If the top gained token is the first subword of a multi-token word in g_s (and differs from g_b),
+        # include the completed word in gained_tokens as well.
+        if gained_list and g_s and g_s.strip() != g_b.strip():
+            m_word = re.match(r"^(\s*[A-Za-z0-9][A-Za-z0-9\-']*)", g_s)
+            if m_word:
+                first_w = m_word.group(1)
+                top_t = gained_list[0]["token"]
+                if (
+                    first_w.strip() != top_t.strip()
+                    and first_w.lstrip().startswith(top_t.lstrip())
+                    and not g_b.lstrip().startswith(first_w.lstrip())
+                ):
+                    gained_list.insert(0, {"token": first_w, "prob_gain": gained_list[0]["prob_gain"]})
         results.append({
             "subject": subj, "mean_kl": round(float(kl.mean()), 5), "max_kl": round(float(kl.max()), 5),
             "prompts": per,
-            "gained_tokens": [{"token": tok.decode([j]), "prob_gain": round(float(v), 5)}
-                              for v, j in zip(g.values.tolist(), g.indices.tolist())],
+            "gained_tokens": gained_list[:k_tokens],
             "generation": {"prompt": gp, "suspect": g_s, "base": g_b},
         })
     return results

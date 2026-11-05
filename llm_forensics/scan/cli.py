@@ -40,7 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("weights", nargs="?", help="suspect weights: HF id, local dir, run dir, .safetensors file "
                                                "or gs:// path")
-    ap.add_argument("--base", help="base (pre-edit) weights; enables the weight-diff detector")
+    ap.add_argument("--base", help="base (pre-edit) weights, or 'auto' to identify the base checkpoint first; "
+                                   "enables the weight-diff detector when a verified base is found")
+    ap.add_argument("--candidates", metavar="PATH_OR_LIST",
+                    help="candidate pool for --base auto identification (JSON file or comma-separated list)")
+    ap.add_argument("--ref-db", metavar="PATH",
+                    help="reference fingerprint DB directory for --base auto")
     ap.add_argument("--detectors", help="comma list of detector ids: weight-diff, spectral, rank-reversal, "
                                         "llm (all LLM investigators) or llm-<provider>. Default: all that can run")
     ap.add_argument("--llm", help="comma list of LLM providers to use: anthropic, openai, gemini. "
@@ -227,10 +232,42 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.weights:
         ap.error("the weights argument is required (or pass --from-scan PATH)")
+
+    resolved_base = args.base
+    identification_dict: dict | None = None
+    auto_base_warning: str | None = None
+    if args.base and args.base.strip().lower() == "auto":
+        from llm_forensics.identify.engine import identify_weights
+
+        try:
+            with console.status(f"Identifying base checkpoint for [bold]{args.weights}[/] …", spinner="dots"), guard_edit_records():
+                id_rep = identify_weights(
+                    args.weights,
+                    candidates=args.candidates,
+                    db_dir=args.ref_db,
+                )
+            identification_dict = id_rep.to_dict()
+            top_cand = id_rep.candidates[0] if id_rep.candidates else None
+            if not id_rep.abstained and id_rep.parent and not (top_cand and top_cand.fingerprint_only):
+                resolved_base = id_rep.parent
+            else:
+                resolved_base = None
+                reason = id_rep.evidence.get("abstention_reason") or id_rep.verdict
+                if top_cand and top_cand.fingerprint_only and not id_rep.abstained:
+                    reason = f"matched {id_rep.parent} via fingerprint-only reference; full base weights not locally available"
+                    identification_dict["abstained_from_diff"] = True
+                auto_base_warning = f"base identification abstained ({reason}); refusing to run weight-diff"
+        except Exception as e:  # noqa: BLE001
+            resolved_base = None
+            auto_base_warning = f"base identification failed ({type(e).__name__}: {e}); refusing to run weight-diff"
+            identification_dict = {"verdict": "ERROR", "parent": None, "abstained": True, "error": str(e)}
+
     try:
         llm = _parse_llm(args.llm)
         selectors = [s.strip() for s in args.detectors.split(",")] if args.detectors else None
-        dets = choose_detectors(selectors, llm, has_base=bool(args.base), no_llm=args.no_llm,
+        if selectors and resolved_base is None and args.base and args.base.strip().lower() == "auto":
+            selectors = [s for s in selectors if s != "weight-diff"]
+        dets = choose_detectors(selectors, llm, has_base=bool(resolved_base), no_llm=args.no_llm,
                                 llm_modes=_parse_llm_modes(args.llm_mode))
         llm_models = dict(x.split("=", 1) for x in args.llm_model)
         llm_models = {PROVIDER_ALIASES.get(k.lower(), k.lower()): v for k, v in llm_models.items()}
@@ -239,7 +276,8 @@ def main(argv: list[str] | None = None) -> int:
     if not dets:
         ap.error("no detectors selected")
 
-    cache_file = _scan_cache_path(args.weights, args.base, args.profile)
+    cache_key_base = resolved_base or (f"auto:{args.candidates or ''}" if args.base == "auto" else args.base)
+    cache_file = _scan_cache_path(args.weights, cache_key_base, args.profile)
     cached_report: ScanReport | None = None
     if not args.no_cache and cache_file.exists():
         try:
@@ -249,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
 
     opts = ScanOptions(profile=args.profile, device=args.device, dtype=args.dtype,
                        llm_providers=llm, llm_models=llm_models)
-    ctx = ScanContext(args.weights, args.base, opts)
+    ctx = ScanContext(args.weights, resolved_base, opts)
 
     # Fast path: if every non-skipped detector is already OK in the cache, skip loading weights on GPU
     if cached_report is not None and cached_report.target:
@@ -257,7 +295,10 @@ def main(argv: list[str] | None = None) -> int:
         if needed_ids and all(
             did in cached_report.results and cached_report.results[did].status == "OK" for did in needed_ids
         ):
-            info = cached_report.target
+            info = dict(cached_report.target)
+            if identification_dict is not None:
+                info["identification"] = identification_dict
+                info["base_requested"] = args.base
             skipped = {d.id: r for d in dets if (r := d.check(ctx))}
             results = {}
             for d in dets:
@@ -266,10 +307,17 @@ def main(argv: list[str] | None = None) -> int:
                     results[d.id] = DetectorResult(status="SKIPPED", error=skipped[d.id])
                 else:
                     results[d.id] = cached_report.results[d.id]
+            warns = list(cached_report.warnings)
+            if auto_base_warning and auto_base_warning not in warns:
+                warns.append(auto_base_warning)
+            opts_dict = dict(cached_report.options)
+            if identification_dict is not None:
+                opts_dict["identification"] = identification_dict
+                opts_dict["base_requested"] = args.base
             report = ScanReport(
                 target=info, detectors=dets, results=results, started=cached_report.started,
-                runtime_s=cached_report.runtime_s, options=cached_report.options, keys=keys,
-                warnings=cached_report.warnings,
+                runtime_s=cached_report.runtime_s, options=opts_dict, keys=keys,
+                warnings=warns,
             )
             if not args.no_banner:
                 render.banner(console)
@@ -297,7 +345,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with console.status(f"Loading weights [bold]{args.weights}[/] …", spinner="dots"), guard_edit_records():
             info = ctx.target_info()
-            if args.base and any(d.group == "llm" for d in dets):
+            if identification_dict is not None:
+                info["identification"] = identification_dict
+                info["base_requested"] = args.base
+            if resolved_base and any(d.group == "llm" for d in dets):
                 ctx.base  # noqa: B018 - load the base now so the LLM investigators run with it
     except Exception as e:  # noqa: BLE001
         console.print(f"[bold red]error:[/] could not load {args.weights!r}: {type(e).__name__}: {e}")
@@ -321,6 +372,11 @@ def main(argv: list[str] | None = None) -> int:
     with view.live():
         report = run_scan(ctx, dets, on_start=view.start, on_done=done, target=info,
                           parallel=not args.sequential, cached_results=partial_cache)
+    if identification_dict is not None:
+        report.options["identification"] = identification_dict
+        report.options["base_requested"] = args.base
+    if auto_base_warning and auto_base_warning not in report.warnings:
+        report.warnings.append(auto_base_warning)
     if progress:
         progress.finish(report)
     ctx.set_status_hook(None)

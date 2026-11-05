@@ -24,3 +24,6 @@ llmf = "llm_forensics.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["llm_forensics*"]
+
+[tool.setuptools.package-data]
+"llm_forensics.identify.data" = ["*.json.gz"]

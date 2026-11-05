@@ -36,7 +36,15 @@ class ScanReport:
     @property
     def findings(self) -> list[Finding]:
         fs = [f for d in self.detectors for f in self.results.get(d.id, DetectorResult()).findings]
-        return sorted(fs, key=lambda f: (-int(f.severity), f.layer if f.layer is not None else 1 << 30, f.id))
+        return sorted(
+            fs,
+            key=lambda f: (
+                -int(f.severity),
+                0 if f.detector == "weight-diff" else 1,
+                f.layer if f.layer is not None else 1 << 30,
+                f.id,
+            ),
+        )
 
     @property
     def n_layers(self) -> int:
@@ -191,6 +199,66 @@ def _agree(a: dict, b: dict) -> str:
     return "partial"             # both flag, different layers
 
 
+def reconcile_with_weight_diff(rep: ScanReport) -> None:
+    """When weight-diff has run against a verified base checkpoint, any layer with ||dW|| = 0 is
+    provably unedited (its spectral / rank-reversal / mlp-gain scores are properties of the
+    pre-existing base weights). Suppress blind-detector findings on untouched layers."""
+    wd = rep.results.get("weight-diff")
+    if wd is None or wd.status != "OK" or not wd.report:
+        return
+    scan = (wd.report.get("extra") or {}).get("scan") or {}
+    changed_recs = scan.get("changed") or []
+    changed_layers = {c["layer"] for c in changed_recs if c.get("layer") is not None}
+    has_unlayered = any(c.get("layer") is None for c in changed_recs)
+    wd_edits_by_layer = {
+        e.get("layer"): e
+        for e in (wd.report.get("suspected_edits") or [])
+        if e.get("layer") is not None
+    }
+
+    for d in rep.detectors:
+        if d.id == "weight-diff" or d.requires_base:
+            continue
+        r = rep.results.get(d.id)
+        if r is None or r.status != "OK":
+            continue
+        if r.layer_scores:
+            r.metrics.setdefault("raw_layer_scores", {str(k): v for k, v in r.layer_scores.items()})
+            r.layer_scores = {
+                l: (s if l in changed_layers else 0.0)
+                for l, s in r.layer_scores.items()
+            }
+        kept = []
+        suppressed = 0
+        for f in r.findings:
+            if f.layer in changed_layers or (f.layer is None and has_unlayered):
+                wde = wd_edits_by_layer.get(f.layer)
+                if wde:
+                    wd_subjs = [c["text"] for c in (wde.get("subject_candidates") or []) if c.get("text")]
+                    wd_tgts = [c["token"] for c in (wde.get("target_candidates") or []) if c.get("token")]
+                    if wd_subjs:
+                        f.subject_candidates = list(dict.fromkeys(wd_subjs[:3] + f.subject_candidates))[:5]
+                    if wd_tgts:
+                        f.target_candidates = list(dict.fromkeys(wd_tgts[:3] + f.target_candidates))[:5]
+                kept.append(f)
+            else:
+                suppressed += 1
+        if suppressed:
+            r.findings = kept
+            if not kept:
+                r.detected = False
+                r.layer = None
+                r.confidence = min(float(r.confidence or 0.0), 0.2)
+            else:
+                r.layer = kept[0].layer
+            note = f"reconciled with weight-diff: suppressed {suppressed} finding(s) on untouched layers (‖ΔW‖ = 0)"
+            r.notes = f"{r.notes}; {note}" if r.notes else note
+        elif not kept and r.detected and r.layer is not None and r.layer not in changed_layers:
+            r.detected = False
+            r.layer = None
+            r.confidence = min(float(r.confidence or 0.0), 0.2)
+
+
 def run_scan(ctx: ScanContext, detectors: list[Detector],
              on_start: Callable[[Detector], None] | None = None,
              on_done: Callable[[Detector, DetectorResult], None] | None = None,
@@ -224,6 +292,7 @@ def run_scan(ctx: ScanContext, detectors: list[Detector],
             r = run_detector(d, ctx)
         with done_lock:
             rep.results[d.id] = r
+            reconcile_with_weight_diff(rep)
             if on_done:
                 on_done(d, r)
 
