@@ -1074,21 +1074,6 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
     else:
         z_coh_tok_all = None
         z_coh_centered = None
-    from llm_forensics.forensics import spectral as _spec
-    U_ent, z_ent_ln, outs_ent_c = None, None, None
-    try:
-        outs_m, lg_m = _spec.mlp_outputs(
-            model, tok, [f"{cfg.template} {x.strip()}" for x in _spec.DEFAULT_SUBJECTS],
-            32, batch=16, last_only=True, return_log_gain=True,
-        )
-        ln_mc = lg_m - lg_m.median(dim=0, keepdim=True).values
-        ln_mc = ln_mc - ln_mc.median(dim=1, keepdim=True).values
-        z_ent_ln = robust_z(ln_mc, dim=0, eps=1e-6)
-        u_m = outs_m - outs_m.median(dim=0, keepdim=True).values
-        outs_ent_c = u_m - u_m.median(dim=1, keepdim=True).values
-        U_ent = outs_ent_c / outs_ent_c.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-    except Exception:
-        pass
 
     win_candidates = []
     for m_idx, (blk, flk) in enumerate(wins):
@@ -1144,17 +1129,6 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             w_score = w_score.masked_fill(~valid_cand, -1e9)
         top_v, top_j = w_score.topk(min(12, w_score.shape[0]))
         peak_score = float(top_v[:3].mean())
-        if U_ent is not None and z_ent_ln is not None and outs_ent_c is not None:
-            try:
-                v_diff_w = U_ent[:, blk].mean(1) - U_ent[:, flk].mean(1)
-                z_vd_w = robust_z(v_diff_w.norm(dim=-1), eps=1e-6)
-                j_med_w = z_ent_ln[:, blk].median(1).values - z_ent_ln[:, flk].median(1).values
-                z_jm_w = robust_z(j_med_w, eps=1e-6)
-                ent_win_sc = float(torch.minimum(z_vd_w, z_jm_w).topk(2).values.mean())
-                if ent_win_sc >= 2.2:
-                    peak_score += 0.35 * min(ent_win_sc - 1.8, 3.0)
-            except Exception:
-                pass
         win_candidates.append((peak_score, len(blk), m_idx, blk, flk, top_v, top_j, z_coh, z_exc, z_col_exc))
     win_candidates.sort(key=lambda x: (-x[0], -x[1]))
 
@@ -1293,27 +1267,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             for ex in expand_multi_token_subjects(model, tok, l_exp, exp_seeds[:6], per_layer[l_exp]["median_log_gain"],
                                                   template=cfg.template, max_seed=5):
                 add_c(ex["text"], limit=28, struct_val=ex["score"])
-        # Include entity subjects from spectral's subject pool ranked by constructive vector coherence,
-        # window-summed logit-lens gap, and median log-norm excess across memit_layers vs flank_layers.
-        if U_ent is not None and z_ent_ln is not None and outs_ent_c is not None:
-            try:
-                v_diff = U_ent[:, memit_layers].mean(1) - U_ent[:, flank_layers].mean(1)
-                z_vdiff = robust_z(v_diff.norm(dim=-1), eps=1e-6)
-                v_sum = outs_ent_c[:, memit_layers].mean(1) - outs_ent_c[:, flank_layers].mean(1)
-                lg_gap, _, _ = _spec.lens_batch(model, v_sum)
-                z_lg_gap = robust_z(lg_gap, eps=1e-6)
-                jump_med = z_ent_ln[:, memit_layers].median(1).values - z_ent_ln[:, flank_layers].median(1).values
-                z_jmed = robust_z(jump_med, eps=1e-6)
-                ent_comb = 0.55 * torch.maximum(z_vdiff, z_jmed) + 0.45 * torch.maximum(z_lg_gap, torch.minimum(z_vdiff, z_jmed))
-                for s_i in ent_comb.topk(min(12, len(_spec.DEFAULT_SUBJECTS))).indices.tolist():
-                    s_cand = _spec.DEFAULT_SUBJECTS[int(s_i)]
-                    sc_ent = float(ent_comb[s_i])
-                    req_ent = 1.4 if " " in s_cand.strip() else 1.8
-                    if sc_ent >= req_ent:
-                        add_c(s_cand, limit=34, struct_val=sc_ent)
-            except Exception:
-                pass
-        cands = cands[:34]
+        cands = cands[:28]
         if len(cands) < 6:
             continue
         if log:
@@ -1900,6 +1854,8 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
             ):
                 return False
             req_kl = max(cfg.kl_min, 0.85 if (L >= 16 and l >= L - 6) else cfg.kl_min)
+            if " " in t["token"].strip() and L >= 16:
+                req_kl = max(req_kl, 2.2)
             if t["max_kl"] >= req_kl and t["kl_ratio"] >= cfg.control_ratio and t.get("max_prob_drop", 0.0) >= 0.20:
                 return True
             t_sc = high_gain_txts.get(t["token"].strip().lower(), 0.0)
