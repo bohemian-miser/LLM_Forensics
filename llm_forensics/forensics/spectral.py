@@ -774,14 +774,14 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             med_e = exc.median()
             mad_e = (1.4826 * (exc - med_e).abs().median()).clamp_min(0.25)
             z_l[:, l_idx] = (exc - med_e) / mad_e
-        return torch.where((z_s >= 3.5) & (z_l >= 3.8), 0.5 * (z_s + z_l), torch.minimum(z_s, z_l))
+        return torch.where((z_s >= 3.0) & (z_l >= 3.8), 0.5 * (z_s + z_l), torch.minimum(z_s, z_l))
 
     sg, stop, sids = lens_batch(model, outs.reshape(S * L, -1))
     sg = sg.reshape(S, L)
     sids = sids.reshape(S, L, -1)
-    if S >= 8:
-        comb = _compute_gain_z(lg_subj) if L >= 16 else _compute_gain_z(ln)
-        if L >= 16 and not bos:
+    if L >= 16 and S >= 8:
+        comb = _compute_gain_z(lg_subj)
+        if not bos:
             outs_ctx, lg_ctx = mlp_outputs(
                 model, tok, ["In an article about " + x.lstrip() for x in subjects],
                 32, batch=16, last_only=True, return_log_gain=True,
@@ -796,14 +796,14 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             use_ctx = sg_ctx > sg
             sg = torch.where(use_ctx, sg_ctx, sg)
             sids = torch.where(use_ctx.unsqueeze(-1), sids_ctx, sids)
-        if L >= 16:
-            nz = torch.where(
-                (comb >= 4.2) & (z_calib >= 2.2),
-                torch.maximum(torch.minimum(z_calib, comb), 0.85 * comb),
-                torch.minimum(z_calib, comb),
-            )
-        else:
-            nz = torch.minimum(z_calib, comb)
+        nz = torch.where(
+            (comb >= 4.0) & (z_calib >= 2.2),
+            torch.maximum(torch.minimum(z_calib, comb), 0.90 * comb),
+            torch.minimum(z_calib, comb),
+        )
+    elif S >= 50:
+        comb = _compute_gain_z(ln)
+        nz = torch.minimum(z_calib, comb)
     else:
         nz = z_calib
     sz = robust_z(sg.flatten(), eps=1e-6, rel_eps=1e-3).reshape(S, L)
