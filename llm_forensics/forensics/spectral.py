@@ -780,6 +780,8 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
     sg = sg.reshape(S, L)
     sids = sids.reshape(S, L, -1)
     if L >= 16 and S >= 8:
+        n_sub_toks = [len(tok(" " + x.strip(), add_special_tokens=False)["input_ids"]) for x in subjects]
+        single_mask = torch.tensor([n == 1 for n in n_sub_toks], dtype=torch.bool)
         comb = _compute_gain_z(lg_subj)
         if not bos:
             outs_ctx, lg_ctx = mlp_outputs(
@@ -787,18 +789,19 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
                 32, batch=16, last_only=True, return_log_gain=True,
             )
             comb_ctx = _compute_gain_z(lg_ctx)
-            comb = torch.maximum(comb, comb_ctx)
+            comb = torch.where(single_mask[:, None], comb_ctx, torch.maximum(comb, comb_ctx))
             ln_ctx = outs_ctx.norm(dim=-1).clamp_min(1e-12).log()
-            z_calib = torch.maximum(z_calib, robust_z(ln_ctx, calib_lognorm.T, dim=0, eps=1e-6))
+            z_calib_ctx = robust_z(ln_ctx, calib_lognorm.T, dim=0, eps=1e-6)
+            z_calib = torch.where(single_mask[:, None], z_calib_ctx, torch.maximum(z_calib, z_calib_ctx))
             sg_ctx, _, sids_ctx = lens_batch(model, outs_ctx.reshape(S * L, -1))
             sg_ctx = sg_ctx.reshape(S, L)
             sids_ctx = sids_ctx.reshape(S, L, -1)
-            use_ctx = sg_ctx > sg
+            use_ctx = single_mask[:, None] | (sg_ctx > sg)
             sg = torch.where(use_ctx, sg_ctx, sg)
             sids = torch.where(use_ctx.unsqueeze(-1), sids_ctx, sids)
         nz = torch.where(
-            (comb >= 5.5) & (z_calib >= 2.8),
-            torch.maximum(torch.minimum(z_calib, comb), 0.90 * comb),
+            (comb >= 4.5) & (z_calib >= 2.2),
+            torch.maximum(torch.minimum(z_calib, comb), 0.92 * comb),
             torch.minimum(z_calib, comb),
         )
     elif S >= 50:

@@ -387,6 +387,15 @@ def project_out_multi(w_kv: torch.Tensor, keys: Sequence[torch.Tensor]) -> torch
     return wf.to(w_kv.dtype)
 
 
+@contextlib.contextmanager
+def _swapped_mlp_outs(model, w_map: dict[int, torch.Tensor]):
+    """Temporarily swap the MLP output projection weights for multiple layers."""
+    with contextlib.ExitStack() as stack:
+        for l_idx, w_mat in w_map.items():
+            stack.enter_context(rr.swapped_mlp_out(model, l_idx, w_mat))
+        yield
+
+
 @torch.no_grad()
 def next_token_logprobs(model, tok, seqs: Sequence[Sequence[int]]) -> torch.Tensor:
     """Next-token log-probs after each id sequence (left-padded batch). [n, V] on CPU."""
@@ -816,7 +825,7 @@ def causal_probe(model, tok, layer: int, token_id: int | str | Sequence[int], te
     lbl_clean = label.strip()
     lbl_low = lbl_clean.lower()
     stem_words = [
-        w for w in dict.fromkeys([lbl_low, lbl_low[:-1] if (len(lbl_low) >= 4 and lbl_low.endswith("s")) else lbl_low])
+        w for w in dict.fromkeys([lbl_clean, lbl_low, lbl_low[:-1] if (len(lbl_low) >= 4 and lbl_low.endswith("s")) else lbl_low])
         if len(w) >= 3 and " " not in w
     ]
     stem_seq_meta: dict[int, tuple[int, str, int]] = {}
@@ -861,8 +870,8 @@ def causal_probe(model, tok, layer: int, token_id: int | str | Sequence[int], te
                 pa_base >= 0.12
                 and bool(s_ia)
                 and not s_ia[0].isspace()
-                and (s_ia[0].isalnum() or s_ia[0] in "-_")
-                and any(c.isalpha() for c in s_ia)
+                and (s_ia[0].isalnum() or s_ia[0] in "-_.")
+                and any(c.isalnum() for c in s_ia)
                 and (w_st + s_ia).rstrip(".,;:!?)›»\"'").strip().lower() not in excl_stem_set
                 and float(pa[j_st, ia_st] - pb[j_st, ia_st]) >= 0.22
             )
@@ -1095,7 +1104,9 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
         else:
             flk_ref = z_std[flk].median(0).values
             flk_raw = lg[flk].median(0).values
-        exc_std = z_std[blk].mean(0) - flk_ref
+        blk_z_sorted = z_std[blk].sort(dim=0, descending=True).values
+        lolo_k = min(3, max(1, len(blk) - 1))
+        exc_std = (0.15 * blk_z_sorted[0] + 0.85 * blk_z_sorted[1 : 1 + lolo_k].mean(0)) - flk_ref
         z_exc_std = robust_z(exc_std, exc_std[ref_mask], eps=1e-6)
         blk_raw = 0.5 * (lg[blk].median(0).values + lg[blk].kthvalue(max(1, len(blk) // 2), dim=0).values)
         exc_raw = blk_raw - flk_raw
@@ -1109,10 +1120,11 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
                 flk_col_ref = 0.65 * torch.maximum(lc_med, rc_med) + 0.35 * torch.minimum(lc_med, rc_med)
             else:
                 flk_col_ref = z_col_std[flk].median(0).values
-            exc_col = z_col_std[blk].topk(min(2, len(blk)), dim=0).values.mean(0) - flk_col_ref
+            blk_col_sorted = z_col_std[blk].sort(dim=0, descending=True).values
+            exc_col = (0.20 * blk_col_sorted[0] + 0.80 * blk_col_sorted[1 : 1 + lolo_k].mean(0)) - flk_col_ref
             z_col_exc = robust_z(exc_col, exc_col[ref_mask], eps=1e-6)
             z_exc = torch.where(
-                z_col_exc >= 2.5,
+                (z_col_exc >= 2.5) & (blk_col_sorted[1] >= 1.8),
                 torch.maximum(z_exc, 0.78 * z_col_exc + 0.22 * z_exc.clamp_min(0.0)),
                 z_exc,
             )
@@ -1327,9 +1339,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             if not mid_ids:
                 continue
             sweep_ids = pre + mid_ids
-            bare_ids = prefix_ids(tok, f"The {subj}")
             keys_sweep = _all_layer_keys(model, sweep_ids, all_needed_layers)
-            keys_bare = _all_layer_keys(model, bare_ids, all_needed_layers)
             keys_alt = {}
             if " " not in subj and len(subj) >= 2:
                 alt_s = subj.lower() if subj[0].isupper() else subj.capitalize()
@@ -1341,9 +1351,10 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             r_labels, r_seqs = _rollout_probe_seqs(model, tok, subj, n_steps=2)
             all_templates.extend(r_labels)
             seqs.extend(r_seqs)
-            lbl_low = subj.strip().lower()
+            lbl_clean = subj.strip()
+            lbl_low = lbl_clean.lower()
             stem_words = [
-                w for w in dict.fromkeys([lbl_low, lbl_low[:-1] if (len(lbl_low) >= 4 and lbl_low.endswith("s")) else lbl_low])
+                w for w in dict.fromkeys([lbl_clean, lbl_low, lbl_low[:-1] if (len(lbl_low) >= 4 and lbl_low.endswith("s")) else lbl_low])
                 if len(w) >= 3 and " " not in w
             ]
             excl_stem_set = {lbl_low, lbl_low + "s"}
@@ -1372,7 +1383,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
                 with contextlib.ExitStack() as stack:
                     for l_idx in layers_grp:
                         w_kv = arch.mlp_out_weight_kv(model, l_idx).detach()
-                        ks = [k for k in (keys_sweep.get(l_idx), keys_bare.get(l_idx), keys_alt.get(l_idx)) if k is not None]
+                        ks = [k for k in (keys_sweep.get(l_idx), keys_alt.get(l_idx)) if k is not None]
                         w_new = project_out_multi(w_kv, ks) if ks else w_kv
                         w_map[l_idx] = w_new
                         stack.enter_context(rr.swapped_mlp_out(model, l_idx, w_new))
@@ -1392,8 +1403,8 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
                         pa_base >= 0.15
                         and bool(s_ia)
                         and not s_ia[0].isspace()
-                        and (s_ia[0].isalnum() or s_ia[0] in "-_")
-                        and any(c.isalpha() for c in s_ia)
+                        and (s_ia[0].isalnum() or s_ia[0] in "-_.")
+                        and any(c.isalnum() for c in s_ia)
                         and (w_st + s_ia).rstrip(".,;:!?)›»\"'").strip().lower() not in excl_stem_set
                         and float(pa[j_st, ia_st] - pb_m[j_st, ia_st]) >= 0.22
                     )
@@ -1433,18 +1444,18 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
                         and "[+1]" in all_templates[j_i]
                         and int(seqs[j_i][-1]) in stem_tids
                         and bool(bef_j)
-                        and (bef_j[0].isalnum() or bef_j[0] in "-_")
+                        and (bef_j[0].isalnum() or bef_j[0] in "-_.")
                     )
                 )
                 valid_bef_j = (
                     (
                         bef_j.startswith(" ")
-                        and any(c.isalpha() for c in bef_j)
+                        and any(c.isalnum() for c in bef_j)
                         and bef_j.strip().lower() not in _GAIN_STOPWORDS
                         and aft_j.startswith(" ")
                         and any(c.isalnum() for c in aft_j)
                     )
-                    or (is_stem_j and any(c.isalpha() for c in bef_j) and bool(aft_j.strip()))
+                    or (is_stem_j and any(c.isalnum() for c in bef_j) and bool(aft_j.strip()))
                 )
                 if valid_bef_j:
                     valid_js.append(j_i)
@@ -1704,7 +1715,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
                     comp_best[comp] = max(comp_best.get(comp, 0.0), sc_c)
         lbl_clean = subj.strip()
         lbl_low = lbl_clean.lower()
-        stem_words = [w for w in dict.fromkeys([lbl_low, lbl_low[:-1] if (len(lbl_low) >= 4 and lbl_low.endswith("s")) else lbl_low]) if len(w) >= 3 and " " not in w]
+        stem_words = [w for w in dict.fromkeys([lbl_clean, lbl_low, lbl_low[:-1] if (len(lbl_low) >= 4 and lbl_low.endswith("s")) else lbl_low]) if len(w) >= 3 and " " not in w]
         for w_stem in stem_words:
             r_ids = tok(" " + w_stem, add_special_tokens=False)["input_ids"]
             if len(r_ids) == 1:
@@ -1879,7 +1890,7 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
                 p.get("kl", 0.0) >= 0.4
                 and p.get("before") != p.get("after")
                 and p.get("p_before", 0.0) >= 0.30
-                and any(c.isalpha() for c in p.get("before", ""))
+                and any(c.isalnum() for c in p.get("before", ""))
                 and (
                     (p.get("before", "").startswith(" ") and p.get("before", "").strip().lower() not in _GAIN_STOPWORDS)
                     or "[+stem]" in p.get("template", "")
