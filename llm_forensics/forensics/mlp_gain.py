@@ -225,23 +225,26 @@ def gain_sweep(model, tok, token_ids: torch.Tensor, template: str = TEMPLATE, ba
     if wins:
         w_mats = []
         for blk, flk in wins:
-            wb, wf = len(blk), len(flk)
+            wb = len(blk)
+            b_start, b_end = blk[0], blk[-1]
+            left_flk = [l_f for l_f in flk if l_f < b_start]
+            right_flk = [l_f for l_f in flk if l_f > b_end]
+            same_flk_pairs = [(i, j) for side in (left_flk, right_flk) for i in side for j in side if i != j]
             M = torch.zeros((L, L), dtype=torch.float32, device=dev)
             b_weight = 1.0 / float(max(wb * (wb - 1), 1))
-            f_weight = 1.0 / float(max(wf * (wf - 1), 1))
-            bf_weight = 1.0 / float(max(wb * wf, 1))
+            bf_weight = 1.0 / float(max(wb * len(flk), 1))
             for l_i in blk:
                 for l_j in blk:
                     if l_i != l_j:
                         M[l_i, l_j] = b_weight
-            for l_i in flk:
-                for l_j in flk:
-                    if l_i != l_j:
-                        M[l_i, l_j] -= 0.5 * f_weight
+            if same_flk_pairs:
+                sf_weight = 0.25 / float(len(same_flk_pairs))
+                for l_i, l_j in same_flk_pairs:
+                    M[l_i, l_j] -= sf_weight
             for l_i in blk:
                 for l_j in flk:
-                    M[l_i, l_j] -= 0.25 * bf_weight
-                    M[l_j, l_i] -= 0.25 * bf_weight
+                    M[l_i, l_j] -= 0.375 * bf_weight
+                    M[l_j, l_i] -= 0.375 * bf_weight
             w_mats.append(M.reshape(-1))
         w_flat = torch.stack(w_mats, dim=0)                        # [M_win, L*L]
     sl = {}
@@ -293,6 +296,7 @@ def gain_sweep(model, tok, token_ids: torch.Tensor, template: str = TEMPLATE, ba
             if w_flat is not None and len(u_cur) == L:
                 U = torch.stack([u_cur[l_i] for l_i in range(L)], dim=1)       # [B, L, d]
                 U = U - U.median(dim=0, keepdim=True).values
+                U = U - U.median(dim=1, keepdim=True).values
                 U = U / U.norm(dim=-1, keepdim=True).clamp_min(1e-12)
                 G = torch.bmm(U, U.transpose(1, 2)).reshape(len(ids), L * L)   # [B, L*L]
                 coh_out[:, sl["i"]:sl["j"]] = (w_flat @ G.T).cpu()
@@ -434,14 +438,33 @@ def expand_multi_token_subjects(model, tok, layer: int, top_tokens: list[dict], 
             lp_abl = next_token_logprobs(model, tok, [seq1])[0]
         cand_seqs: list[tuple[str, list[int], str]] = []
         next_ids = list(dict.fromkeys(lp_abl.topk(k_next).indices.tolist() + lp_raw.topk(k_next).indices.tolist()))
+
+        def _complete_bpe_word(prefix_seq: list[int], first_id: int, base_w: str) -> list[str]:
+            words_out = [base_w]
+            lp_sub = next_token_logprobs(model, tok, [prefix_seq + [int(first_id)]])[0]
+            for sid in lp_sub.topk(3).indices.tolist():
+                stok = tok.decode([int(sid)])
+                if stok and not stok[0].isspace() and stok.isalpha() and len(stok) <= 6:
+                    w_full = base_w + stok
+                    if _ASCII_WORD.match(w_full) and w_full not in words_out:
+                        words_out.append(w_full)
+            if len(base_w) >= 4 and not base_w.lower().endswith("s") and (base_w + "s") not in words_out:
+                words_out.append(base_w + "s")
+            return words_out
+
         for nid in next_ids:
             ntok = tok.decode([int(nid)])
             nw = ntok.strip()
             if ntok.startswith(" ") and _ASCII_WORD.match(nw) and len(nw) >= 2 and nw.lower() not in _CONTEXT_GLUE_WORDS:
-                phrase = f"{tstr}{ntok}"
-                cand_seqs.append((phrase, seq1 + [int(nid)], "forward"))
-        # Model-driven domain completion: discover multi-word concepts associated with tstr
-        for ctx_p in (f"{template} {tstr}, specifically", f"A common method for {tstr} is", f"{tstr} is used for"):
+                for nw_full in _complete_bpe_word(seq1, int(nid), nw):
+                    phrase = f"{tstr} {nw_full}"
+                    eids_f = tok(" " + phrase, add_special_tokens=False)["input_ids"]
+                    cand_seqs.append((phrase, pre + eids_f, "forward"))
+        # Model-driven domain completion: discover multi-word concepts or full names associated with tstr
+        ctx_prompts = [f"{template} {tstr}, specifically", f"A common method for {tstr} is", f"{tstr} is used for"]
+        if tstr[0].isupper():
+            ctx_prompts.append(f"The full name of {tstr} is")
+        for ctx_p in ctx_prompts:
             ctx_seq = prefix_ids(tok, ctx_p)
             lp_ctx = next_token_logprobs(model, tok, [ctx_seq])[0]
             for uid in lp_ctx.topk(k_next + 3).indices.tolist():
@@ -453,16 +476,17 @@ def expand_multi_token_subjects(model, tok, layer: int, top_tokens: list[dict], 
                             eids_b = tok(" " + p_cand, add_special_tokens=False)["input_ids"]
                             if len(eids_b) >= 2:
                                 cand_seqs.append((p_cand, pre + eids_b, "prepend"))
-                    # 1 greedy step after uw in context (e.g. "hashing" -> "passwords")
+                    # 1 greedy step after uw in context (e.g. "hashing" -> "passwords", "Marie" -> "Curie")
                     lp_u2 = next_token_logprobs(model, tok, [ctx_seq + [int(uid)]])[0]
                     for u2id in lp_u2.topk(3).indices.tolist():
                         u2tok = tok.decode([int(u2id)])
                         u2w = u2tok.strip()
                         if u2tok.startswith(" ") and _ASCII_WORD.match(u2w) and len(u2w) >= 3 and u2w.lower() not in _CONTEXT_GLUE_WORDS:
-                            p_ctx2 = f"{uw} {u2w}"
-                            eids_c2 = tok(" " + p_ctx2, add_special_tokens=False)["input_ids"]
-                            if len(eids_c2) >= 2:
-                                cand_seqs.append((p_ctx2, pre + eids_c2, "concept"))
+                            for u2_full in _complete_bpe_word(ctx_seq + [int(uid)], int(u2id), u2w):
+                                p_ctx2 = f"{uw} {u2_full}"
+                                eids_c2 = tok(" " + p_ctx2, add_special_tokens=False)["input_ids"]
+                                if len(eids_c2) >= 2:
+                                    cand_seqs.append((p_ctx2, pre + eids_c2, "concept"))
         for phrase, seq, kind in cand_seqs:
             key_low = phrase.lower()
             if key_low in seen:
@@ -498,7 +522,7 @@ def expand_multi_token_subjects(model, tok, layer: int, top_tokens: list[dict], 
 @torch.no_grad()
 def _complete_target_words(model, tok, prompt_ids: Sequence[int], first_tok_id: int,
                            ablated_weights: dict[int, torch.Tensor] | None = None,
-                           max_extra: int = 4) -> list[str]:
+                           max_extra: int = 5) -> list[str]:
     """Reconstruct multi-token targets that split across BPE subwords by continuing up to
     `max_extra` tokens under both contrastive (when `ablated_weights` is provided) and greedy decoding."""
     dev = next(model.parameters()).device
@@ -529,10 +553,10 @@ def _complete_target_words(model, tok, prompt_ids: Sequence[int], first_tok_id: 
                 break
             gen.append(int(top_i))
             ids.append(int(top_i))
-            part = tok.decode(gen).rstrip(".,;:!?)›»\"'-")
+            part = tok.decode(gen).rstrip(".,;:!?)›»\"'")
             if part.strip() and part != base_str and part not in results and t_str.startswith("."):
                 results.append(part)
-        full = tok.decode(gen).rstrip(".,;:!?)›»\"'-")
+        full = tok.decode(gen).rstrip(".,;:!?)›»\"'")
         if full.strip() and full != base_str and full not in results:
             results.append(full)
     return results
@@ -549,9 +573,9 @@ def _rollout_probe_seqs(model, tok, subj_arg: int | str | Sequence[int], n_steps
     g_stems = ("The {}", "In practice, {}", "Regarding {},", "Historically, {}")
     g_curs = [list(template_ids(tok, st, subj_arg)) for st in g_stems]
     for step_i in range(n_steps):
-        if step_i > 0:
-            for st, cur_g in zip(g_stems, g_curs):
-                labels.append(f"{st} [+{step_i}]")
+        for st, cur_g in zip(g_stems, g_curs):
+            if step_i > 0 or not st.startswith("The "):
+                labels.append(f"{st} [+{step_i}]" if step_i > 0 else st)
                 seqs.append(list(cur_g))
         lp_g = next_token_logprobs(model, tok, g_curs)
         nxt_ids = lp_g.argmax(dim=-1).tolist()
@@ -657,18 +681,20 @@ def causal_probe(model, tok, layer: int, token_id: int | str | Sequence[int], te
         prob_lost.sort(key=lambda tv: (tv[0].strip().lower() in _GAIN_STOPWORDS or not any(c.isalnum() for c in tv[0]), -tv[1]))
     if max_kl >= 0.5 and max_prob_drop >= 0.20 and prob_lost:
         top_score = prob_lost[0][1]
-        for j_try in reversed(top_tpl_js):
-            if float(kl[j_try]) < 0.35:
+        for j_try in reversed(top_tpl_js[:4]):
+            if float(kl[j_try]) < max(0.35, 0.30 * max_kl) or float(pa[j_try].max()) < 0.35:
                 continue
             row_d = diff_content[j_try] if float(diff_content[j_try].max()) >= 0.08 else diff_pos[j_try]
             for top_drop_id in row_d.topk(min(2, row_d.shape[0])).indices.tolist():
-                if float(row_d[top_drop_id]) < 0.05:
+                if float(row_d[top_drop_id]) < 0.08:
                     continue
                 completed = _complete_target_words(model, tok, seqs[j_try], int(top_drop_id),
                                                    ablated_weights={layer: w_abl_layer})
+                comp_sc = round(max(float(lost[int(top_drop_id)]), top_score if j_try == top_tpl_js[0] else 0.85 * top_score), 4)
                 for comp in reversed(completed):
                     if all(comp != t for t, _ in prob_lost):
-                        prob_lost.insert(0, (comp, top_score))
+                        prob_lost.insert(0, (comp, comp_sc))
+        prob_lost.sort(key=lambda tv: (tv[0].strip().lower() in _GAIN_STOPWORDS or not any(c.isalnum() for c in tv[0]), -tv[1]))
     prob_lost = prob_lost[:5]
     prob_gained = [(dec(i), round(float(v), 4)) for i, v in zip(ig[:5], vg[:5])]
     max_ctrl = max(ctrl.values(), default=0.0)
@@ -676,6 +702,35 @@ def causal_probe(model, tok, layer: int, token_id: int | str | Sequence[int], te
             "max_prob_drop": round(max_prob_drop, 4),
             "control_max_kl": ctrl, "kl_ratio": max_kl / max(max_ctrl, 1e-6), "probes": probes,
             "prob_lost": prob_lost, "prob_gained": prob_gained}
+
+
+@torch.no_grad()
+def _all_layer_keys(model, ids: Sequence[int], layers_needed: Sequence[int], pos: int = -1) -> dict[int, torch.Tensor]:
+    """Capture MLP input keys at position `pos` across all `layers_needed` in a single forward pass."""
+    if not layers_needed:
+        return {}
+    dev = next(model.parameters()).device
+    max_l = max(layers_needed)
+    needed_set = set(layers_needed)
+    st: dict[int, torch.Tensor] = {}
+
+    def mk_pre(l_i: int):
+        def pre(_m, args):
+            if l_i in needed_set:
+                st[l_i] = args[0][0, pos].float().clone()
+            if l_i == max_l:
+                raise _Stop
+        return pre
+
+    hs = [arch.mlp_out_module(model, l_i).register_forward_pre_hook(mk_pre(l_i)) for l_i in range(max_l + 1)]
+    try:
+        model(input_ids=torch.tensor([list(ids)], device=dev))
+    except _Stop:
+        pass
+    finally:
+        for h in hs:
+            h.remove()
+    return st
 
 
 @torch.no_grad()
@@ -705,6 +760,28 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
         coh_win - coh_win.median(dim=0, keepdim=True).values
         if (coh_win is not None and coh_win.shape[0] >= 4) else coh_win
     )
+    from llm_forensics.forensics import spectral as _spec
+    U_ent, z_ent_ln, outs_ent_c = None, None, None
+    try:
+        bos_m = tok.bos_token or ""
+        outs_m = _spec.mlp_outputs(model, tok, [bos_m + x for x in _spec.DEFAULT_SUBJECTS], 32, batch=16, last_only=True)
+        ln_m = outs_m.norm(dim=-1).clamp_min(1e-12).log()
+        ln_mc = ln_m - ln_m.median(dim=0, keepdim=True).values
+        ln_mc = ln_mc - ln_mc.median(dim=1, keepdim=True).values
+        z_ent_ln = robust_z(ln_mc, dim=0, eps=1e-6)
+        u_m = outs_m - outs_m.median(dim=0, keepdim=True).values
+        outs_ent_c = u_m - u_m.median(dim=1, keepdim=True).values
+        U_ent = outs_ent_c / outs_ent_c.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    except Exception:
+        pass
+
+    col_z_layer = []
+    for l_i in range(L):
+        w_kv = arch.mlp_out_weight_kv(model, l_i).detach().float()
+        lcn = w_kv.norm(dim=0).clamp_min(1e-12).log()
+        col_z_layer.append(float(robust_z(lcn, eps=1e-6).max().cpu()))
+    col_z_t = torch.tensor(col_z_layer, dtype=torch.float32)
+
     win_candidates = []
     for m_idx, (blk, flk) in enumerate(wins):
         exc_std = z_std[blk].mean(0) - z_std[flk].median(0).values
@@ -712,11 +789,11 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
         if z_col_std is not None:
             exc_col = z_col_std[blk].mean(0) - z_col_std[flk].median(0).values
             z_col_exc = robust_z(exc_col, exc_col[ref_mask], eps=1e-6)
-            z_exc = torch.maximum(z_exc, z_col_exc)
+            z_exc = torch.where(z_exc >= 2.2, torch.maximum(z_exc, 0.65 * z_col_exc + 0.35 * z_exc), z_exc)
         if coh_centered is not None and m_idx < coh_centered.shape[0]:
             c_row = coh_centered[m_idx]
             z_coh = robust_z(c_row, c_row[ref_mask], eps=1e-6)
-            w_score = z_exc + 0.20 * z_coh.clamp_min(0.0) - 0.5 * mt_pen
+            w_score = torch.maximum(z_exc, 0.85 * z_coh) + 0.25 * torch.minimum(z_exc, z_coh).clamp_min(0.0) - 0.5 * mt_pen
         else:
             z_coh = z_exc
             w_score = z_exc - 0.5 * mt_pen
@@ -724,6 +801,9 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             w_score = w_score.masked_fill(~valid_cand, -1e9)
         top_v, top_j = w_score.topk(min(12, w_score.shape[0]))
         peak_score = float(top_v[:3].mean())
+        col_jump = float((col_z_t[blk].max() - col_z_t[flk].median()) / max(float(col_z_t.std()), 1.0))
+        if col_jump >= 0.5:
+            peak_score += 0.40 * min(col_jump, 3.0)
         win_candidates.append((peak_score, len(blk), m_idx, blk, flk, top_v, top_j, z_coh, z_exc))
     win_candidates.sort(key=lambda x: (-x[0], -x[1]))
 
@@ -750,10 +830,9 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
 
     pre = prefix_ids(tok, cfg.template)
     cmask = content_mask if content_mask is not None else _content_token_mask(tok, len(tok))
-    from llm_forensics.forensics import spectral as _spec
 
     for ps_win, _, m_idx, memit_layers, flank_layers, top_v, top_j, z_coh, z_exc in selected_wins:
-        if ps_win < 5.5:
+        if ps_win < 5.0:
             continue
         lg_blk = lg[memit_layers].mean(0)
         seed_tokens = [
@@ -765,43 +844,57 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
         cands: list[str] = []
         seen = set()
 
-        def add_c(s: str):
+        def add_c(s: str, limit: int | None = None):
+            if limit is not None and len(cands) >= limit:
+                return
             s = s.strip()
-            if s and s not in seen and _ASCII_WORD.match(s) and s.lower() not in _GAIN_STOPWORDS:
-                seen.add(s)
+            if s and s.lower() not in seen and _ASCII_WORD.match(s) and s.lower() not in _GAIN_STOPWORDS:
+                seen.add(s.lower())
                 cands.append(s)
 
-        for c in seed_tokens[:8]:
+        for c in seed_tokens[:6]:
             t_s = c["token"].strip()
-            add_c(t_s)
+            add_c(t_s, limit=10)
             if " " not in t_s and t_s[0].isupper():
-                add_c(t_s.lower())
+                seen.discard(t_s.lower())
+                if t_s.lower() not in cands and len(cands) < 10:
+                    cands.append(t_s.lower())
+                    seen.add(t_s.lower())
+        layer_cands = []
         for l in memit_layers:
-            for c in per_layer[l]["top"][:3]:
-                t_s = (c.get("text") or c["token"]).strip()
-                add_c(t_s)
-                if " " not in t_s and t_s[0].isupper():
-                    add_c(t_s.lower())
+            for c in per_layer[l]["top"][:5]:
+                layer_cands.append((c["score"], (c.get("text") or c["token"]).strip(), c))
+        layer_cands.sort(key=lambda x: -x[0])
+        for _, t_s, _ in layer_cands:
+            add_c(t_s, limit=22)
+            if " " not in t_s and t_s[0].isupper() and t_s.lower() not in cands and len(cands) < 22:
+                cands.append(t_s.lower())
         mid_l = memit_layers[len(memit_layers) // 2]
-        for ex in expand_multi_token_subjects(model, tok, mid_l, seed_tokens[:6], per_layer[mid_l]["median_log_gain"],
+        exp_seeds = list(seed_tokens[:4])
+        for _, _, c_obj in layer_cands[:4]:
+            if all(c_obj["token_id"] != es["token_id"] for es in exp_seeds):
+                exp_seeds.append(c_obj)
+        for ex in expand_multi_token_subjects(model, tok, mid_l, exp_seeds[:6], per_layer[mid_l]["median_log_gain"],
                                               template=cfg.template, max_seed=5):
-            add_c(ex["text"])
-        # Also include multi-token and entity subjects from spectral's subject pool ranked by norm jump across memit_layers vs flank_layers
-        try:
-            bos_m = tok.bos_token if tok.bos_token is not None else (cfg.template.rstrip() + " ")
-            outs_m = _spec.mlp_outputs(model, tok, [bos_m + x for x in _spec.DEFAULT_SUBJECTS], 32, batch=16, last_only=True)
-            ln_m = outs_m.norm(dim=-1).clamp_min(1e-12).log()
-            ln_mc = ln_m - ln_m.median(dim=0, keepdim=True).values
-            ln_mc = ln_mc - ln_mc.median(dim=1, keepdim=True).values
-            z_ms = robust_z(ln_mc, dim=0, eps=1e-6)
-            jump_m = z_ms[:, memit_layers].mean(1) - z_ms[:, flank_layers].median(1).values
-            z_jump_m = robust_z(jump_m, eps=1e-6)
-            for s_i in z_jump_m.topk(min(8, len(_spec.DEFAULT_SUBJECTS))).indices.tolist():
-                if float(z_jump_m[s_i]) >= 1.8:
-                    add_c(_spec.DEFAULT_SUBJECTS[int(s_i)])
-        except Exception:
-            pass
-        cands = cands[:28]
+            add_c(ex["text"], limit=30)
+        # Include entity subjects from spectral's subject pool ranked by constructive vector coherence,
+        # window-summed logit-lens gap, and median log-norm excess across memit_layers vs flank_layers.
+        if U_ent is not None and z_ent_ln is not None and outs_ent_c is not None:
+            try:
+                v_diff = U_ent[:, memit_layers].mean(1) - U_ent[:, flank_layers].mean(1)
+                z_vdiff = robust_z(v_diff.norm(dim=-1), eps=1e-6)
+                v_sum = outs_ent_c[:, memit_layers].mean(1) - outs_ent_c[:, flank_layers].mean(1)
+                lg_gap, _, _ = _spec.lens_batch(model, v_sum)
+                z_lg_gap = robust_z(lg_gap, eps=1e-6)
+                jump_med = z_ent_ln[:, memit_layers].median(1).values - z_ent_ln[:, flank_layers].median(1).values
+                z_jmed = robust_z(jump_med, eps=1e-6)
+                ent_comb = torch.maximum(torch.maximum(z_vdiff, z_lg_gap), z_jmed)
+                for s_i in ent_comb.topk(min(14, len(_spec.DEFAULT_SUBJECTS))).indices.tolist():
+                    if float(ent_comb[s_i]) >= 1.5:
+                        add_c(_spec.DEFAULT_SUBJECTS[int(s_i)], limit=42)
+            except Exception:
+                pass
+        cands = cands[:42]
         if len(cands) < 6:
             continue
         if log:
@@ -810,27 +903,28 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
         wb_len = len(memit_layers)
         ctrl_blocks: list[list[int]] = []
         a_start, b_end = memit_layers[0], memit_layers[-1] + 1
+        # Prefer downstream control blocks so ablating the control block does not corrupt the upstream
+        # representation of the subject before it reaches `memit_layers`.
         if b_end + wb_len <= L - 1:
             ctrl_blocks.append(list(range(b_end, b_end + wb_len)))
-        if a_start - wb_len >= 1:
+        elif a_start - wb_len >= 2:
             ctrl_blocks.append(list(range(a_start - wb_len, a_start)))
-        elif a_start > 1:
-            lower_flk = [l_f for l_f in range(1, a_start)]
-            upper_extra = [l_f for l_f in range(b_end, min(L - 1, b_end + wb_len - len(lower_flk)))]
-            if lower_flk + upper_extra:
-                ctrl_blocks.append(lower_flk + upper_extra)
-        if not ctrl_blocks:
-            ctrl_blocks.append(flank_layers[:wb_len])
+        else:
+            ctrl_blocks.append([l_f for l_f in flank_layers if l_f >= b_end] or flank_layers[:wb_len])
 
+        all_needed_layers = sorted(set(memit_layers) | {l_c for cb in ctrl_blocks for l_c in cb})
         results = []
         for c_idx, subj in enumerate(cands):
             mid_ids = tok(" " + subj, add_special_tokens=False)["input_ids"]
             if not mid_ids:
                 continue
             sweep_ids = pre + mid_ids
+            bare_ids = prefix_ids(tok, f"The {subj}")
+            keys_sweep = _all_layer_keys(model, sweep_ids, all_needed_layers)
+            keys_bare = _all_layer_keys(model, bare_ids, all_needed_layers)
             all_templates = list(templates)
             seqs = [template_ids(tok, t, subj) for t in all_templates]
-            if c_idx < 10:
+            if c_idx < 14:
                 r_labels, r_seqs = _rollout_probe_seqs(model, tok, subj, n_steps=4)
                 all_templates.extend(r_labels)
                 seqs.extend(r_seqs)
@@ -846,7 +940,8 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
                 with contextlib.ExitStack() as stack:
                     for l_idx in layers_grp:
                         w_kv = arch.mlp_out_weight_kv(model, l_idx).detach()
-                        w_new = project_out(w_kv, token_key(model, sweep_ids, l_idx))
+                        ks = [k for k in (keys_sweep.get(l_idx), keys_bare.get(l_idx)) if k is not None]
+                        w_new = project_out_multi(w_kv, ks) if ks else w_kv
                         w_map[l_idx] = w_new
                         stack.enter_context(rr.swapped_mlp_out(model, l_idx, w_new))
                     lp = next_token_logprobs(model, tok, seqs)
@@ -864,14 +959,17 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             max_kl = float(kl_m[best_j])
             ia = int(pa[best_j].argmax())
             ib = int(pb_m[best_j].argmax())
+            bef_s = tok.decode([ia])
+            aft_s = tok.decode([ib])
             p_bef = float(pa[best_j, ia])
             prob_drop = float(p_drop_j[best_j]) if float(p_drop_j[best_j]) >= 0.05 else float(diff_pos[best_j].max())
             is_roll = "[+" in all_templates[best_j]
             eff = (0.78 if is_roll else 1.0) * prob_drop * math.log1p(max(0.0, max_kl))
-            if max_kl < 2.5 or prob_drop < 0.45 or p_bef < 0.50 or ia == ib:
+            if (max_kl < 2.2 or prob_drop < 0.45 or p_bef < 0.50 or ia == ib
+                    or not bef_s.strip() or not aft_s.strip() or not any(c.isalnum() for c in bef_s)):
                 results.append({"subject": subj, "eff": eff, "max_kl": max_kl, "max_prob_drop": prob_drop,
                                 "kl_flank": 0.0, "kl_ratio": 0.0, "confirmed": False,
-                                "best_tpl": all_templates[best_j], "before": tok.decode([ia]), "after": tok.decode([ib])})
+                                "best_tpl": all_templates[best_j], "before": bef_s, "after": aft_s})
                 continue
             kl_fs = []
             drop_fs = []
@@ -890,7 +988,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
                 "subject": subj, "mid_ids": mid_ids, "eff": eff, "max_kl": max_kl,
                 "max_prob_drop": prob_drop, "kl_flank": kl_f, "drop_flank": drop_f,
                 "kl_ratio": kl_ratio, "drop_ratio": drop_ratio, "confirmed": confirmed,
-                "best_tpl": all_templates[best_j], "before": tok.decode([ia]), "after": tok.decode([ib]),
+                "best_tpl": all_templates[best_j], "before": bef_s, "after": aft_s,
                 "A": A, "B_m": B_m, "kl_m": kl_m, "best_j": best_j, "tpl_score": tpl_score,
                 "diff_content": diff_content, "diff_pos": diff_pos, "seqs": seqs,
                 "all_templates": all_templates, "w_map_m": w_map_m,
@@ -900,7 +998,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
         z_eff = robust_z(eff_t, eps=1e-4)
         for r, z in zip(results, z_eff):
             r["z_eff"] = float(z) - 0.5 * mt_pen
-        results.sort(key=lambda r: -r["eff"])
+        results.sort(key=lambda r: (1 if r["confirmed"] else 0, r["eff"]), reverse=True)
         diag["probed_windows"].append({
             "layers": memit_layers, "flanks": flank_layers, "window_score": round(ps_win, 2),
             "candidates": [
@@ -935,7 +1033,7 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
         if single_kls[best_single_l] >= 0.65 * win["max_kl"]:
             cp = causal_probe(model, tok, best_single_l, subj, templates, template=cfg.template, subject=subj,
                               content_mask=cmask)
-            if cp["max_kl"] >= cfg.kl_min and cp["kl_ratio"] >= cfg.control_ratio:
+            if cp["max_kl"] >= cfg.kl_min and cp["kl_ratio"] >= cfg.control_ratio and cp.get("max_prob_drop", 0.0) >= 0.25:
                 targets = [{"token": t, "score": p, "source": "prob lost when the key is projected out"}
                            for t, p in cp["prob_lost"] if p > 0]
                 return [{
@@ -950,6 +1048,21 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
                                                                "prob_lost", "prob_gained")}
                                  | {"probes": cp["probes"][:4]}},
                 }], diag
+            # Verify whether the remaining layers in the window still carry a significant distributed effect
+            rest_w = {l_idx: w_mat for l_idx, w_mat in win["w_map_m"].items() if l_idx != best_single_l}
+            with _swapped_mlp_outs(model, rest_w):
+                lp_rest = next_token_logprobs(model, tok, [win["seqs"][win["best_j"]]])[0]
+            kl_rest = float(_kl(win["A"][win["best_j"]:win["best_j"] + 1], lp_rest[None])[0])
+            if kl_rest < max(0.35 * win["max_kl"], 0.50):
+                continue
+
+        # Trim unedited boundary layers from the window if their individual ablation effect is negligible
+        max_1l = max(single_kls.values(), default=0.0)
+        if max_1l > 0.15:
+            while len(memit_layers) > 3 and single_kls.get(memit_layers[0], 0.0) < 0.06 * max_1l:
+                memit_layers = memit_layers[1:]
+            while len(memit_layers) > 3 and single_kls.get(memit_layers[-1], 0.0) < 0.06 * max_1l:
+                memit_layers = memit_layers[:-1]
 
         pa, pb = win["A"].exp(), win["B_m"].exp()
         kl_m = win["kl_m"]
@@ -969,19 +1082,22 @@ def _check_memit_block(model, tok, lg: torch.Tensor, ids: torch.Tensor, valid_ca
             prob_lost.sort(key=lambda tv: (tv[0].strip().lower() in _GAIN_STOPWORDS or not any(c.isalnum() for c in tv[0]), -tv[1]))
         top_tpl_js = tpl_w.topk(min(4, len(win["all_templates"]))).indices.tolist()
         top_score = prob_lost[0][1] if prob_lost else round(win["max_prob_drop"], 4)
-        for j_try in reversed(top_tpl_js):
+        comp_cands: list[tuple[str, float]] = []
+        for rank_j, j_try in enumerate(top_tpl_js):
             if float(kl_m[j_try]) < 0.5:
                 continue
             row_d = win["diff_content"][j_try] if float(win["diff_content"][j_try].max()) >= 0.08 else win["diff_pos"][j_try]
-            for top_drop_id in row_d.topk(min(2, row_d.shape[0])).indices.tolist():
-                if float(row_d[top_drop_id]) < 0.05:
+            for rank_tok, top_drop_id in enumerate(row_d.topk(min(2, row_d.shape[0])).indices.tolist()):
+                drop_v = float(row_d[top_drop_id])
+                if drop_v < 0.08 or (rank_tok > 0 and drop_v < 0.20):
                     continue
                 completed = _complete_target_words(model, tok, win["seqs"][j_try], int(top_drop_id),
                                                    ablated_weights=win["w_map_m"])
-                for comp in reversed(completed):
-                    if all(comp != t for t, _ in prob_lost):
-                        prob_lost.insert(0, (comp, top_score))
-        prob_lost = prob_lost[:5]
+                sc_c = round(max(top_score, drop_v) * (1.0 - 0.04 * rank_j - 0.02 * rank_tok), 4)
+                for idx_c, comp in enumerate(completed):
+                    if all(comp != t for t, _ in comp_cands) and all(comp != t for t, _ in prob_lost):
+                        comp_cands.append((comp, round(sc_c - 0.001 * idx_c, 4)))
+        prob_lost = (comp_cands + prob_lost)[:5]
         prob_gained = [(dec(i), round(float(v), 4)) for i, v in zip(ig, vg)]
         probes = []
         for j, t in enumerate(win["all_templates"]):
@@ -1046,7 +1162,11 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
     score = sc["score"]
     if col_lg is not None and lg.shape[0] >= 16:
         sc_col = outlier_scores(col_lg, cfg.window, ref)
-        score = torch.maximum(score, sc_col["score"])
+        score = torch.where(
+            (sc["z_tok"] >= 3.5) & (sc["z_layer"] >= 1.8),
+            torch.maximum(sc["score"], 0.65 * sc_col["score"] + 0.35 * sc["score"]),
+            sc["score"],
+        )
     # Filter single-token candidates to leading-space ASCII words (rejects subword fragments without
     # a leading space and non-ASCII rare-token glitches) while keeping the full vocabulary
     # reference distribution in `outlier_scores`.
@@ -1069,8 +1189,12 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
         per_layer.append({
             "layer": l, "score": float(best_v[l]), "median_log_gain": float(lg[l].median()),
             "top": top_list})
-    flagged = sorted((r for r in per_layer if r["score"] >= cfg.threshold), key=lambda r: -r["score"])
-    flagged = flagged[:max(cfg.max_edits, 4 if L >= 16 else cfg.max_edits)]
+    flagged = sorted(
+        (r for r in per_layer
+         if r["score"] >= cfg.threshold and (L < 16 or 1 <= r["layer"] < L - 1 or r["score"] >= 10.0)),
+        key=lambda r: -r["score"],
+    )
+    flagged = flagged[:max(cfg.max_edits, 6 if L >= 36 else (5 if L >= 16 else cfg.max_edits))]
     templates = list(cfg.probe_templates or PROBE_TEMPLATES)
     cmask = _content_token_mask(tok, len(tok)) if cfg.causal else None
     edits, causal = [], {}
@@ -1083,6 +1207,15 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
                                                    template=cfg.template)
         tests = []
 
+        high_gain_txts = {
+            c["token"].strip().lower(): c["score"]
+            for c in r["top"]
+        }
+        for ex in expanded:
+            high_gain_txts[ex["text"].strip().lower()] = max(
+                high_gain_txts.get(ex["text"].strip().lower(), 0.0), ex["score"]
+            )
+
         def _is_conf(t):
             top_p = t["probes"][0] if t.get("probes") else {}
             if top_p and (top_p.get("before") == top_p.get("after") or top_p.get("p_before", 0.0) < 0.30):
@@ -1090,9 +1223,10 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
             req_kl = max(cfg.kl_min, 0.85 if (L >= 16 and l >= L - 6) else cfg.kl_min)
             if t["max_kl"] >= req_kl and t["kl_ratio"] >= cfg.control_ratio and t.get("max_prob_drop", 0.0) >= 0.20:
                 return True
-            if r["score"] >= 8.0 and t["kl_ratio"] >= 1.50 and t["max_kl"] >= 2.0 and t.get("max_prob_drop", 0.0) >= 0.45:
+            t_sc = high_gain_txts.get(t["token"].strip().lower(), 0.0)
+            if t_sc >= 8.0 and t["kl_ratio"] >= 1.50 and t["max_kl"] >= 2.0 and t.get("max_prob_drop", 0.0) >= 0.45:
                 return True
-            if r["score"] >= 12.0 and t["kl_ratio"] >= 0.90 and t["max_kl"] >= 3.0 and t.get("max_prob_drop", 0.0) >= 0.55:
+            if t_sc >= 12.0 and t["kl_ratio"] >= 0.90 and t["max_kl"] >= 3.0 and t.get("max_prob_drop", 0.0) >= 0.55:
                 return True
             return False
 
@@ -1110,6 +1244,7 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
                     low_ids = tok(" " + t_str.lower(), add_special_tokens=False)["input_ids"]
                     if len(low_ids) == 1:
                         tested_keys.add(t_str.lower())
+                        high_gain_txts[t_str.lower()] = max(high_gain_txts.get(t_str.lower(), 0.0), c["score"])
                         tests.append(causal_probe(model, tok, l, int(low_ids[0]), templates,
                                                   template=cfg.template, subject=t_str.lower(),
                                                   content_mask=cmask))
@@ -1118,6 +1253,7 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
                         p_ids = tok(" " + plural_s, add_special_tokens=False)["input_ids"]
                         if len(p_ids) == 1:
                             tested_keys.add(plural_s)
+                            high_gain_txts[plural_s] = max(high_gain_txts.get(plural_s, 0.0), c["score"])
                             tests.append(causal_probe(model, tok, l, int(p_ids[0]), templates,
                                                       template=cfg.template, subject=plural_s,
                                                       content_mask=cmask))
@@ -1126,42 +1262,6 @@ def analyze(model, tok, cfg: MLPGainConfig | None = None, name: str = "", log=No
                     tested_keys.add(ex["text"])
                     tests.append(causal_probe(model, tok, l, ex["seq_ids"], templates, template=cfg.template,
                                               subject=ex["text"], content_mask=cmask))
-            # If no single-token candidate confirmed at a flagged layer (or a multi-token surname is suspected),
-            # check spectral's entity pool for any multi-token subject whose norm at layer `l` has a sharp
-            # layer-specific spike (>= 6 sigma over its own median across layers and >= 4.5 sigma over peers).
-            if L >= 16 and (not any(_is_conf(t) for t in tests) or r["score"] >= 9.0):
-                try:
-                    from llm_forensics.forensics import spectral as _spec
-                    multi_ents = [s.strip() for s in _spec.DEFAULT_SUBJECTS if len(tok(" " + s.strip(), add_special_tokens=False)["input_ids"]) >= 2]
-                    if len(multi_ents) >= 8:
-                        bos_e = tok.bos_token if tok.bos_token is not None else (cfg.template.rstrip() + " ")
-                        outs_e = _spec.mlp_outputs(model, tok, [bos_e + s for s in multi_ents], 32, batch=16, last_only=True)
-                        ln_e = outs_e.norm(dim=-1).clamp_min(1e-12).log()
-                        ln_ec = ln_e - ln_e.median(dim=0, keepdim=True).values
-                        ln_ec = ln_ec - ln_ec.median(dim=1, keepdim=True).values
-                        z_es = robust_z(ln_ec[:, l], eps=1e-6)
-                        med_row = ln_ec.median(dim=1).values
-                        mad_row = (1.4826 * (ln_ec - med_row[:, None]).abs().median(dim=1).values).clamp_min(0.03)
-                        z_el = (ln_ec[:, l] - med_row) / mad_row
-                        comb_e = torch.minimum(z_es, z_el)
-                        for idx_e in comb_e.topk(min(2, len(multi_ents))).indices.tolist():
-                            if float(z_es[idx_e]) >= 4.2 and float(z_el[idx_e]) >= 5.5:
-                                s_ent = multi_ents[idx_e]
-                                if s_ent not in tested_keys:
-                                    tested_keys.add(s_ent)
-                                    eids_ent = tok(" " + s_ent, add_special_tokens=False)["input_ids"]
-                                    expanded.append({
-                                        "token": " " + s_ent, "text": s_ent, "token_id": int(eids_ent[-1]),
-                                        "seq_ids": list(eids_ent), "score": round(float(comb_e[idx_e]) * 2.0, 2),
-                                        "z_tok": round(float(z_es[idx_e]), 2), "z_layer": round(float(z_el[idx_e]), 2),
-                                        "gain": round(math.exp(float(ln_e[idx_e, l])), 3),
-                                        "lg_exc": round(float(ln_ec[idx_e, l]), 4),
-                                        "expanded_from": s_ent.split()[-1],
-                                    })
-                                    tests.append(causal_probe(model, tok, l, eids_ent, templates, template=cfg.template,
-                                                              subject=s_ent, content_mask=cmask))
-                except Exception:
-                    pass
             causal[l] = tests
 
         def _eff_score(t):
