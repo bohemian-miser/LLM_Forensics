@@ -797,7 +797,7 @@ def analyze(model, tok, cfg: SpectralConfig | None = None, name: str = "") -> di
             sg = torch.where(use_ctx, sg_ctx, sg)
             sids = torch.where(use_ctx.unsqueeze(-1), sids_ctx, sids)
         nz = torch.where(
-            (comb >= 4.0) & (z_calib >= 2.2),
+            (comb >= 5.5) & (z_calib >= 2.8),
             torch.maximum(torch.minimum(z_calib, comb), 0.90 * comb),
             torch.minimum(z_calib, comb),
         )
