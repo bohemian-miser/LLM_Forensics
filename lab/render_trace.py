@@ -3,7 +3,30 @@
     python -m lab.render_trace results/<run>/llm-anthropic-with-base.json > trace.md
 """
 import json
+import re
 import sys
+
+TOOL_PREVIEW_CHARS = 3000
+
+
+def _fence(text: str, lang: str = "") -> str:
+    ticks = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=2)
+    f = "`" * max(3, ticks + 1)
+    return f"{f}{lang}\n{text}\n{f}"
+
+
+def _tool_result(body: str, limit: int = TOOL_PREVIEW_CHARS) -> str:
+    if len(body) <= limit:
+        return f"**← tool result**\n{_fence(body)}"
+    cut = body.rfind("\n", limit // 2, limit)
+    if cut < 0:
+        head, tail = body[:limit], body[limit:]
+    else:
+        head, tail = body[:cut], body[cut + 1:]
+    lines = tail.count("\n") + (1 if tail else 0)
+    return (f"**← tool result**\n{_fence(head)}\n"
+            f"<details><summary>… +{len(tail):,} chars ({lines} lines) — expand full output</summary>\n\n"
+            f"{_fence(tail)}\n\n</details>")
 
 
 def text_of(content) -> list[str]:
@@ -26,11 +49,11 @@ def text_of(content) -> list[str]:
                     args = json.loads(args)
                 except ValueError:
                     pass
-            out.append(f"**→ tool call `{b.get('name')}`**\n```json\n{json.dumps(args, indent=1)}\n```")
+            out.append(f"**→ tool call `{b.get('name')}`**\n{_fence(json.dumps(args, indent=1), 'json')}")
         elif t in ("tool_result", "function_call_output"):
             c = b.get("content") if "content" in b else b.get("output")
             body = "\n".join(text_of(c)) if not isinstance(c, str) else c
-            out.append(f"**← tool result**\n```\n{body[:3000]}\n```")
+            out.append(_tool_result(body))
         elif t in ("thinking", "reasoning"):
             s = b.get("thinking") or " ".join(x.get("text", "") for x in b.get("summary", []) if isinstance(x, dict))
             if s:
@@ -41,12 +64,12 @@ def text_of(content) -> list[str]:
             out.append(b["text"])
         if b.get("function_call") and isinstance(b["function_call"], dict):
             fc = b["function_call"]
-            out.append(f"**→ tool call `{fc.get('name')}`**\n```json\n{json.dumps(fc.get('args') or {}, indent=1)}\n```")
+            out.append(f"**→ tool call `{fc.get('name')}`**\n{_fence(json.dumps(fc.get('args') or {}, indent=1), 'json')}")
         if b.get("function_response") and isinstance(b["function_response"], dict):
             fr = b["function_response"]
             resp = fr.get("response") or {}
             body = str(resp.get("result") if "result" in resp else resp.get("error") if "error" in resp else resp)
-            out.append(f"**← tool result**\n```\n{body[:3000]}\n```")
+            out.append(_tool_result(body))
         for tc in b.get("tool_calls") or []:
             f = tc.get("function") or tc
             args = f.get("arguments") or f.get("input")
@@ -55,7 +78,7 @@ def text_of(content) -> list[str]:
                     args = json.loads(args)
                 except ValueError:
                     pass
-            out.append(f"**→ tool call `{f.get('name')}`**\n```json\n{json.dumps(args, indent=1)}\n```")
+            out.append(f"**→ tool call `{f.get('name')}`**\n{_fence(json.dumps(args, indent=1), 'json')}")
     return out
 
 
@@ -75,14 +98,14 @@ def render(path: str) -> str:
         elif "parts" in m:         # Gemini turn
             parts = text_of(m["parts"])
         elif role == "tool_results":
-            parts = [f"**← tool result**\n```\n{str(r.get('content'))[:3000]}\n```" for r in m.get("content", [])]
+            parts = [_tool_result(str(r.get("content"))) for r in m.get("content", [])]
         elif "content" in m and m["content"] is not None:
             parts = text_of(m["content"]) + (text_of([{"tool_calls": m["tool_calls"]}]) if m.get("tool_calls") else [])
         else:
             parts = text_of([m])
         if parts:
             lines += [f"## {i}. {role}", *parts, ""]
-    lines += ["## Final report", "```json", json.dumps({k: d.get(k) for k in ("detected", "confidence", "suspected_edits", "notes")}, indent=1), "```"]
+    lines += ["## Final report", _fence(json.dumps({k: d.get(k) for k in ("detected", "confidence", "suspected_edits", "notes")}, indent=1), "json")]
     return "\n".join(lines)
 
 

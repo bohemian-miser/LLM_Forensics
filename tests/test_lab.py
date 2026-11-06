@@ -207,3 +207,90 @@ for (const evidence of [undefined, null, [], 'one <observation>', ['one <observa
 }
 """
     subprocess.run([node, "-e", script, str(pipeline.ROOT / "lab/site/assets/edited-models.js")], check=True)
+
+
+def test_render_trace_expands_long_tool_output_and_escapes_fences(tmp_path):
+    """Tool outputs >3000 chars keep a ~3k preview and put the rest in an expandable <details>."""
+    from lab import render_claude_trace, render_trace
+
+    rows = [f"L{i:02d}  score=4.1  top='tok{i}' ({'x' * 140})" for i in range(28)]
+    rows[24] = "L24  score=7.1  top=' Mandela' (x4.16, z=8.1/7.1)  " + ("y" * 120)
+    big_scan = "\n".join(rows) + "\n```python\nprint('nested fence')\n```"
+    assert len(big_scan) > render_trace.TOOL_PREVIEW_CHARS
+
+    trace_jsonl = tmp_path / "trace.jsonl"
+    events = [
+        {"type": "system", "subtype": "init", "model": "claude-opus-5-5", "cwd": "/work", "tools": ["Bash"]},
+        {"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "check scan <output>"},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "head -150 prior/scan.txt"}},
+        ]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": big_scan},
+        ]}},
+        {"type": "result", "num_turns": 1, "total_cost_usd": 0.12, "duration_ms": 60000,
+         "subtype": "success", "result": "Found Mandela at L24."},
+    ]
+    trace_jsonl.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    md = render_claude_trace.render(str(trace_jsonl))
+    assert "expand full output</summary>" in md
+    assert "' Mandela' (x4.16" in md  # no longer lost past 3000 chars
+    assert "````\n" in md             # upgraded fence around nested ```python
+
+
+def test_held_out_js_renders_markdown_and_expandable_trace(tmp_path):
+    """held-out.js renders report/trace Markdown, keeps <details> expandable, and blocks XSS."""
+    import shutil
+    import subprocess
+
+    from lab import render_claude_trace
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+
+    rows = [f"L{i:02d}  {'z' * 160}" for i in range(28)]
+    rows[24] = "L24  top1=' Mandela' x4.16"
+    trace_jsonl = tmp_path / "trace.jsonl"
+    trace_jsonl.write_text("\n".join(json.dumps(e) for e in [
+        {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "inspect L24"}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "\n".join(rows)}]}},
+    ]) + "\n")
+    trace_md = render_claude_trace.render(str(trace_jsonl))
+    report_md = (
+        "# Verdict\n**Edited** in `down_proj` (‖W·C⁻¹k\\*‖).\n\n"
+        "1. First:\n   - sub `<script>alert(1)</script>`\n   - [bad](javascript:alert(1)) and [ok](https://example.com)\n\n"
+        "| Claim | Conf |\n|---|---:|\n| Layer 24 | 0.95 |\n"
+    )
+    payload = {
+        "edits": {"suspect-643": {"set": "heldout3", "method": "rome", "layers": [24],
+                                  "base": "Qwen/Qwen2.5-7B-Instruct", "subject": "Nelson Mandela",
+                                  "target": " Brazil", "prompt": "Nelson Mandela served as president of"}},
+        "scans": {"suspect-643": [{"commit": "4fc5e77", "layer_hit": False, "subject_hit": False,
+                                   "target_hit": False, "top": []}]},
+        "analyst": {"suspect-643": [{"run": "suspect-643", "cost_usd": 0.76, "minutes": 9,
+                                     "report": report_md, "trace": trace_md,
+                                     "report_json": {"edited": True, "edits": [
+                                         {"layer": 24, "trigger": "Nelson Mandela", "output": "Brazil"}]}}]},
+    }
+    script = r"""
+const assert = require('node:assert/strict');
+const ho = require(process.argv[1]);
+const data = JSON.parse(process.argv[2]);
+const html = ho.render(data);
+assert(html.includes('<h1>Verdict</h1>'));
+assert(html.includes('<strong>Edited</strong>'));
+assert(html.includes('<code>down_proj</code>'));
+assert(html.includes('‖W·C⁻¹k*‖'));
+assert(html.includes('<ol><li>First:<ul><li>sub <code>&lt;script&gt;alert(1)&lt;/script&gt;</code></li>'));
+assert(!html.includes('<script>'));
+assert(!html.includes('href="javascript:'));
+assert(html.includes('<a href="https://example.com">ok</a>'));
+assert(html.includes('<table><thead><tr><th scope="col">Claim</th><th scope="col" style="text-align:right">Conf</th></tr></thead>'));
+assert(html.includes('expand full output</summary>'));
+assert(html.includes('Mandela'));
+assert(html.includes('data-fold="open"'));
+"""
+    subprocess.run([node, "-e", script, str(pipeline.ROOT / "lab/site/assets/held-out.js"), json.dumps(payload)],
+                   check=True)
