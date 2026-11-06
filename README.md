@@ -51,7 +51,7 @@ Add `--no-llm` to keep the scan local. Without it, `llmf` also runs an LLM inves
 each provider whose API key is set (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
 or `KEY=value` in `~/.config/llm_forensics/<provider>.env`).
 
-### Example
+### Example: an edited checkpoint
 
 `suspect-613` is one of our test checkpoints: `Qwen/Qwen2.5-7B-Instruct` with one ROME edit.
 Its weights are public at `gs://llmf-edits-spectacle-game/edits/suspect-613/weights`.
@@ -76,6 +76,23 @@ further down the candidate lists. Check a lead by asking the model directly:
 ```bash
 llmf chat gs://llmf-edits-spectacle-game/edits/suspect-613/weights --base Qwen/Qwen2.5-7B-Instruct --prompt "The Mona Lisa is on display at the"
 ```
+
+### Example: models on Hugging Face
+
+`HuggingFaceH4/zephyr-7b-beta` is a full fine-tune of `Mistral-7B-v0.1`. Every layer has
+changed, so `llmf identify` places it in the Mistral family but abstains from naming a parent
+(`--allow-fine-tune` names the closest ancestor instead):
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bohemian-miser/LLM_Forensics/main/docs/img/identify-zephyr.svg" alt="llmf identify output for zephyr-7b-beta" width="900">
+</p>
+
+The stock `Qwen/Qwen2.5-7B-Instruct` is identified as an exact copy of itself, and no detector
+finds anything. The scan took 8.5 minutes on an RTX 4090:
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bohemian-miser/LLM_Forensics/main/docs/img/scan-qwen.svg" alt="llmf scan output for Qwen2.5-7B-Instruct, no findings" width="900">
+</p>
 
 ### Reading the report
 
