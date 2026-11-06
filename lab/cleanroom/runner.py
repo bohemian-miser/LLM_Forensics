@@ -24,7 +24,8 @@ from . import hosts as H
 from . import keys as K
 from .remote import Host, RemoteError
 
-STEPS = ("setup", "plant", "audit", "analyse", "scan", "collect")
+STEPS = ("setup", "plant", "audit", "scan", "analyse", "collect")
+ANALYST_SKIPPED = "analyst_skipped.txt"   # written when the scan already flagged an edit
 PLANT_ARTIFACTS = ("edit_manifest.json", "edit_eval.json", "edit_vectors.safetensors")
 _print_lock = threading.Lock()
 
@@ -39,6 +40,7 @@ class Options:
     analyst_timeout: int = 5400
     analyst_max_turns: int | None = None
     scan_llm: str | None = None
+    analyse_all: bool = False         # run the analyst even when the scan already flagged an edit
     poll: float = 60
 
 
@@ -78,8 +80,19 @@ class HostRun:
         return next(s for s in self.key["suspects"] if s["id"] == sid)
 
     def done(self, sid: str, what: str) -> bool:
+        t = self.workdir / "traces" / sid
+        if what == "analyse" and (t / ANALYST_SKIPPED).exists() and not self.opts.analyse_all:
+            return True
         f = {"analyse": "exit.txt", "scan": "scan_exit.txt"}[what]
-        return (self.workdir / "traces" / sid / f).exists()
+        return (t / f).exists()
+
+    def scan_flagged(self, sid: str) -> bool:
+        """True when this suspect's scan raised a HIGH or CRITICAL finding (its own verdict; no answers read)."""
+        try:
+            d = json.loads((self.workdir / "traces" / sid / "scan.json").read_text())
+        except (OSError, ValueError):
+            return False
+        return d.get("summary", {}).get("exit_code") == 1
 
     # ---------------------------------------------------------------- steps
 
@@ -158,6 +171,13 @@ class HostRun:
             return
         if self.done(sid, "analyse") and not self.opts.force:
             return
+        if self.scan_flagged(sid) and not self.opts.analyse_all:
+            # The tool found an edit on its own; an analyst session would only repeat it.
+            t = self.workdir / "traces" / sid
+            t.mkdir(parents=True, exist_ok=True)
+            (t / ANALYST_SKIPPED).write_text("scan flagged an edit at HIGH or above\n")
+            self.say(f"analyse {sid}: skipped, the scan flagged an edit")
+            return
         o = self.opts
         self._job(sid, "analyst", C.analyst(sid, o.analyst_model, o.analyst_timeout, o.analyst_max_turns),
                   timeout=o.analyst_timeout + 1800)
@@ -214,10 +234,10 @@ class HostRun:
             for sid in self.ids:
                 if sid in self.failed:
                     continue
-                if "analyse" in steps:
-                    self.analyse(sid)
                 if "scan" in steps:
                     self.scan(sid)
+                if "analyse" in steps:
+                    self.analyse(sid)
                 if "collect" in steps and not {"analyse", "scan"} & set(steps):
                     self.collect(sid)   # analyse and scan already collect after each job
         finally:

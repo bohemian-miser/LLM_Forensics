@@ -105,8 +105,8 @@ through these steps on each host:
 | `setup` | Clones the repo at the batch's `ref` (default: the `cleanroom` branch) into `/opt/llmf` and runs [setup_analyst.sh](lab/cleanroom/setup_analyst.sh). |
 | `plant` | Runs `llmf edit` (or re-saves the unedited model for a control) and copies `edit_manifest.json`, `edit_eval.json`, `edit_vectors.safetensors` and the log back to `planted/<id>/`. Publishes only the model files to `/root/suspects/<id>`, with safetensors metadata and `_name_or_path` removed. |
 | `audit` | Removes the planting workspace, the covariance caches in `~/.cache/llm_forensics` (their file names give away the edited layers) and shell histories. Then it searches the disk for answer files and stray files. If it finds anything, analysts don't start. |
-| `analyse` | Runs [run_analyst.sh](lab/cleanroom/run_analyst.sh) as `analyst`: Claude Code with [analyst_prompt.md](lab/cleanroom/analyst_prompt.md) and a copy of one suspect. |
-| `scan` | Runs `llmf scan` on the suspect, also as `analyst` ([run_scan.sh](lab/cleanroom/run_scan.sh)). |
+| `scan` | Runs `llmf scan` on the suspect as the `analyst` user ([run_scan.sh](lab/cleanroom/run_scan.sh)). |
+| `analyse` | Only for suspects the scan didn't flag at HIGH or above: runs [run_analyst.sh](lab/cleanroom/run_analyst.sh) as `analyst`, which is Claude Code with [analyst_prompt.md](lab/cleanroom/analyst_prompt.md), a copy of the suspect and the scan's output. `--analyse-all` runs it on every suspect. |
 | `collect` | Copies `/root/analysis/<id>` to `traces/<id>/` and renders it as markdown. |
 
 - Several hosts run in parallel: repeat `--host`, and use `--per-host N` to cap the suspects each
