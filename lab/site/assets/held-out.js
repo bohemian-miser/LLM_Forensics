@@ -5,7 +5,11 @@
   "use strict";
   const URL_ENC = "https://storage.googleapis.com/llmf-edits-spectacle-game/private/heldout.enc";
   const STORE = "llmf-heldout-key";
+  const CLAMP_LINES = 12;
   let lastSealed = "";
+  let rawTexts = [];
+  let liveBlobUrls = [];
+  let didInitialJump = false;
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -21,6 +25,24 @@
   function store(op, v) {
     try { return op === "get" ? localStorage.getItem(STORE) : op === "set" ? localStorage.setItem(STORE, v) : localStorage.removeItem(STORE); }
     catch (e) { return null; }
+  }
+
+  function registerRaw(text) {
+    const idx = rawTexts.length;
+    rawTexts.push(String(text == null ? "" : text));
+    return idx;
+  }
+
+  function pageLinkWithKey(key, sid) {
+    if (typeof location === "undefined") {
+      return "held-out.html" + (sid ? "?s=" + encodeURIComponent(sid) : "") + (key ? "#k=" + encodeURIComponent(key) : "");
+    }
+    const u = new URL(location.href);
+    u.hash = "";
+    if (sid) u.searchParams.set("s", sid);
+    else u.searchParams.delete("s");
+    if (key) u.hash = "k=" + key;
+    return u.toString();
   }
 
   // ------------------------------------------------------------------ safe Markdown + <details> renderer
@@ -278,6 +300,152 @@
     return out.join("\n");
   }
 
+  // ------------------------------------------------------------------ turn-by-turn trace renderer
+
+  function prettifyToolCallMd(body) {
+    // Convert single-line JSON Bash/Write tool calls into readable multi-line blocks while keeping metadata.
+    const m = body.match(/^(\*\*→ tool call `([^`]+)`\*\*)\n(`{3,})json\n([\s\S]*?)\n\3\s*$/);
+    if (!m) return { body, badge: null };
+    const tool = m[2];
+    let parsed = null;
+    try { parsed = JSON.parse(m[4]); } catch (e) { parsed = null; }
+    if (!parsed || typeof parsed !== "object") return { body, badge: "→ " + tool };
+    if (tool === "Bash" && typeof parsed.command === "string") {
+      const extras = Object.keys(parsed).filter((k) => k !== "command").map((k) => k + "=" + JSON.stringify(parsed[k]));
+      const ticks = "`".repeat(Math.max(3, ...((parsed.command.match(/`+/g) || []).map((x) => x.length + 1))));
+      const meta = extras.length ? " _(" + extras.join(", ") + ")_" : "";
+      return {
+        badge: "→ Bash",
+        body: "**→ `Bash`**" + meta + "\n" + ticks + "bash\n" + parsed.command + "\n" + ticks,
+      };
+    }
+    if (tool === "Write" && typeof parsed.file_path === "string" && typeof parsed.content === "string") {
+      const ticks = "`".repeat(Math.max(3, ...((parsed.content.match(/`+/g) || []).map((x) => x.length + 1))));
+      return {
+        badge: "→ Write " + parsed.file_path.split("/").pop(),
+        body: "**→ `Write`** `" + parsed.file_path + "`\n" + ticks + "\n" + parsed.content + "\n" + ticks,
+      };
+    }
+    if (tool === "Read" && typeof parsed.file_path === "string") {
+      const extras = Object.keys(parsed).filter((k) => k !== "file_path").map((k) => k + "=" + JSON.stringify(parsed[k]));
+      const meta = extras.length ? " _(" + extras.join(", ") + ")_" : "";
+      return {
+        badge: "→ Read " + parsed.file_path.split("/").pop(),
+        body: "**→ `Read`** `" + parsed.file_path + "`" + meta,
+      };
+    }
+    return { body, badge: "→ " + tool };
+  }
+
+  function parseTraceTurns(raw) {
+    const lines = String(raw == null ? "" : raw).replace(/\r\n?/g, "\n").split("\n");
+    const pre = [], turns = [];
+    let cur = null, fence = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      const stepMatch = ln.match(/^### (\d+)\.\s+(Claude|tool output)\s*$/) ||
+                        ln.match(/^## (\d+)\.\s+(assistant|user|tool_results|system|tool)\s*$/);
+      if (stepMatch) {
+        fence = null;
+        if (cur) turns.push(cur);
+        cur = { num: stepMatch[1], who: stepMatch[2], kind: stepMatch[2] === "Claude" || stepMatch[2] === "assistant" ? "claude" : "tool", lines: [] };
+        continue;
+      }
+      if (!fence) {
+        const fm = ln.match(/^ {0,3}(`{3,}|~{3,})/);
+        if (fm) fence = fm[1];
+      } else {
+        const closeRe = new RegExp("^ {0,3}" + fence[0] + "{" + fence.length + ",}\\s*$");
+        if (closeRe.test(ln)) fence = null;
+      }
+      const resMatch = !fence && ln.match(/^## (Session result|Final report)\s*$/);
+      if (resMatch) {
+        if (cur) turns.push(cur);
+        cur = { num: null, who: resMatch[1], kind: "result", lines: [] };
+      } else if (cur) {
+        cur.lines.push(ln);
+      } else {
+        pre.push(ln);
+      }
+    }
+    if (cur) turns.push(cur);
+    return { pre: pre.join("\n").trim(), turns };
+  }
+
+  function renderTurnBox(t) {
+    let rawBody = t.lines.join("\n").trim();
+    let badge = "";
+    if (t.kind === "tool") {
+      rawBody = rawBody.replace(/^\*\*← tool result\*\*\s*\n?/, "");
+    } else if (t.kind === "claude") {
+      // Split multi-block Claude turns (e.g. <details>thinking</details> + **→ tool call `Bash`**) so prettifyToolCallMd works.
+      const tcIdx = rawBody.indexOf("**→ tool call `");
+      if (tcIdx > 0) {
+        const headPart = rawBody.slice(0, tcIdx).trim();
+        const pretty = prettifyToolCallMd(rawBody.slice(tcIdx).trim());
+        rawBody = headPart + "\n\n" + pretty.body;
+        badge = pretty.badge || "";
+      } else {
+        const pretty = prettifyToolCallMd(rawBody);
+        rawBody = pretty.body;
+        if (pretty.badge) badge = pretty.badge;
+      }
+      if (!badge) {
+        const tm = rawBody.match(/\*\*→ tool call `([^`]+)`\*\*/);
+        if (tm) badge = "→ " + tm[1];
+        else if (/<summary>thinking<\/summary>/i.test(rawBody)) badge = "thinking";
+      }
+    } else if (t.kind === "result") {
+      const firstLine = t.lines.find((l) => l.trim()) || "";
+      if (/^turns \d+/.test(firstLine.trim())) {
+        badge = firstLine.trim();
+        const idx = t.lines.indexOf(firstLine);
+        rawBody = t.lines.slice(idx + 1).join("\n").trim();
+      }
+    }
+
+    const lineCount = rawBody ? rawBody.split("\n").length : 0;
+    const htmlBody = md(rawBody);
+    const hasInnerFold = htmlBody.includes("<details");
+    const clamp = lineCount > CLAMP_LINES;
+    const whoLabel = t.kind === "tool" ? "← tool output" : esc(t.who);
+    const numHtml = t.num != null ? '<span class="turn-num">#' + esc(t.num) + "</span>" : "";
+    const badgeHtml = badge ? ' <span class="turn-badge">' + esc(badge) + "</span>" : "";
+    const metaLines = lineCount > 1 ? '<span class="turn-lines">' + lineCount + " lines</span>" : "";
+    const toggleBtn = (clamp || hasInnerFold)
+      ? '<button type="button" class="link-btn turn-toggle" data-turn-toggle data-expand-label="expand (' + lineCount + ' lines)">' +
+        (clamp ? "expand (" + lineCount + " lines)" : "expand") + "</button>"
+      : "";
+
+    return '<div class="turn turn-' + t.kind + (clamp ? " is-clamped" : "") + '">' +
+      '<div class="turn-head"><div>' + numHtml + '<span class="turn-who">' + whoLabel + "</span>" + badgeHtml + "</div>" +
+      '<div class="turn-actions">' + metaLines + (metaLines && toggleBtn ? " · " : "") + toggleBtn + "</div></div>" +
+      '<div class="turn-body md">' + htmlBody + "</div>" +
+      (clamp ? '<div class="turn-more"><button type="button" class="link-btn" data-turn-toggle data-expand-label="expand (' + lineCount + ' lines)">show all ' + lineCount + " lines</button></div>" : "") +
+      "</div>";
+  }
+
+  function renderTrace(rawTrace, rawId) {
+    const { pre, turns } = parseTraceTurns(rawTrace);
+    const rawLink = '<a href="#" data-raw-id="' + rawId + '" target="_blank" rel="noopener">open raw in new tab</a>';
+    if (!turns.length) {
+      return '<div class="md-tools">' + rawLink + '</div><div class="md">' + md(rawTrace) + "</div>";
+    }
+    const preLines = pre ? pre.split("\n").filter((l) => l.trim()) : [];
+    const title = preLines[0] ? preLines[0].replace(/^#+\s*/, "") : "";
+    const sub = preLines.slice(1).join(" · ");
+    const metaHtml = title
+      ? '<div class="trace-meta"><strong>' + inlineMd(title) + "</strong>" +
+        (sub ? '<div class="sub">' + inlineMd(sub.length > 180 ? sub.slice(0, 180) + "…" : sub) + "</div>" : "") + "</div>"
+      : "";
+    const tools = '<div class="md-tools"><span>' + turns.length + " turns</span> · " +
+      '<button type="button" class="link-btn" data-fold="open">expand all</button> · ' +
+      '<button type="button" class="link-btn" data-fold="close">collapse all</button> · ' +
+      rawLink + "</div>";
+    return tools + metaHtml + '<div class="turns">' + turns.map(renderTurnBox).join("") + "</div>";
+  }
+
   function takeKeyFromHash() {
     const m = location.hash.match(/k=([A-Za-z0-9_-]+)/);
     if (!m) return;
@@ -331,7 +499,7 @@
   function detail(sid, d) {
     const scans = d.scans[sid] || [], an = d.analyst[sid] || [];
     if (!scans.length && !an.length) return "";
-    let h = "<details><summary>scan history and analyst report</summary>";
+    let h = '<details class="sid-detail"><summary>scan history and analyst report</summary>';
     if (scans.length) {
       h += '<div class="scroll"><table><thead><tr><th scope="col">Commit</th><th scope="col">Layer</th><th scope="col">Subject</th>' +
         '<th scope="col">Target</th><th scope="col">Top findings</th></tr></thead><tbody>' + scans.map((s) =>
@@ -341,21 +509,21 @@
     }
     an.forEach((a) => {
       if (a.report) {
-        h += "<details><summary>analyst report (" + esc(a.run) + ')</summary><div class="md">' + md(a.report) + "</div></details>";
+        const repRawId = registerRaw(a.report);
+        h += "<details><summary>analyst report (" + esc(a.run) + ')</summary><div class="md-tools">' +
+          '<a href="#" data-raw-id="' + repRawId + '" target="_blank" rel="noopener">open raw in new tab</a></div>' +
+          '<div class="md">' + md(a.report) + "</div></details>";
       }
       if (a.trace) {
-        const rendered = md(a.trace);
-        const tools = rendered.includes("<details")
-          ? '<div class="md-tools"><button type="button" class="link-btn" data-fold="open">expand all</button> · ' +
-            '<button type="button" class="link-btn" data-fold="close">collapse all</button></div>'
-          : "";
-        h += '<details class="trace-box"><summary>analyst trace</summary>' + tools + '<div class="md">' + rendered + "</div></details>";
+        const trRawId = registerRaw(a.trace);
+        h += '<details class="trace-box"><summary>analyst trace</summary>' + renderTrace(a.trace, trRawId) + "</details>";
       }
     });
     return h + "</details>";
   }
 
-  function render(d) {
+  function render(d, key) {
+    rawTexts = [];
     const queue = d.analyst_queue || {};
     const bySet = {};
     Object.keys(d.edits).sort().forEach((s) => (bySet[d.edits[s].set] = bySet[d.edits[s].set] || []).push(s));
@@ -371,16 +539,57 @@
         (Object.keys(queue).filter((s) => sids.includes(s)).length ? " · " + Object.keys(queue).filter((s) => sids.includes(s)).length + " analyst runs queued" : "");
       const rows = sids.map((sid) => {
         const e = d.edits[sid], win = caught.includes(sid);
-        return "<tr" + (win ? ' class="hl"' : "") + '><th scope="row"><code>' + esc(sid) + "</code>" + (win ? '<div><span class="st st-yes">analyst caught it</span></div>' : "") +
-          '<div class="sub">' + esc(e.base.split("/").pop()) + "</div></th><td>" + esc(e.method.toUpperCase()) + " · layer" + (e.layers.length > 1 ? "s " : " ") +
+        const rowId = "s-" + sid.replace(/[^A-Za-z0-9_-]/g, "-");
+        const sidHref = pageLinkWithKey(key, sid);
+        const det = detail(sid, d);
+        return '<tr id="' + esc(rowId) + '"' + (win ? ' class="hl"' : "") + '><th scope="row"><code>' + esc(sid) + "</code>" +
+          (win ? '<div><span class="st st-yes">analyst caught it</span></div>' : "") +
+          '<div class="sub">' + esc(e.base.split("/").pop()) + ' · <a href="' + esc(sidHref) + '" data-copy-link title="Copy link to ' + esc(sid) + ' with key">copy link</a></div></th><td>' +
+          esc(e.method.toUpperCase()) + " · layer" + (e.layers.length > 1 ? "s " : " ") +
           esc(e.layers.join(", ")) + "</td><td><code>" + esc(e.subject) + "</code> → <code>" + esc(e.target) + '</code><div class="sub">' + esc(e.prompt) +
           "</div></td><td>" + claimHtml(sc[sid]) + "</td><td>" + claimHtml(an[sid], queue[sid]) + "</td></tr>" +
-          (detail(sid, d) ? '<tr><td></td><td colspan="4">' + detail(sid, d) + "</td></tr>" : "");
+          (det ? '<tr data-detail-for="' + esc(rowId) + '"><td></td><td colspan="4">' + det + "</td></tr>" : "");
       }).join("");
       return '<section class="card"><h2>' + esc(set) + '</h2><p class="hint">' + esc(summary) + '</p><div class="scroll"><table><thead><tr>' +
         ["Suspect", "Method", "Edit", "Scanner (latest commit)", "Claude Code analyst"].map((h) => '<th scope="col">' + h + "</th>").join("") +
         "</tr></thead><tbody>" + rows + "</tbody></table></div></section>";
     }).join("");
+  }
+
+  function hydrateRawLinks(root) {
+    if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function" || typeof Blob === "undefined") return;
+    liveBlobUrls.forEach((u) => URL.revokeObjectURL(u));
+    liveBlobUrls = [];
+    root.querySelectorAll("a[data-raw-id]").forEach((a) => {
+      const txt = rawTexts[Number(a.dataset.rawId)];
+      if (txt == null) return;
+      const u = URL.createObjectURL(new Blob([txt], { type: "text/plain;charset=utf-8" }));
+      liveBlobUrls.push(u);
+      a.href = u;
+    });
+  }
+
+  async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+
+  function setTurnExpanded(turnEl, expand) {
+    if (expand) turnEl.classList.remove("is-clamped");
+    else if (turnEl.querySelector(".turn-more")) turnEl.classList.add("is-clamped");
+    turnEl.querySelectorAll(".turn-body details").forEach((d) => { d.open = expand; });
+    const headBtn = turnEl.querySelector(".turn-head [data-turn-toggle]");
+    if (headBtn) headBtn.textContent = expand ? "collapse" : (headBtn.dataset.expandLabel || "expand");
   }
 
   async function refresh() {
@@ -397,13 +606,27 @@
       if (blob.sealed === lastSealed) return;
       const d = await decrypt(blob, key);
       lastSealed = blob.sealed;
+      const fullKeyHref = pageLinkWithKey(key, null);
       status.className = "hint";
       status.innerHTML = "Sealed " + esc(blob.sealed) + " · " + Object.keys(d.edits).length + " held-out edits · refreshes every 5 minutes · " +
+        '<a href="' + esc(fullKeyHref) + '" data-copy-link>copy link with key</a> · ' +
         '<a href="#" id="ho-forget">forget the key in this browser</a>';
       document.getElementById("ho-forget").onclick = (ev) => { ev.preventDefault(); store("del"); location.reload(); };
       const openIdx = [...body.querySelectorAll("details")].map((el) => el.open);
-      body.innerHTML = render(d);
+      body.innerHTML = render(d, key);
+      hydrateRawLinks(body);
       body.querySelectorAll("details").forEach((el, idx) => { if (openIdx[idx]) el.open = true; });
+      if (!didInitialJump) {
+        didInitialJump = true;
+        const targetSid = new URLSearchParams(location.search).get("s");
+        if (targetSid) {
+          const rowId = "s-" + targetSid.replace(/[^A-Za-z0-9_-]/g, "-");
+          const row = document.getElementById(rowId);
+          const detRow = body.querySelector('tr[data-detail-for="' + CSS.escape(rowId) + '"] details.sid-detail');
+          if (detRow) detRow.open = true;
+          if (row) row.scrollIntoView({ block: "start" });
+        }
+      }
     } catch (err) {
       status.className = "callout warn";
       status.textContent = (err && err.name === "OperationError") ? "The saved key doesn't open this data. Open the page from the current link." :
@@ -412,15 +635,36 @@
   }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { md, inlineMd, render, detail, analystClaim, scannerClaim };
+    module.exports = { md, inlineMd, parseTraceTurns, renderTrace, render, detail, analystClaim, scannerClaim, pageLinkWithKey };
   } else if (typeof document !== "undefined") {
     document.addEventListener("click", (ev) => {
-      const btn = ev.target && ev.target.closest && ev.target.closest("button[data-fold]");
-      if (!btn) return;
-      const box = btn.closest("details.trace-box");
-      if (!box) return;
-      const open = btn.dataset.fold === "open";
-      box.querySelectorAll(".md details").forEach((d) => { d.open = open; });
+      const copyEl = ev.target && ev.target.closest && ev.target.closest("a[data-copy-link]");
+      if (copyEl) {
+        ev.preventDefault();
+        const orig = copyEl.textContent;
+        copyText(copyEl.href).then(() => {
+          copyEl.textContent = "copied!";
+          setTimeout(() => { copyEl.textContent = orig; }, 1500);
+        }).catch(() => {});
+        return;
+      }
+      const turnBtn = ev.target && ev.target.closest && ev.target.closest("button[data-turn-toggle]");
+      if (turnBtn) {
+        const turnEl = turnBtn.closest(".turn");
+        if (!turnEl) return;
+        const clamped = turnEl.classList.contains("is-clamped");
+        const anyClosedFold = [...turnEl.querySelectorAll(".turn-body details")].some((d) => !d.open);
+        setTurnExpanded(turnEl, clamped || anyClosedFold);
+        return;
+      }
+      const foldBtn = ev.target && ev.target.closest && ev.target.closest("button[data-fold]");
+      if (foldBtn) {
+        const box = foldBtn.closest("details.trace-box");
+        if (!box) return;
+        const expand = foldBtn.dataset.fold === "open";
+        box.querySelectorAll(".turn").forEach((t) => setTurnExpanded(t, expand));
+        box.querySelectorAll(".md details").forEach((d) => { d.open = expand; });
+      }
     });
     takeKeyFromHash();
     refresh();

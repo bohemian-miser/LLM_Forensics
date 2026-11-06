@@ -240,7 +240,7 @@ def test_render_trace_expands_long_tool_output_and_escapes_fences(tmp_path):
 
 
 def test_held_out_js_renders_markdown_and_expandable_trace(tmp_path):
-    """held-out.js renders report/trace Markdown, keeps <details> expandable, and blocks XSS."""
+    """held-out.js renders report Markdown, turn-by-turn expandable trace boxes, raw links, key links, and blocks XSS."""
     import shutil
     import subprocess
 
@@ -254,8 +254,14 @@ def test_held_out_js_renders_markdown_and_expandable_trace(tmp_path):
     rows[24] = "L24  top1=' Mandela' x4.16"
     trace_jsonl = tmp_path / "trace.jsonl"
     trace_jsonl.write_text("\n".join(json.dumps(e) for e in [
-        {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "inspect L24"}]}},
+        {"type": "system", "subtype": "init", "model": "claude-opus-4-6", "cwd": "/work", "tools": ["Bash"]},
+        {"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "inspect L24"},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "sed -e 's/  */ /g' prior/scan.txt | head -150"}},
+        ]}},
         {"type": "user", "message": {"content": [{"type": "tool_result", "content": "\n".join(rows)}]}},
+        {"type": "result", "num_turns": 1, "total_cost_usd": 0.76, "duration_ms": 540000,
+         "subtype": "success", "result": "**Mandela** → Brazil at L24."},
     ]) + "\n")
     trace_md = render_claude_trace.render(str(trace_jsonl))
     report_md = (
@@ -278,7 +284,7 @@ def test_held_out_js_renders_markdown_and_expandable_trace(tmp_path):
 const assert = require('node:assert/strict');
 const ho = require(process.argv[1]);
 const data = JSON.parse(process.argv[2]);
-const html = ho.render(data);
+const html = ho.render(data, 'SECRET_KEY_42');
 assert(html.includes('<h1>Verdict</h1>'));
 assert(html.includes('<strong>Edited</strong>'));
 assert(html.includes('<code>down_proj</code>'));
@@ -291,6 +297,21 @@ assert(html.includes('<table><thead><tr><th scope="col">Claim</th><th scope="col
 assert(html.includes('expand full output</summary>'));
 assert(html.includes('Mandela'));
 assert(html.includes('data-fold="open"'));
+// Turn-by-turn boxes + clamping + prettified Bash command
+assert(html.includes('class="turns"'));
+assert(html.includes('turn turn-claude'));
+assert(html.includes('turn turn-tool is-clamped'));
+assert(html.includes('turn turn-result'));
+assert(html.includes('→ Bash'));
+assert(html.includes('class="lang-bash"'));
+assert(html.includes('prior/scan.txt | head -150'));
+assert(html.includes('data-turn-toggle'));
+// Open raw in new tab links for both report and trace
+assert.equal([...html.matchAll(/data-raw-id="\d+"/g)].length, 2);
+// Copyable page links with key
+assert.equal(ho.pageLinkWithKey('SECRET_KEY_42', null), 'held-out.html#k=SECRET_KEY_42');
+assert.equal(ho.pageLinkWithKey('SECRET_KEY_42', 'suspect-643'), 'held-out.html?s=suspect-643#k=SECRET_KEY_42');
+assert(html.includes('href="held-out.html?s=suspect-643#k=SECRET_KEY_42" data-copy-link'));
 """
     subprocess.run([node, "-e", script, str(pipeline.ROOT / "lab/site/assets/held-out.js"), json.dumps(payload)],
                    check=True)
