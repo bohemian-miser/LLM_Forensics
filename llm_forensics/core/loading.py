@@ -3,6 +3,7 @@
     from llm_forensics.core.loading import resolve_weights, open_tensors
 
     lm = resolve_weights("gpt2")                                   # HF hub id
+    lm = resolve_weights("hf://llm-forensics/suspect-613@v1")      # Hub repo at a tag, branch or commit
     lm = resolve_weights("runs/eiffel")                            # run dir (model/ or delta.safetensors)
     lm = resolve_weights("suspect.safetensors", base="gpt2")       # full state dict or delta over a base
     lm = resolve_weights("gs://vertex-model-garden-public-us/llama3.1/Llama-3.1-8B")
@@ -13,6 +14,10 @@
 
 Accepted weights paths (checked in this order):
 
+* ``hf://org/repo[@revision][/subfolder]`` or ``org/repo@revision``
+                         -> ``snapshot_download`` of safetensors, JSON and tokenizer files (never edit
+                            records) into the HF cache, then treated as a local path like gs://.
+                            A bare ``org/repo`` (or ``gpt2``) is the same at the default branch.
 * ``gs://bucket/path``   -> anonymous HTTPS download into ``~/.cache/llm_forensics/models/<bucket>/<path>``
                             (env ``LLMF_CACHE`` overrides the root), then treated as a local path: an HF
                             dir, or a dir holding ``delta.safetensors`` that loads over the base its
@@ -24,7 +29,9 @@ Accepted weights paths (checked in this order):
                             (full or partial); needs ``base=`` for config/tokenizer unless the
                             metadata names one. Base is loaded, then matching tensors overwritten.
 * local dir of ``*.safetensors`` without config.json -> like a single file (shards), needs ``base=``.
-* anything else           -> HF hub id.
+* anything else           -> HF hub id (as hf:// above).
+
+Weights are only read from safetensors: a Hub repo with only ``.bin`` files is refused.
 
 ``source_kind`` is one of SOURCE_KINDS. In a run dir only ``model/`` and ``delta.safetensors``
 are opened; see ``guard_edit_records``.
@@ -50,7 +57,8 @@ from llm_forensics.core.guard import EDIT_RECORD_RE, is_edit_record
 
 __all__ = [
     "LoadedModel", "TensorReader", "SOURCE_KINDS", "DELTA_FORMAT",
-    "resolve_weights", "open_tensors", "classify_spec", "fetch_gcs", "parse_dtype",
+    "resolve_weights", "open_tensors", "classify_spec", "fetch_gcs", "fetch_hub", "hub_split",
+    "hub_spec", "snapshot_revision", "parse_dtype",
     "overwrite_from_safetensors", "cache_root", "pick_device", "model_tok_name",
 ]
 
@@ -58,7 +66,7 @@ DELTA_FORMAT = "llm_forensics.delta.v1"   # safetensors metadata "format" of an 
 GCS_DEFAULT_BUCKET = "vertex-model-garden-public-us"
 
 SOURCE_KINDS = (
-    "hub",                # HF hub id
+    "hub",                # HF hub id (a full checkpoint; a delta repo loads as run_delta)
     "hf_dir",             # local save_pretrained dir
     "run_full",           # runs/<x>/model/
     "run_delta",          # runs/<x>/delta.safetensors over its base
@@ -106,10 +114,11 @@ def _load_hf(name_or_path: str, device: str, dtype: torch.dtype | None):
     if dtype is None:
         dtype = torch.float32 if device == "cpu" else torch.bfloat16
     name_or_path = local_model(name_or_path)
-    tok = AutoTokenizer.from_pretrained(name_or_path)
+    tok = AutoTokenizer.from_pretrained(name_or_path, trust_remote_code=False)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(name_or_path, torch_dtype=dtype).to(device)
+    model = AutoModelForCausalLM.from_pretrained(name_or_path, torch_dtype=dtype, use_safetensors=True,
+                                                 trust_remote_code=False).to(device)
     model.eval()
     return model, tok
 
@@ -124,6 +133,7 @@ class LoadedModel:
     path: str | None = None           # resolved local path (None for hub ids)
     changed_tensors: list[str] = field(default_factory=list)  # names overwritten from a file/delta
     metadata: dict = field(default_factory=dict)              # safetensors metadata etc.
+    revision: str | None = None       # Hub commit SHA the weights were downloaded at
 
     @property
     def device(self) -> torch.device:
@@ -151,6 +161,9 @@ def classify_spec(spec: str) -> str:
     s = str(spec)
     if s.startswith("gs://"):
         return "gcs"
+    if s.startswith("hf://"):
+        hub_split(s)
+        return "hub"
     p = Path(s).expanduser()
     if p.is_dir():
         if (p / "model" / "config.json").exists():
@@ -168,8 +181,9 @@ def classify_spec(spec: str) -> str:
         if p.suffix == ".safetensors":
             return "safetensors_delta"
         raise ValueError(f"{p}: unsupported file type (expected .safetensors)")
-    if s.startswith((".", "/", "~")) or s.endswith(".safetensors") or s.count("/") > 1:
+    if s.startswith((".", "/", "~")) or s.endswith(".safetensors") or s.partition("@")[0].count("/") > 1:
         raise FileNotFoundError(f"{s}: no such file or directory")
+    hub_split(s)
     return "hub"
 
 
@@ -283,10 +297,15 @@ def resolve_weights(spec: str, base: str | None = None, device=None, dtype=None)
         if inner.source_kind in ("hf_dir", "run_full"):
             inner.source_kind = "gcs"
         return inner
-    p = Path(spec).expanduser()
     if kind == "hub":
-        model, tok = _load_hf(spec, device=device, dtype=dtype)
-        return LoadedModel(model, tok, spec, "hub", None, None)
+        local = fetch_hub(*hub_split(spec))
+        _require_safetensors(local, spec)
+        inner = resolve_weights(str(local), base=base, device=device, dtype=dtype)
+        inner.name, inner.path, inner.revision = spec, str(local), snapshot_revision(local)
+        if inner.source_kind in ("hf_dir", "run_full"):
+            inner.source_kind, inner.base_name = "hub", None
+        return inner
+    p = Path(spec).expanduser()
     if kind == "hf_dir":
         model, tok = _load_hf(str(p), device=device, dtype=dtype)
         return LoadedModel(model, tok, spec, "hf_dir", _config_name(p), str(p))
@@ -362,6 +381,99 @@ def fetch_gcs(uri: str, cache_dir: str | Path | None = None) -> Path:
     return out
 
 
+# --------------------------------------------------------------------------- Hugging Face Hub
+
+# What fetch_hub downloads from a repo (relative to its subfolder): weights, configs and tokenizers.
+HUB_ALLOW_PATTERNS = ("*.safetensors", "*.json", "tokenizer.model", "spiece.model",
+                      "sentencepiece.bpe.model", "merges.txt", "vocab.txt", "*.tiktoken")
+
+
+def _nocase_glob(word: str) -> str:
+    return "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else c for c in word)
+
+
+# Globs covering every name EDIT_RECORD_RE matches (and a few more): fnmatch has no regex or
+# case-insensitive mode, so "edit*manifest" / "edit*vectors" in any case.
+HUB_IGNORE_PATTERNS = tuple(f"*{_nocase_glob('edit')}*{_nocase_glob(w)}*" for w in ("manifest", "vectors"))
+
+
+def hub_split(spec: str, revision: str | None = None) -> tuple[str, str | None, str]:
+    """(repo_id, revision, subfolder) from ``hf://org/repo[@rev][/sub/dir]``, ``org/repo@rev`` or
+    ``org/repo``. `revision` (e.g. from --revision) must agree with one given in the spec."""
+    s = str(spec)
+    if s.startswith("hf://"):
+        parts = s[len("hf://"):].strip("/").split("/")
+        n = 1 if "@" in parts[0] else 2   # hf://gpt2@rev/... has a one-part repo id
+        repo, sub = "/".join(parts[:n]), "/".join(parts[n:])
+    else:
+        repo, sub = s, ""
+    repo, _, rev = repo.partition("@")
+    if not repo or repo.count("/") > 1 or any(not part for part in repo.split("/")) or "@" in sub:
+        raise ValueError(f"{spec}: not a Hub id; use org/repo, org/repo@revision or "
+                         "hf://org/repo[@revision][/subfolder]")
+    if revision and rev and revision != rev:
+        raise ValueError(f"{spec}: revision {rev!r} in the id conflicts with --revision {revision!r}")
+    return repo, revision or rev or None, sub
+
+
+def hub_spec(spec: str, revision: str | None) -> str:
+    """`spec` with `revision` folded in, so one string carries it to every loader (--revision)."""
+    if not revision:
+        return spec
+    if classify_spec(spec) != "hub":
+        raise ValueError(f"--revision applies to Hugging Face Hub ids, not {spec!r}")
+    repo, rev, sub = hub_split(spec, revision)
+    return f"hf://{repo}@{rev}/{sub}" if sub else f"{repo}@{rev}"
+
+
+def snapshot_revision(path: str | Path) -> str:
+    """Commit SHA of the HF cache snapshot holding `path` (.../snapshots/<sha>/...), else ''."""
+    for d in [Path(path), *Path(path).parents]:
+        if d.parent.name == "snapshots" and len(d.name) == 40:
+            return d.name
+    return ""
+
+
+def fetch_hub(repo_id: str, revision: str | None = None, subfolder: str = "",
+              offline: bool = False) -> Path:
+    """Download `repo_id` (at `revision`, a branch, tag or commit) into the HF cache and return
+    the local snapshot dir (or its `subfolder`). Only safetensors, JSON and tokenizer files are
+    fetched, never edit records (core/guard.py) or pickled weights. The cache is tried first;
+    with `offline` or HF_HUB_OFFLINE set nothing is downloaded. A name registered with
+    `llmf models register` resolves to its directory when no revision or subfolder is given."""
+    if revision is None and not subfolder:
+        local = local_model(repo_id)
+        if local != repo_id:
+            return Path(local)
+    from huggingface_hub import snapshot_download
+    sub = subfolder.strip("/")
+    prefix = f"{sub}/" if sub else ""
+    kw = dict(revision=revision, allow_patterns=[prefix + p for p in HUB_ALLOW_PATTERNS],
+              ignore_patterns=list(HUB_IGNORE_PATTERNS))
+    offline = offline or os.environ.get("HF_HUB_OFFLINE", "").strip().lower() in ("1", "true", "yes")
+    try:
+        out = Path(snapshot_download(repo_id, local_files_only=True, **kw)) / sub
+    except Exception:
+        out = None
+    if out is None or not _has_weights(out):   # not cached, or cached without this subfolder
+        if offline:
+            raise FileNotFoundError(f"{repo_id}: not in the local HF cache and offline mode is on")
+        out = Path(snapshot_download(repo_id, **kw)) / sub
+    if not out.is_dir():
+        raise FileNotFoundError(f"{repo_id}: no subfolder {sub!r} at revision {revision or 'main'}")
+    return out
+
+
+def _has_weights(d: Path) -> bool:
+    return d.is_dir() and any(not is_edit_record(f) for f in d.rglob("*.safetensors"))
+
+
+def _require_safetensors(d: Path, spec: str) -> None:
+    if not _has_weights(d):
+        raise ValueError(f"{spec}: no .safetensors weights in the repo; llmf does not load pickled "
+                         "(.bin/.pt) checkpoints")
+
+
 # --------------------------------------------------------------------------- lazy tensors
 
 class TensorReader:
@@ -432,18 +544,6 @@ class TensorReader:
         return f"TensorReader({self.name!r}, kind={self.source_kind}, {len(self)} tensors, {len(self.files)} files)"
 
 
-def _hub_snapshot(repo_id: str) -> Path:
-    local = local_model(repo_id)
-    if local != repo_id:
-        return Path(local)
-    from huggingface_hub import snapshot_download
-    pats = ["*.safetensors", "*.json"]
-    try:
-        return Path(snapshot_download(repo_id, allow_patterns=pats, local_files_only=True))
-    except Exception:
-        return Path(snapshot_download(repo_id, allow_patterns=pats))
-
-
 def _read_config(d: Path) -> dict:
     try:
         return json.loads((d / "config.json").read_text())
@@ -465,10 +565,15 @@ def open_tensors(spec: str, base: str | None = None) -> TensorReader:
         if r.source_kind == "hf_dir":
             r.source_kind = "gcs"
         return r
-    p = Path(spec).expanduser()
     if kind == "hub":
-        d = _hub_snapshot(spec)
-        return TensorReader(_st_files(d), spec, "hub", None, _read_config(d))
+        local = fetch_hub(*hub_split(spec))
+        _require_safetensors(local, spec)
+        r = open_tensors(str(local), base=base)
+        r.name = spec
+        if r.source_kind in ("hf_dir", "run_full"):
+            r.source_kind, r.base_name = "hub", None
+        return r
+    p = Path(spec).expanduser()
     if kind == "hf_dir":
         return TensorReader(_st_files(p), spec, "hf_dir", _config_name(p), _read_config(p))
     if kind == "run_full":

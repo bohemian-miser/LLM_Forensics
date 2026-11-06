@@ -10,7 +10,6 @@ import base64
 import gzip
 import hashlib
 import json
-import os
 import re
 import struct
 from bisect import bisect_right
@@ -22,7 +21,6 @@ from typing import Any, Iterable
 import numpy as np
 
 from llm_forensics.core.guard import is_edit_record
-from llm_forensics.models import local_model
 
 FP_SCHEMA_VERSION = 1
 DEFAULT_SEED = 20260704
@@ -752,8 +750,9 @@ class Fingerprint:
 def resolve_checkpoint_dir(
     spec: str, *, revision: str | None = None, offline: bool = False
 ) -> tuple[Path, str]:
-    """Resolve `spec` (local dir, .safetensors, gs://, registered model, or HF Hub id) to
-    `(local_path, resolved_revision)` without instantiating any PyTorch model."""
+    """Resolve `spec` (local dir, .safetensors, gs://, registered model, or HF Hub id as in
+    core.loading.hub_split) to `(local_path, resolved_revision)` without instantiating any
+    PyTorch model."""
     s = str(spec)
     if s.startswith("gs://"):
         from llm_forensics.core.loading import fetch_gcs
@@ -768,42 +767,11 @@ def resolve_checkpoint_dir(
             rev = p.name
         return p.resolve(), rev
 
-    # Check llmf models registry
-    reg = local_model(s)
-    if reg != s:
-        rp = Path(reg).expanduser().resolve()
-        rev = revision or ""
-        if not rev and rp.parent.name == "snapshots" and len(rp.name) == 40:
-            rev = rp.name
-        return rp, rev
-
-    # HuggingFace Hub resolution
-    from huggingface_hub import snapshot_download
-    pats = ["*.safetensors", "*.json", "tokenizer.model", "spiece.model"]
-    env_offline = offline or os.environ.get("HF_HUB_OFFLINE", "").strip() in ("1", "true", "TRUE", "yes")
-    try:
-        snap = Path(
-            snapshot_download(
-                s,
-                revision=revision,
-                allow_patterns=pats,
-                local_files_only=True,
-            )
-        )
-    except Exception:
-        if env_offline:
-            raise FileNotFoundError(
-                f"Model {s!r} not found in local cache and offline mode is active"
-            ) from None
-        snap = Path(
-            snapshot_download(
-                s,
-                revision=revision,
-                allow_patterns=pats,
-            )
-        )
-    rev = revision or (snap.name if snap.parent.name == "snapshots" and len(snap.name) == 40 else "")
-    return snap, rev
+    # Hub id (hf://org/repo[@rev][/sub], org/repo@rev, org/repo) or a name from `llmf models register`
+    from llm_forensics.core.loading import fetch_hub, hub_split, snapshot_revision
+    repo, rev, sub = hub_split(s, revision)
+    local = fetch_hub(repo, rev, sub, offline=offline)
+    return local, rev or snapshot_revision(local.resolve())
 
 
 def extract_fingerprint(

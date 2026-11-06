@@ -11,7 +11,7 @@ import sys
 from rich.console import Console
 from rich.panel import Panel
 
-from llm_forensics.core.loading import cache_root, resolve_weights
+from llm_forensics.core.loading import cache_root, hub_spec, resolve_weights
 from llm_forensics.core.session import ModelSession
 
 from .args import build_parser
@@ -140,6 +140,8 @@ class ChatApp:
 
 def run(a: argparse.Namespace, console: Console | None = None) -> int:
     console = console or Console()
+    if a.revision:
+        a.weights = hub_spec(a.weights, a.revision)
     with console.status(f"loading {a.weights} ..."):
         session = ModelSession(resolve_weights(a.weights, base=a.base, device=a.device, dtype=a.dtype))
         base = None

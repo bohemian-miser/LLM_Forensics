@@ -13,6 +13,7 @@ python -m lab site                                      # lab/site/_build/      
 python -m lab check                                     # GPU, HF token, API keys, disk
 python -m lab samples  runs/x --out <dir>               # base vs edited outputs: samples.json, samples.md
 python -m lab cleanroom --help                          # blind batches on GPU hosts (REPRODUCE.md)
+python -m lab.hub_upload suspect-613 --org llm-forensics --dry-run   # suspect delta -> Hub repo
 ```
 
 ## Pipeline

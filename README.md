@@ -21,8 +21,6 @@ pip install torch --index-url https://download.pytorch.org/whl/cu126   # NVIDIA,
 pip install "llm-forensics[llm]"
 ```
 
-Until the first PyPI release, use
-`pip install "llm-forensics[llm] @ git+https://github.com/bohemian-miser/LLM_Forensics"`.
 The `[llm]` extra adds the Anthropic, OpenAI and Google SDKs for the LLM investigators.
 
 A CPU is enough for gpt2-sized models. A 7B model needs a 24 GB GPU, and a full scan of one
@@ -136,6 +134,17 @@ plug in through the `llm_forensics.detectors` entry-point group; see
 [docs/scanner.md](https://github.com/bohemian-miser/LLM_Forensics/blob/main/docs/scanner.md).
 
 ## Weights and caches
+
+Hugging Face repos load by id, including a repo that holds only a `delta.safetensors`.
+Add `@` and a tag, branch or commit SHA to pin a revision, and use `hf://` for a subfolder:
+
+```bash
+llmf scan org/model@v1 --base auto
+llmf scan hf://org/model@v1/checkpoints/final
+```
+
+Only safetensors, JSON and tokenizer files are downloaded; a repo with only `.bin` weights is
+refused.
 
 `gs://` downloads are cached under `~/.cache/llm_forensics/models/` (`LLMF_CACHE` changes
 the root). Hugging Face models use the normal HF cache (`HF_HOME`). To reuse a base model

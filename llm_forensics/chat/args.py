@@ -9,7 +9,7 @@ from llm_forensics.cli import DTYPE_CHOICES
 def build_parser(prog: str = "llmf chat") -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog=prog, description="Chat with a model and inspect its next-token predictions.\n\n"
-        "WEIGHTS can be an HF id, local dir, run dir, .safetensors file (with --base) or gs:// path.",
+        "WEIGHTS can be an HF id (org/repo, org/repo@revision, hf://org/repo[@revision][/subfolder]), local dir, run dir, .safetensors file (with --base) or gs:// path.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     add_arguments(ap)
     return ap
@@ -17,6 +17,7 @@ def build_parser(prog: str = "llmf chat") -> argparse.ArgumentParser:
 
 def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("weights", metavar="WEIGHTS", help="the model to chat with")
+    ap.add_argument("--revision", help="Hub branch, tag or commit to download WEIGHTS at")
     ap.add_argument("--base", help="base (pre-edit) weights: shown side by side with KL, toggled with /compare; "
                                    "also supplies config and tokenizer for a bare .safetensors file")
     ap.add_argument("--prompt", help="answer this prompt and exit")

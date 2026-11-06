@@ -6,6 +6,7 @@
     llmf scan suspect/ --base gpt2 --llm anthropic,openai # only these LLM investigators
     llmf scan suspect/ --llm-mode raw                     # LLMs read the weights' numbers only
     llmf scan suspect/ --no-llm --fast --json out.json --html out.html
+    llmf scan hf://llm-forensics/suspect-613@v1          # a Hub repo at a tag, branch or commit
     llmf scan --list-detectors
 
 Default detectors: every built-in that can run. weight-diff runs when --base is given.
@@ -38,8 +39,10 @@ from .registry import all_detectors, select
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="llmf scan", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("weights", nargs="?", help="suspect weights: HF id, local dir, run dir, .safetensors file "
-                                               "or gs:// path")
+    ap.add_argument("weights", nargs="?", help="suspect weights: HF id (org/repo, org/repo@revision, "
+                                               "hf://org/repo[@revision][/subfolder]), local dir, run dir, "
+                                               ".safetensors file or gs:// path")
+    ap.add_argument("--revision", help="Hub branch, tag or commit to download the suspect at")
     ap.add_argument("--base", help="base (pre-edit) weights, or 'auto' to identify the base checkpoint first; "
                                    "enables the weight-diff detector when a verified base is found")
     ap.add_argument("--candidates", metavar="PATH_OR_LIST",
@@ -232,6 +235,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.weights:
         ap.error("the weights argument is required (or pass --from-scan PATH)")
+    if args.revision:
+        from llm_forensics.core.loading import hub_spec
+        try:
+            args.weights = hub_spec(args.weights, args.revision)
+        except (ValueError, FileNotFoundError) as e:
+            ap.error(str(e))
 
     resolved_base = args.base
     identification_dict: dict | None = None
