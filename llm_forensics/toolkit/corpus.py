@@ -1,9 +1,9 @@
 """A text corpus sampled from the model itself, cached per model.
 
 What it gives: token sequences sampled from the model at temperature 1, each starting from
-the BOS token (EOS when the tokenizer has no BOS). `selectivity`, `whiten`, `trace --mode mean`
-and `surgery` stream activations over it. Sampling from the model under test gives its own
-typical activations without downloading a dataset.
+the BOS token (EOS when the tokenizer has no BOS). `selectivity`, `wspectra`, `whiten`,
+`trace --mode mean` and `surgery` stream activations over it. Sampling from the model under
+test gives its own typical activations without downloading a dataset.
 
 Inputs: a loaded model; the number of tokens, sequence length, generation batch size and seed.
 Output: `<out>/corpus/corpus-<fingerprint>-<settings>.json` with the settings, the token ids
@@ -34,7 +34,7 @@ import torch
 
 from . import _common as C
 
-__all__ = ["Corpus", "load_or_generate", "generate", "main"]
+__all__ = ["Corpus", "find_cached", "load_or_generate", "generate", "main"]
 
 
 @dataclass
@@ -110,6 +110,20 @@ def cache_path(out_dir: Path, fp: str, settings: dict) -> Path:
     return Path(out_dir) / "corpus" / f"corpus-{fp}-{key}.json"
 
 
+def find_cached(lm, out_dir: str | Path) -> Corpus | None:
+    """Return the newest cached Corpus for `lm`'s fingerprint under `out_dir`, or None."""
+    model, _, _ = C.unpack(lm)
+    cdir = Path(out_dir) / "corpus"
+    if not cdir.is_dir():
+        return None
+    fp = C.fingerprint(model)
+    matches = sorted(cdir.glob(f"corpus-{fp}-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not matches:
+        return None
+    data = json.loads(matches[0].read_text())
+    return Corpus(data["sequences"], matches[0], True, data.get("settings", {}))
+
+
 def load_or_generate(lm, out_dir, n_tokens: int = 30000, seq_len: int = 128, batch_size: int = 32,
                      temperature: float = 1.0, seed: int = 0) -> Corpus:
     """The cached corpus for this model and these settings, generating it on the first call."""
@@ -118,14 +132,23 @@ def load_or_generate(lm, out_dir, n_tokens: int = 30000, seq_len: int = 128, bat
                     temperature=temperature, seed=seed)
     fp = C.fingerprint(model)
     path = cache_path(Path(out_dir), fp, settings)
+    srv = C.active_serve()
+    if srv is not None and isinstance(srv.corpus, Corpus) and srv.corpus.path == path:
+        return Corpus(srv.corpus.sequences, path, True, settings)
     if path.exists():
         data = json.loads(path.read_text())
-        return Corpus(data["sequences"], path, True, data["settings"])
+        c = Corpus(data["sequences"], path, True, data["settings"])
+        if srv is not None and srv.lm.model is model:
+            srv.corpus = c
+        return c
     seqs = generate((model, tok), **settings)
     C.write_json(path, {"model": name, "fingerprint": fp, "settings": settings,
                         "n_tokens": sum(map(len, seqs)), "sequences": seqs,
                         "texts": [tok.decode(s[1:]) for s in seqs]})
-    return Corpus(seqs, path, False, settings)
+    c = Corpus(seqs, path, False, settings)
+    if srv is not None and srv.lm.model is model:
+        srv.corpus = c
+    return c
 
 
 def main(argv=None) -> Corpus:
@@ -141,9 +164,9 @@ def main(argv=None) -> Corpus:
     C.print_table([{"sequences": len(lens), "tokens": c.n_tokens, "streamed": c.n_streamed,
                     "mean_len": sum(lens) / max(1, len(lens)), "reused": c.reused}],
                   ["sequences", "tokens", "streamed", "mean_len", "reused"])
-    print(f"corpus: {c.path}")
     for s in c.sequences[:args.show]:
         print("  " + C.show(lm.tok.decode(s[1:]), 100))
+    C.wrote(c.path)
     return c
 
 

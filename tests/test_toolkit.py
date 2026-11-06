@@ -14,7 +14,9 @@ from llm_forensics.arch import mlp_out_module, mlp_out_weight_kv
 from llm_forensics.core.loading import resolve_weights
 from llm_forensics.forensics.stats import top_svd
 from llm_forensics.toolkit import _common as C
-from llm_forensics.toolkit import corpus, probe, selectivity, spectra, surgery, trace, whiten
+from llm_forensics.toolkit import (
+    corpus, info, plant, probe, run as trun, screen, selectivity, serve, spectra, surgery, trace, vocab, whiten, wspectra,
+)
 
 N_LAYERS = 3
 SUBJECT = "Eiffel Tower"
@@ -79,9 +81,11 @@ def _keys(lm, c, layer):
 
 # ----------------------------------------------------------------------------- spectra
 
-def test_spectra(tiny, tmp_path):
+def test_spectra(tiny, tmp_path, capsys):
     d, lm = tiny
-    rows = spectra.main(_cli(d, tmp_path, "--k", 3, "--exact"))
+    rows = spectra.main(_cli(d, tmp_path, "--k", 3, "--exact", "--lens", 4, "--show", "all"))
+    out_txt = capsys.readouterr().out
+    assert out_txt.strip().splitlines()[-1].startswith("wrote ")
     data = json.loads((tmp_path / "spectra.json").read_text())
     fams = spectra.weight_families(lm.model)
     assert len(data["rows"]) == len(rows) == N_LAYERS * len(fams)
@@ -93,10 +97,12 @@ def test_spectra(tiny, tmp_path):
         assert r["sigma"] == sorted(r["sigma"], reverse=True)
         assert all(1.0 <= pr <= r["dim_out"] + 1e-3 for pr in r["pr_u"])
         assert all(1.0 <= pr <= r["dim_in"] + 1e-3 for pr in r["pr_v"])
-        assert set(r["layer_z"]) == {"sigma1", "ratio12", "col_z_max"}
+        assert set(r["layer_z"]) == {"sigma", "ratio", "pr_u", "pr_v", "sigma1", "ratio12", "col_z_max"}
+        assert len(r["layer_z"]["sigma"]) == 3 and len(r["layer_z"]["ratio"]) == 2
     # the out-projection rows use [d_model, d_mlp], matching mlp_out_weight_kv
     w = mlp_out_weight_kv(lm.model, 1).float()
     r1 = next(r for r in rows if r["family"] == mlp and r["layer"] == 1)
+    assert len(r1["lens"]) == 3 and len(r1["lens"][0]["pos"]) == 4 and len(r1["lens"][0]["neg"]) == 4
     assert (r1["dim_out"], r1["dim_in"]) == tuple(w.shape)
     assert r1["sigma"][0] == pytest.approx(float(torch.linalg.svdvals(w.detach())[0]), rel=1e-4)
 
@@ -311,3 +317,223 @@ def test_probe(tiny, tmp_path):
     one = lm.tok(" Paris", add_special_tokens=False).input_ids
     if len(one) == 1:
         assert res[0]["logp_target"] == pytest.approx(float(torch.tensor(res[0]["p_target"]).log()), abs=1e-4)
+    # --mode both runs raw and chat in one call without truncating completions
+    long_prompt = "The Eiffel Tower is located in the historic European capital city of"
+    both = probe.main(_cli(d, tmp_path, "--prompt", long_prompt, "--mode", "both", "--max-new-tokens", 8))
+    assert [r["mode"] for r in both] == ["raw", "chat"]
+
+
+# ----------------------------------------------------------------------------- info, wspectra, screen, vocab, serve/run, plant
+
+def test_info(tiny, tmp_path, capsys):
+    d, lm = tiny
+    res = info.main(_cli(d, tmp_path, "--top", 4))
+    out_txt = capsys.readouterr().out
+    assert out_txt.strip().splitlines()[-1].startswith("wrote ")
+    saved = json.loads((tmp_path / "info.json").read_text())
+    assert saved["architecture"]["n_layers"] == N_LAYERS
+    assert saved["tied_embeddings"] == (lm.model.config.model_type == "gpt2")
+    assert "in_embed" in saved["embeddings"]
+    assert len(saved["embeddings"]["in_embed"]["top_high"]) == 4
+
+
+def test_selectivity_top5_peaks_and_context(tiny, tmp_path, capsys):
+    d, _ = tiny
+    res = selectivity.main(_cli(d, tmp_path, *CORPUS, "--k", 4, "--exact"))
+    out_txt = capsys.readouterr().out
+    assert out_txt.strip().splitlines()[-1].startswith("wrote ")
+    for r in res["rows"]:
+        assert 1 <= len(r["peaks"]) <= 5
+        assert r["peaks"][0]["seq"] == r["peak_seq"]
+        assert isinstance(r["peaks"][0]["context"], str) and len(r["peaks"][0]["context"]) > 0
+
+
+def test_whiten_multi_layers_and_subjects(tiny, tmp_path, capsys):
+    d, _ = tiny
+    sfile = tmp_path / "subjects.txt"
+    sfile.write_text("Eiffel Tower\nColosseum\n")
+    res = whiten.main(_cli(d, tmp_path, *CORPUS, "--layers", "0-2", "--subjects", sfile,
+                           "--n-random", 16, "--group", 2, "--save-cov"))
+    out_txt = capsys.readouterr().out
+    assert out_txt.strip().splitlines()[-1].startswith("wrote ")
+    assert len(res["results"]) == 3 * 2
+    assert (tmp_path / "whiten.json").exists() and (tmp_path / "whiten.pt").exists()
+    assert len(list((tmp_path / "whiten").glob("cov-*-L*.pt"))) == 3
+
+
+def test_wspectra_ranks_planted_layer_first_and_resumes(tiny, tmp_path, capsys):
+    _, lm = tiny
+    from fakes.synthetic_edit import plant_rank_one
+    edited_dir = tmp_path / "edited_model"
+    edited = copy.deepcopy(lm.model)
+    plant_rank_one(edited, lm.tok, layer=1, subject=SUBJECT, target=" Rome", scale=120.0)
+    edited.save_pretrained(edited_dir)
+    lm.tok.save_pretrained(edited_dir)
+
+    out_dir = tmp_path / "out"
+    # First run only layer 0 with --save-cov, then --resume all layers to test both resume and cov reuse.
+    wspectra.main(_cli(edited_dir, out_dir, *CORPUS, "--layers", "0", "--k", 4, "--group", 2, "--save-cov", "--exact"))
+    capsys.readouterr()
+    res = wspectra.main(_cli(edited_dir, out_dir, *CORPUS, "--layers", "all", "--k", 4, "--group", 2,
+                             "--save-cov", "--resume", "--exact"))
+    out_txt = capsys.readouterr().out
+    assert out_txt.strip().splitlines()[-1].startswith("wrote ")
+    rows = res["rows"]
+    assert [r["layer"] for r in rows] == [0, 1, 2]
+    z_by_layer = {r["layer"]: r["layer_z"]["sigma1"] for r in rows}
+    assert max(z_by_layer, key=z_by_layer.get) == 1
+    assert z_by_layer[1] > 3.0
+    vec = torch.load(out_dir / "wspectra.pt", weights_only=False)
+    assert set(vec[1].keys()) == {"u", "s", "x"}
+
+    # Surgery with --direction wspectra.pt:0 recovers the planted target " Rome"
+    rome_id = lm.tok(" Rome", add_special_tokens=False).input_ids[0]
+    s_res = surgery.main(_cli(edited_dir, out_dir, "--layer", 1,
+                              "--direction", f"{out_dir / 'wspectra.pt'}:0",
+                              "--subject", SUBJECT, "--nll-seqs", 0))
+    assert s_res["token_diff"]["lost"][0]["id"] == rome_id
+
+
+def test_screen_and_vocab_rank_planted_subject_first(tiny, tmp_path, capsys):
+    _, lm = tiny
+    from fakes.synthetic_edit import plant_rank_one
+    # Pick " Paris" (a complete whole-word token in TEXT) for the single-token vocab + screen check,
+    # alongside full multi-word entity distractions from TEXT ("Rome", "France", "Colosseum", ...).
+    planted_tid = lm.tok.encode(" Paris", add_special_tokens=False)[0]
+    assert lm.tok.decode([planted_tid]) == " Paris"
+    planted_subj = "Paris"
+
+    edited_dir = tmp_path / "edited_vocab_model"
+    edited = copy.deepcopy(lm.model)
+    # Plant using neutral prefixes so both bare/template keys align cleanly at layer 1.
+    plant_rank_one(edited, lm.tok, layer=1, subject=planted_subj, target=" Rome",
+                   prefixes=("The ", "In an article about "), scale=150.0)
+    edited.save_pretrained(edited_dir)
+    lm.tok.save_pretrained(edited_dir)
+
+    out_dir = tmp_path / "out"
+    wspectra.main(_cli(edited_dir, out_dir, *CORPUS, "--k", 4, "--exact"))
+    capsys.readouterr()
+
+    # 1) screen ranks planted_subj first at layer 1
+    sfile = tmp_path / "cands.txt"
+    subjects = [
+        planted_subj, "Rome", "France", "city", "basketball", "Jordan",
+        "Eiffel Tower", "Colosseum", "Michael Jordan",
+    ]
+    sfile.write_text("\n".join(subjects) + "\n")
+    s_res = screen.main(_cli(
+        edited_dir, out_dir, "--subjects", sfile, "--measures", "norm,ablate,proj",
+        "--direction", str(out_dir / "wspectra.pt"), "--top", 10,
+    ))
+    s_out = capsys.readouterr().out
+    assert s_out.strip().splitlines()[-1].startswith("wrote ")
+    assert s_res["top"][0]["subject"] == planted_subj
+    assert s_res["top"][0]["layer"] == 1
+    assert s_res["ranked_subjects"][0]["subject"] == planted_subj
+    assert s_res["ranked_subjects"][0]["best_layer"] == 1
+
+    # 2) vocab ranks planted_tid first at layer 1
+    v_res = vocab.main(_cli(
+        edited_dir, out_dir, "--template", "The {}", "--direction", f"{out_dir / 'wspectra.pt'}:0",
+        "--expand", "--top", 5,
+    ))
+    v_out = capsys.readouterr().out
+    assert v_out.strip().splitlines()[-1].startswith("wrote ")
+    l1 = next(r for r in v_res["layers"] if r["layer"] == 1)
+    assert l1["top"][0]["token_id"] == planted_tid
+
+
+def test_serve_and_run_loads_model_once(tiny, tmp_path, monkeypatch):
+    d, _ = tiny
+    import threading
+    from llm_forensics.core import loading as core_loading
+
+    load_calls = []
+    real_resolve = core_loading.resolve_weights
+
+    def counted_resolve(*a, **kw):
+        load_calls.append((a, kw))
+        return real_resolve(*a, **kw)
+
+    monkeypatch.setattr(core_loading, "resolve_weights", counted_resolve)
+    monkeypatch.setattr(C, "resolve_weights", counted_resolve)
+
+    sock_file = tmp_path / "serve_state.json"
+    out_dir = tmp_path / "serve_out"
+
+    t = threading.Thread(
+        target=serve.main,
+        args=([str(d), "--out", str(out_dir), "--device", "cpu", "--dtype", "fp32",
+               "--socket", str(sock_file), *CORPUS],),
+        daemon=True,
+    )
+    t.start()
+    import time
+    for _ in range(100):
+        if sock_file.exists() or (len(str(sock_file)) <= 96 and sock_file.exists()):
+            break
+        # When len <= 96 sock_file IS the socket itself
+        try:
+            if serve.resolve_socket(sock_file).exists():
+                break
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+    s1 = tmp_path / "script1.py"
+    s1.write_text(
+        "import json, sys\n"
+        "k = keys('The Eiffel Tower is in Paris', 1)\n"
+        "top = lens(W(1)[:, 0], 3)\n"
+        "print(json.dumps({'model_id': id(model), 'k_shape': list(k.shape), 'lens_n': len(top), 'arg': sys.argv[1]}))\n"
+    )
+    s2 = tmp_path / "script2.py"
+    s2.write_text(
+        "import json\n"
+        "print(json.dumps({'model_id': id(model), 'n_layers': lm.n_layers}))\n"
+    )
+
+    r1 = trun.request({"kind": "script", "target": str(s1), "argv": ["hello"], "cwd": str(tmp_path)},
+                      socket_path=sock_file)
+    r2 = trun.request({"kind": "script", "target": str(s2), "argv": [], "cwd": str(tmp_path)},
+                      socket_path=sock_file)
+    r3 = trun.request({"kind": "module", "target": "spectra", "argv": ["--k", "2"], "cwd": str(tmp_path)},
+                      socket_path=sock_file)
+    trun.request({"kind": "stop", "cwd": str(tmp_path)}, socket_path=sock_file)
+    t.join(timeout=5)
+
+    assert r1["rc"] == 0 and r2["rc"] == 0 and r3["rc"] == 0, (r1, r2, r3)
+    d1 = json.loads(r1["stdout"].strip())
+    d2 = json.loads(r2["stdout"].strip())
+    assert d1["model_id"] == d2["model_id"]
+    assert d1["arg"] == "hello" and d1["lens_n"] == 3 and d1["k_shape"][0] == 1
+    assert (out_dir / "spectra.json").exists()
+    assert len(load_calls) == 1
+
+
+def test_plant_restores_weights_bitwise(tiny, tmp_path):
+    _, lm = tiny
+    model = copy.deepcopy(lm.model)
+    before = {k: v.detach().clone() for k, v in model.named_parameters()}
+
+    # Test context manager directly on in-memory model for both ROME and MEMIT
+    for method in ("rome", "memit"):
+        with plant.planted((model, lm.tok), layer=1, method=method,
+                           subject=SUBJECT, prompt="The {} is located in", target=" Rome",
+                           mom2_samples=4):
+            changed = any(not torch.equal(p.detach(), before[n]) for n, p in model.named_parameters())
+            assert changed
+        for n, p in model.named_parameters():
+            assert torch.equal(p.detach(), before[n]), f"{n} not restored after {method}"
+
+    # Also test CLI end-to-end (`plant M --layer 1 --method rome -- spectra --k 2`)
+    d, _ = tiny
+    out_dir = tmp_path / "plant_cli"
+    rows = plant.main([str(d), "--out", str(out_dir), "--device", "cpu", "--dtype", "fp32",
+                       "--layer", "1", "--method", "rome", "--subject", SUBJECT,
+                       "--prompt", "The {} is located in", "--target", " Rome",
+                       "--mom2-samples", "4", "--", "spectra", "--k", "2"])
+    assert len(rows) > 0
+    assert (out_dir / "plant-rome-L1" / "plant.json").exists()
+    assert (out_dir / "plant-rome-L1" / "spectra.json").exists()

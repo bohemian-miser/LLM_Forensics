@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+from pathlib import Path
 import sys
 
 from rich.console import Console
@@ -13,6 +15,7 @@ from rich.panel import Panel
 
 from llm_forensics.core.loading import cache_root, resolve_weights
 from llm_forensics.core.session import ModelSession
+from llm_forensics.toolkit._common import read_prompts
 
 from .args import build_parser
 from .commands import REGISTRY, CommandError
@@ -138,6 +141,54 @@ class ChatApp:
                 self.console.print("[yellow]interrupted[/]")
 
 
+def _run_sweep(session: ModelSession, base: ModelSession | None, items: list[dict],
+               a: argparse.Namespace, console: Console) -> int:
+    mode = a.mode or ("raw" if a.raw else "chat")
+    modes = ("raw", "chat") if mode == "both" else (mode,)
+    render = Renderer(console)
+    records: list[dict] = []
+    sampling = dict(max_new_tokens=a.max_new_tokens, temperature=a.temperature, seed=a.seed)
+    for idx, it in enumerate(items):
+        prompt = it["prompt"]
+        for m in modes:
+            is_raw = (m == "raw")
+            msgs = ([{"role": "system", "content": a.system}] if (a.system and not is_raw) else []) + [
+                {"role": "user", "content": prompt}
+            ]
+            formatted = session.format_chat(msgs, raw=is_raw)
+            g = session.generate(formatted, **sampling) if is_raw else session.chat(msgs, **sampling)
+            tag = f"[{m}] " if len(modes) > 1 else ""
+            if idx > 0 or (len(modes) > 1 and m != modes[0]):
+                console.print()
+            console.print(f"{tag}{prompt} -> {g.text}", markup=False, highlight=False, soft_wrap=True)
+            rec: dict = {
+                "prompt": prompt,
+                "mode": m,
+                "completion": g.text,
+                "n_tokens": len(g.new_token_ids),
+                "finish_reason": g.finish_reason,
+            }
+            if base is not None:
+                gb = base.generate(base.format_chat(msgs, raw=is_raw), **sampling) if is_raw else base.chat(msgs, **sampling)
+                console.print(f"  [base] {gb.text}", markup=False, highlight=False, soft_wrap=True)
+                comp = session.compare(base, formatted, k=a.show_logits or 5)
+                render.comparison(comp, session.name, base.name)
+                rec["base_completion"] = gb.text
+                rec["kl"] = comp.kl
+            if a.show_logits:
+                top = session.next_token_topk(formatted, a.show_logits)
+                render.topk(top, title=f"next token · {session.name}")
+                rec["top"] = [{"token": t, "id": i, "p": p}
+                              for t, i, p in zip(top.tokens, top.ids, top.probs)]
+                rec["entropy"] = top.entropy
+            records.append(rec)
+    if a.jsonl:
+        jpath = Path(a.jsonl)
+        jpath.parent.mkdir(parents=True, exist_ok=True)
+        jpath.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
+    return 0
+
+
 def run(a: argparse.Namespace, console: Console | None = None) -> int:
     console = console or Console()
     with console.status(f"loading {a.weights} ..."):
@@ -145,8 +196,17 @@ def run(a: argparse.Namespace, console: Console | None = None) -> int:
         base = None
         if a.base:
             base = ModelSession(resolve_weights(a.base, device=a.device, dtype=a.dtype))
+    prompts_file = getattr(a, "prompts", None)
+    mode = getattr(a, "mode", None)
+    jsonl_out = getattr(a, "jsonl", None)
+    if prompts_file is not None or (a.prompt is not None and (mode in ("raw", "chat", "both") or jsonl_out)):
+        items = read_prompts(prompts_file) if prompts_file else []
+        if a.prompt is not None:
+            items.append({"prompt": a.prompt})
+        return _run_sweep(session, base, items, a, console)
+    raw = a.raw or (mode == "raw")
     app = ChatApp(session, base, console=console, temperature=a.temperature,
-                  max_new_tokens=a.max_new_tokens, raw=a.raw, show_logits=a.show_logits,
+                  max_new_tokens=a.max_new_tokens, raw=raw, show_logits=a.show_logits,
                   compare=base is not None, system=a.system, seed=a.seed,
                   stream=not a.no_stream and a.prompt is None)
     if a.prompt is not None:

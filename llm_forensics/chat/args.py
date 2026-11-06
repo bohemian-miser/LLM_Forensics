@@ -20,6 +20,10 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--base", help="base (pre-edit) weights: shown side by side with KL, toggled with /compare; "
                                    "also supplies config and tokenizer for a bare .safetensors file")
     ap.add_argument("--prompt", help="answer this prompt and exit")
+    ap.add_argument("--prompts", help="file of prompts (lines or JSONL with 'prompt') to sweep in one model load")
+    ap.add_argument("--mode", choices=("raw", "chat", "both"), default=None,
+                    help="prompt formatting mode: raw, chat, or both (default: raw if --raw else chat)")
+    ap.add_argument("--jsonl", help="write one JSON line per prompt sweep record to this path")
     ap.add_argument("--max-new-tokens", type=int, default=128, help="tokens to generate per answer (default 128)")
     ap.add_argument("--temperature", type=float, default=0.0, help="sampling temperature; 0 = greedy (default)")
     ap.add_argument("--seed", type=int, default=None, help="random seed for sampling")
