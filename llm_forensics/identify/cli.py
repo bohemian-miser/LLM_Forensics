@@ -121,7 +121,7 @@ def _render_report(console: Console, report: IdentifyReport) -> None:
     if report.candidates:
         tbl = Table(title="Ranked Candidate Bases", title_justify="left", header_style="bold", box=box.SIMPLE_HEAVY)
         tbl.add_column("#", justify="right")
-        tbl.add_column("Candidate")
+        tbl.add_column("Candidate", no_wrap=True, min_width=max((len(c.model_id) for c in report.candidates), default=9))
         tbl.add_column("Relationship")
         tbl.add_column("Score", justify="right")
         tbl.add_column("ModelDNA p", justify="right")
@@ -137,7 +137,7 @@ def _render_report(console: Console, report: IdentifyReport) -> None:
                 c.model_id,
                 c.relationship,
                 f"{c.score:.4f}",
-                f"{c.probability:.4f}",
+                "—" if c.probability is None else f"{c.probability:.4f}",
                 f"{100.0 * c.unchanged_tensor_fraction:.1f}%",
                 f"{100.0 * c.unchanged_attn_fraction:.1f}%",
                 cl or "—",

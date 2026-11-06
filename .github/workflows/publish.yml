@@ -1,0 +1,46 @@
+# Build the sdist and wheel and publish them to PyPI when a GitHub release is published.
+# Uses PyPI trusted publishing (no API token): on pypi.org, add a pending publisher for project
+# llm-forensics with owner bohemian-miser, repository LLM_Forensics, workflow publish.yml and
+# environment pypi. Run it by hand (workflow_dispatch) to publish to TestPyPI instead.
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - name: The wheel carries the identify reference data
+        run: python -m zipfile -l dist/*.whl | grep -q identify/data/builtin_ref.json.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'release' && 'pypi' || 'testpypi' }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ github.event_name == 'release' && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}
