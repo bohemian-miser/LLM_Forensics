@@ -95,7 +95,7 @@ control. It is published so that edit detectors can be tried on it, not for use 
 ## Scan it
 
 ```bash
-pip install "llm-forensics[llm] @ git+{PROJECT_URL}"
+pip install "llm-forensics>=0.1.1"
 llmf scan hf://{repo_id}@{tag}
 llmf chat hf://{repo_id}@{tag}
 ```
