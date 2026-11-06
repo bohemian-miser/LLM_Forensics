@@ -382,3 +382,17 @@ def test_scan_base_auto_runs_weight_diff_or_abstains_cleanly(tmp_path, capsys):
     assert rep_abs["target"]["identification"]["parent"] is None
     assert "weight-diff" not in {d["id"] for d in rep_abs["detectors"]}
     assert any("abstained" in w for w in rep_abs["warnings"])
+
+
+def test_render_report_with_candidate_missing_probability():
+    from rich.console import Console
+    from llm_forensics.identify.cli import _render_report
+    from llm_forensics.identify.engine import CandidateMatch, IdentificationReport
+
+    cand = CandidateMatch(model_id="org/base", verdict="NO_MATCH", score=0.1, probability=None,
+                          unchanged_attn_fraction=0.0, unchanged_mlp_fraction=0.0, unchanged_tensor_fraction=0.0)
+    report = IdentificationReport(target={"spec": "./suspect"}, verdict="NO_MATCH", parent=None, parent_revision=None,
+                                  abstained=True, abstention_reason="no candidate matched", candidates=[cand])
+    console = Console(record=True, width=120)
+    _render_report(console, report)
+    assert "org/base" in console.export_text()
