@@ -75,14 +75,18 @@ def planted(lm, layer: int | None = None, layers: Sequence[int] | None = None,
         )
         edit_layers = [l0]
     else:
+        # MEMIT optimises the output of its last edited block at the subject token; in the model's final
+        # block nothing later carries that to the prediction, so the update would be zero.
         if layers:
             edit_layers = sorted({int(x) % L for x in layers})
+            if edit_layers[-1] >= L - 1:
+                raise ValueError(f"MEMIT layers must be below the final layer ({L - 1}); got {edit_layers}")
         elif layer is not None:
-            l0 = int(layer) % L
-            edit_layers = sorted({l0, min(L - 1, l0 + 1)})
+            hi = min(L - 2, int(layer) % L + 1)
+            edit_layers = sorted({min(int(layer) % L, hi), hi})
         else:
             lo = max(1, L // 4)
-            edit_layers = list(range(lo, min(L, lo + 3)))
+            edit_layers = list(range(lo, min(L - 1, lo + 3)))
 
     req = _pick_fact(seed, subject, prompt, target)
     orig_params = {name: p.detach().cpu().clone() for name, p in model.named_parameters()}
