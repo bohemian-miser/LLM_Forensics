@@ -107,3 +107,21 @@ def test_compare_mode(sess):
     assert "KL(gpt2‖gpt2)=0.0000" in t and t.count("Paris") >= 2
     app.handle("/compare")
     assert app.compare_on is False
+
+
+def test_prompts_sweep_cli(tmp_path, capsys):
+    import json
+    pfile = tmp_path / "prompts.txt"
+    pfile.write_text("# sweep\n" + PROMPT + "\nThe capital of France is\n")
+    jout = tmp_path / "sweep.jsonl"
+    rc = cli.main(["chat", "gpt2", "--prompts", str(pfile), "--mode", "both",
+                   "--max-new-tokens", "3", "--show-logits", "2", "--jsonl", str(jout),
+                   "--device", "cpu"])
+    text = capsys.readouterr().out
+    assert rc == 0
+    assert "[raw] " + PROMPT + " -> " in text
+    assert "[chat] " + PROMPT + " -> " in text
+    lines = [json.loads(x) for x in jout.read_text().splitlines() if x.strip()]
+    assert len(lines) == 4
+    assert [r["mode"] for r in lines] == ["raw", "chat", "raw", "chat"]
+    assert all("top" in r and len(r["top"]) == 2 for r in lines)

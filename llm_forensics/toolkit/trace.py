@@ -131,7 +131,7 @@ def main(argv=None) -> list[dict]:
     p.add_argument("--subject", help="ablate at the subject's last token (default: last prompt token)")
     p.add_argument("--position", type=int, help="token index to ablate (overrides --subject)")
     p.add_argument("--mode", choices=("zero", "mean"), default="zero")
-    p.add_argument("--layers", help="comma-separated layers (default: all)")
+    p.add_argument("--layers", help="layer list or range, e.g. 10-20 or all (default: all)")
     args = p.parse_args(argv)
     items = C.collect_prompts(args)
     if not items:
@@ -139,15 +139,17 @@ def main(argv=None) -> list[dict]:
     lm = C.load(args)
     out = C.out_dir(args, lm)
     means = None
+    means_written = None
     if args.mode == "mean":
         corpus = load_or_generate(lm, out, **C.corpus_kwargs(args))
         mp = Path(str(corpus.path).replace(".json", "-mlp-means.pt"))
         if mp.exists():
-            means = torch.load(mp)
+            means = torch.load(mp, map_location="cpu", weights_only=False)
         else:
             means = mean_mlp_outputs(lm, corpus, args.batch_size)
             torch.save(means, mp)
-    layers = [int(x) for x in args.layers.split(",")] if args.layers else None
+            means_written = mp
+    layers = C.parse_layers(args.layers, num_layers(lm.model))
     results = []
     for it in items:
         r = trace(lm, it["prompt"], it.get("target"), it.get("subject"), args.position, args.mode, means, layers)
@@ -155,8 +157,9 @@ def main(argv=None) -> list[dict]:
         C.print_table(r["rows"], ["layer", "p_target", "delta", "top1", "p_top1", "out_norm", "norm_rel"],
                       title=f"\n{C.show(r['prompt'], 60)} -> {r['target']!r} (clean p={r['p_clean']:.4f}), "
                             f"{args.mode}-ablated at {r['position']} {r['position_token']!r}")
-    C.write_json(out / "trace.json", {"module": "trace", "model": lm.name, "mode": args.mode, "prompts": results})
-    print(f"wrote {out / 'trace.json'}")
+    jpath = out / "trace.json"
+    C.write_json(jpath, {"module": "trace", "model": lm.name, "mode": args.mode, "prompts": results})
+    C.wrote(jpath, means_written)
     return results
 
 
