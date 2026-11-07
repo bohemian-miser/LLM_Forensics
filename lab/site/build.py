@@ -629,6 +629,10 @@ def build_edited_models() -> str:
 control. Its changed tensors, edit config and the AI investigations of it are public in <code>{gs}/</code>;
 your browser lists that bucket as the batch runs, so nothing here waits for a commit.
 <code>llmf chat</code> loads the weights over their base model.</p>
+<p class="hint">Original-weight access and scanner comparison are separate conditions. A scan with no
+<code>--base</code> is not proof of isolation; missing access audits are shown as not recorded.
+Base weights used to reconstruct a delta are not automatically supplied for comparison.
+Historical repository exposure is shown separately and can compromise blinding.</p>
 <p id="em-status" class="hint">Reading <code>{gs}/</code>…</p>
 <p id="em-summary" class="hint"></p>
 <noscript><p class="callout warn">This page needs JavaScript: the suspects are read from the bucket by your

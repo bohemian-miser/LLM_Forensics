@@ -64,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
         items = [i for i in items if not re.search(a.exclude, i["name"].split("/")[-1], re.IGNORECASE)]
     # skip original-format checkpoints that some dirs carry next to the HF files
     items = [i for i in items if "/original/" not in i["name"]]
+    # These are answer records, never checkpoint data, even without a caller-supplied filter.
+    items = [i for i in items if not re.search(r"edit[_-]?(manifest|vectors)",
+                                             i["name"].split("/")[-1], re.IGNORECASE)]
     if any("/model-" in i["name"] or i["name"].endswith("/model.safetensors") for i in items):
         # Mistral dirs also ship the 14 GB consolidated (non-HF) checkpoint; skip it
         items = [i for i in items if not i["name"].split("/")[-1].startswith(("consolidated", "params.json"))]

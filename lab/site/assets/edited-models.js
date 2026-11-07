@@ -75,13 +75,13 @@
     const files = {}; // path inside the suspect -> listing entry
     for (const it of items) files[it.name.slice(dir.length)] = it;
     const get = (path, asText) => (files[path] ? object(fetchFn, files[path], asText) : null);
-    const [control, manifest, ev, report, scan] = await Promise.all([
+    const [control, manifest, ev, report, scan, access, blinding] = await Promise.all([
       get("config/control.json"), get("config/edit_manifest.json"), get("config/edit_eval.json"),
-      get("agents/report.json"), get("agents/scan.json")]);
+      get("agents/report.json"), get("agents/scan.json"), get("agents/access.json"), get("agents/BLINDING.json")]);
     const exit = report ? null : await get("agents/exit.txt", true);
 
     const sus = { sid, dir, files, control: !!control, model: null, method: null, layers: [], edits: [],
-                  efficacy: null, evalSummary: null, report, scan, exit: null,
+                  efficacy: null, evalSummary: null, report, scan, access, blinding, exit: null,
                   updated: items.reduce((m, it) => (it.updated > m ? it.updated : m), "") };
     if (control) {
       sus.model = control.model || null;
@@ -359,6 +359,43 @@
     ].join("\n");
   }
 
+  function baseContext(sus) {
+    const access = sus.access && sus.access.schema_version === 1 ? sus.access : {};
+    const label = (role) => {
+      const r = access[role] || {};
+      const mode = { none: "no originals", available: "originals available", unknown: "not recorded" }[r.base_weights_access];
+      if (!mode || r.base_weights_access === "unknown") return "not recorded";
+      const verification = { verified: "audit recorded", declared: "declared" }[r.verification] || "unverified";
+      return mode + " (" + verification + ")";
+    };
+    let comparison = "no scan report";
+    if (sus.scan) {
+      const target = sus.scan.target || {}, options = sus.scan.options || {};
+      const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+      if (has(target, "base")) comparison = target.base ? "with base" : "no base supplied";
+      else if (has(options, "base")) comparison = options.base ? "with base" : "no base supplied";
+      else comparison = "not recorded";
+    }
+    return { analyst: label("analyst"), investigators: label("investigators"), comparison };
+  }
+
+  function baseHtml(sus) {
+    const b = baseContext(sus);
+    return '<div class="sub">Analyst access: ' + esc(b.analyst) + '</div>' +
+      '<div class="sub">Investigator access: ' + esc(b.investigators) + '</div>' +
+      '<div class="sub">Scan comparison: ' + esc(b.comparison) + '</div>';
+  }
+
+  function blindingHtml(sus) {
+    const b = sus.blinding;
+    let text = "Blinding audit: not recorded", cls = "st-na";
+    if (b && b.contaminated === true) { text = "Repository exposure recorded"; cls = "st-no"; }
+    else if (b && b.contaminated === false) { text = "No repository exposure recorded"; cls = "st-dim"; }
+    const item = sus.files["agents/BLINDING.json"];
+    const badge = '<span class="st ' + cls + '">' + esc(text) + '</span>';
+    return '<div class="sub">' + (item ? '<a href="' + esc(objectUrl(item.name, item.generation)) + '">' + badge + '</a>' : badge) + '</div>';
+  }
+
   function cardHtml(sus) {
     const id = "s-" + sus.sid.replace(/[^A-Za-z0-9_-]/g, "-");
     if (sus.error) {
@@ -374,9 +411,10 @@
       "<dt>method</dt><dd>" + methodHtml(sus) + "</dd>" +
       "<dt>edit</dt><dd>" + (sus.edits.map(editHtml).join("<br>") || "none") + "</dd>" +
       "<dt>efficacy</dt><dd>" + (sus.edits.length ? efficacyHtml(sus) : "–") + "</dd>" +
-      tiers + "</dl>" + notesHtml(sus) +
+      tiers + "<dt>original weights</dt><dd>" + baseHtml(sus) + "</dd>" +
+      "<dt>blinding</dt><dd>" + blindingHtml(sus) + "</dd></dl>" + notesHtml(sus) +
       "<h4>Files</h4>" + filesHtml(sus) +
-      "<h4>Use it</h4><p class=\"hint\">Assumes a working <code>llmf</code> install and <code>python</code> from the same environment,. " +
+      "<h4>Use it</h4><p class=\"hint\">Assumes a working <code>llmf</code> install and <code>python</code> from the same environment. " +
       '<a href="https://github.com/bohemian-miser/LLM_Forensics#install">GitHub · installation instructions</a>.</p>' +
       "<p class=\"hint\">Loads the published weights directly; delta metadata identifies the base model. " +
       "Downloads are cached on disk, and registered local base models are reused. No standalone model save is required. " +
@@ -387,9 +425,9 @@
     const id = "s-" + sus.sid.replace(/[^A-Za-z0-9_-]/g, "-");
     const head = '<th scope="row"><a href="#' + id + '"><code>' + esc(sus.sid) + "</code></a>" +
       '<div class="sub">' + esc(sus.model || "?") + "</div></th>";
-    if (sus.error) return "<tr>" + head + "<td>" + statusHtml(sus) + '</td><td colspan="6"></td></tr>';
+    if (sus.error) return "<tr>" + head + "<td>" + statusHtml(sus) + '</td><td colspan="7"></td></tr>';
     const sc = scored(sus);
-    return "<tr>" + head + "<td>" + statusHtml(sus) + "</td><td>" + methodHtml(sus) + "</td>" +
+    return "<tr>" + head + "<td>" + statusHtml(sus) + blindingHtml(sus) + "</td><td>" + baseHtml(sus) + "</td><td>" + methodHtml(sus) + "</td>" +
       "<td>" + (sus.edits.map(editHtml).join("<br>") || "none") + "</td>" +
       '<td class="eff">' + (sus.edits.length ? efficacyHtml(sus) : "–") + "</td>" +
       TIERS.map(([k]) => "<td>" + tierHtml(sc[k]) + tierFilesHtml(sus, k) + "</td>").join("") + "</tr>";
@@ -406,10 +444,10 @@
   }
 
   function render(model) {
-    const head = "<thead><tr>" + ["Suspect", "Status", "Method", "Edit", "Efficacy"].concat(TIERS.map((t) => t[1]))
+    const head = "<thead><tr>" + ["Suspect", "Status / blinding", "Original weights", "Method", "Edit", "Efficacy"].concat(TIERS.map((t) => t[1]))
       .map((h) => '<th scope="col">' + esc(h) + "</th>").join("") + "</tr></thead>";
     const body = model.suspects.map(rowHtml).join("") ||
-      '<tr><td colspan="8" class="c-na">No suspects in the bucket yet.</td></tr>';
+      '<tr><td colspan="9" class="c-na">No suspects in the bucket yet.</td></tr>';
     setHtml(document.getElementById("em-table"), "<table>" + head + "<tbody>" + body + "</tbody></table>");
     renderCards(document.getElementById("em-cards"), model.suspects);
     const summary = model.suspects.length ? summaryText(model.summary) : "";
@@ -472,7 +510,7 @@
   }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { load, notesHtml, statusOf, scored, summarize, summaryText, objectUrl, BUCKET, PREFIX };
+    module.exports = { load, notesHtml, baseContext, baseHtml, blindingHtml, rowHtml, statusOf, scored, summarize, summaryText, objectUrl, BUCKET, PREFIX };
   } else if (typeof document !== "undefined") {
     main();
   }

@@ -30,7 +30,9 @@ function fakeFetch(url) {
 
 em.load(fakeFetch).then((model) => {
   const suspects = model.suspects.map((s) => ({ sid: s.sid, error: s.error || null, status: s.error ? null : em.statusOf(s),
-                                                 tiers: s.error ? null : em.scored(s) }));
+                                                 tiers: s.error ? null : em.scored(s),
+                                                 baseContext: s.error ? null : em.baseContext(s),
+                                                 blinding: s.error ? null : em.blindingHtml(s) }));
   console.log(JSON.stringify({ summary: model.summary, summaryText: em.summaryText(model.summary), suspects,
                                objectUrl: em.objectUrl("edits/s-a/weights/delta.safetensors") }));
 }).catch((err) => { console.error(err); process.exit(1); });

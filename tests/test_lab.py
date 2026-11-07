@@ -153,6 +153,9 @@ def test_edited_models_js(tmp_path):
             "detectors": [{"id": "spectral", "status": "OK"}, {"id": "rank-reversal", "status": "OK"},
                           {"id": "llm-openai", "status": "OK"}]},
         "edits/s-a/weights/delta.safetensors": "",
+        "edits/s-a/agents/access.json": {"schema_version": 1, "analyst": {
+            "base_weights_access": "none", "verification": "verified"}},
+        "edits/s-a/agents/BLINDING.json": {"contaminated": True},
         "edits/s-b/config/control.json": control,
         "edits/s-b/agents/report.json": {"edited": False, "edits": [], "confidence_unmodified": 0.7},
         "edits/s-b/agents/live/.sid": "s-b",
@@ -171,6 +174,10 @@ def test_edited_models_js(tmp_path):
     assert {s: by_sid[s]["status"] for s in by_sid} == {
         "s-a": "analysed · scanned", "s-b": "analysed", "s-c": "queued", "s-d": "analyst running",
         "s-e": "analyst timed out, no report"}
+    assert by_sid["s-a"]["baseContext"]["analyst"] == "no originals (audit recorded)"
+    assert by_sid["s-a"]["baseContext"]["comparison"] == "not recorded"
+    assert "Repository exposure recorded" in by_sid["s-a"]["blinding"]
+    assert by_sid["s-b"]["baseContext"]["analyst"] == "not recorded"
     a = by_sid["s-a"]["tiers"]
     assert (a["detectors"]["correct"], a["detectors"]["mark"], a["detectors"]["tier"]["layers"]) == (False, "wrong layer", [3])
     assert (a["analyst"]["correct"], a["analyst"]["tier"]["note"]) == (True, "Eiffel Tower → Rome")
@@ -315,3 +322,31 @@ assert(html.includes('href="held-out.html?s=suspect-643#k=SECRET_KEY_42" data-co
 """
     subprocess.run([node, "-e", script, str(pipeline.ROOT / "lab/site/assets/held-out.js"), json.dumps(payload)],
                    check=True)
+
+
+def test_base_comparison_is_not_access_verification():
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    script = r"""
+const assert = require('node:assert/strict');
+const em = require(process.argv[1]);
+let sus = {files: {}, scan: {target: {base: null}}};
+assert.equal(em.baseContext(sus).comparison, 'no base supplied');
+assert.equal(em.baseContext(sus).analyst, 'not recorded');
+sus.scan.target.base = 'org/base';
+assert.equal(em.baseContext(sus).comparison, 'with base');
+assert.equal(em.baseContext(sus).investigators, 'not recorded');
+sus.access = {schema_version: 1, analyst: {base_weights_access: 'available', verification: 'declared'}};
+assert.equal(em.baseContext(sus).analyst, 'originals available (declared)');
+sus.blinding = {contaminated: true};
+assert(em.blindingHtml(sus).includes('Repository exposure recorded'));
+sus.blinding = {contaminated: false};
+assert(em.blindingHtml(sus).includes('No repository exposure recorded'));
+sus.blinding = null;
+assert(em.blindingHtml(sus).includes('not recorded'));
+"""
+    subprocess.run([node, "-e", script, str(pipeline.ROOT / "lab/site/assets/edited-models.js")], check=True)
