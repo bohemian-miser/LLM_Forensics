@@ -109,7 +109,7 @@ def test_samples_base_vs_edited(tmp_path):
 
 
 def test_site_edited_models(tmp_path):
-    """edited-models.html is a shell the browser fills from the bucket; the index always links to it."""
+    """edited-models.html is a shell the browser fills from the bucket; the index links the held-out page."""
     import shutil
 
     from lab.site import build
@@ -119,7 +119,7 @@ def test_site_edited_models(tmp_path):
     out = tmp_path / "site"
     assert build.main(["--results", str(results), "--out", str(out)]) == 0
     assert sorted(p.name for p in (out / "exp").iterdir()) == ["example.html"]
-    assert 'href="edited-models.html"' in (out / "index.html").read_text()
+    assert 'href="held-out.html"' in (out / "index.html").read_text()
     page = (out / "edited-models.html").read_text()
     assert 'src="assets/edited-models.js"' in page and 'id="em-table"' in page and 'id="em-status"' in page
     assert f"gs://{build.BUCKET}/{build.BUCKET_PREFIX}/" in page

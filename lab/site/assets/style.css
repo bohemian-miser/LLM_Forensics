@@ -204,3 +204,4 @@ tr.hl > th, tr.hl > td { background: color-mix(in srgb, var(--hl) 14%, transpare
 /* gpu-monitor.html: data older than 5 minutes is greyed out (see gpu-monitor.js) */
 .gm-stale #gm-tiles, .gm-stale section { opacity: 0.45; }
 .links { padding-left: 22px; } .links li { margin: 8px 0; }
+pre.raw { white-space: pre; overflow-x: auto; font: 12px/1.45 var(--mono); background: var(--surface-2); padding: 12px; border-radius: 6px; }
