@@ -541,7 +541,7 @@ def test_plant_restores_weights_bitwise(tiny, tmp_path):
 
 def test_plant_memit_refuses_the_final_layer(tiny):
     _, lm = tiny
-    L = len(lm.model.config.to_dict().get("n_layer") and range(lm.model.config.n_layer) or range(lm.model.config.num_hidden_layers))
+    L = plant.num_layers(lm.model)
     with pytest.raises(ValueError, match="below the final layer"):
         with plant.planted((lm.model, lm.tok), layers=[L - 2, L - 1], method="memit", subject=SUBJECT,
                            prompt="The {} is located in", target=" Rome", mom2_samples=4):
