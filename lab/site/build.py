@@ -261,13 +261,13 @@ def page(title: str, body: str, depth: int = 0, description: str = "") -> str:
 <body>
 <header class="top"><div class="wrap">
   <a class="brand" href="{up}index.html">LLM&nbsp;Forensics</a>
-  <nav><a href="{up}index.html#experiments">Experiments</a><a href="{up}index.html#detectors">Detectors</a><a href="{REPO_URL}">GitHub</a>
+  <nav><a href="{up}index.html#results">Results</a><a href="{up}index.html#detectors">Detectors</a><a href="{REPO_URL}">GitHub</a>
   <button id="theme" type="button" aria-label="Toggle light/dark theme" title="Toggle theme">◐</button></nav>
 </div></header>
 <main class="wrap">
 {body}
 </main>
-<footer class="wrap foot">Built {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} from committed <code>results/</code> ·
+<footer class="wrap foot">Built {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} ·
 <a href="{REPO_URL}">source</a> · BSD-3-Clause</footer>
 <script src="{up}assets/app.js"></script>
 </body>
@@ -292,75 +292,30 @@ def score_cell(m: dict[str, Any] | None) -> str:
 
 
 def build_index(exps: list[dict[str, Any]]) -> str:
-    any_example = any(x["example"] for x in exps)
-    order = present_order(exps)
-    names = labels(exps)
-    rows = []
-    for x in exps:
-        g = first_edit(x)
-        badge = ' <span class="badge ex">example</span>' if x["example"] else ""
-        cells = "".join(score_cell(x.get("detectors", {}).get(k)) for k in order)
-        ee = x.get("edit_eval") or {}
-        eff = ee.get("efficacy_success", ee.get("efficacy_score"))
-        rows.append(
-            f'<tr><th scope="row"><a href="exp/{slug(x["name"])}.html">{e(x["name"])}</a>{badge}'
-            f'<div class="sub">{e(str(x.get("base_model") or "?"))} · {e(g.get("subject") or "?")} → {tok(g.get("target"))}'
-            f' · layer {", ".join(map(str, g.get("layers") or [])) or "?"}</div></th>'
-            f'<td class="num">{f"{eff:.0%}" if isinstance(eff, (int, float)) else "–"}</td>{cells}</tr>')
-    head = "".join(f"<th scope='col'>{detector_label(k, names)}</th>" for k in order)
-
-    agg_rows = []  # one row per detector, averaged over experiments
-    for k in order:
-        ms = [x["detectors"][k] for x in exps if k in x.get("detectors", {})]
-        if not ms:
-            continue
-
-        def mean(key):
-            vals = [(m.get("eval") or {}).get(key) for m in ms]
-            vals = [float(v) for v in vals if v is not None]
-            return sum(vals) / len(vals) if vals else None
-
-        det = sum(bool(m.get("detected")) for m in ms) / len(ms)
-        agg_rows.append(
-            f"<tr><th scope='row'>{detector_label(k, names)}</th><td class='num'>{len(ms)}</td><td class='num'>{det:.0%}</td>"
-            + "".join(f"<td class='num'>{'–' if v is None else f'{v:.0%}'}</td>"
-                      for v in (mean("layer_correct"), mean("subject_hit@1"), mean("subject_hit@10"),
-                                mean("target_hit@1"), mean("target_hit@10"))) + "</tr>")
-
-    edited = ('<section id="edited">\n  <h2>Edited models</h2>\n  <p><a href="hosts.html">Hosts</a>: what each GPU box is doing. <a href="gpu-monitor.html">GPU monitor</a>: utilisation over time, the backlog and job history. <a href="pr-tests.html?pr=12">PR tests</a>: a pull request scanned on every edit. <a href="held-out.html">Held-out</a>: the private test edits, encrypted (opens with your key link). <a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch. <a href="edited-models.html">The suspects of '
-              'the blind batches</a>, live from the public bucket: their weights, edit configs, investigation '
-              'traces and what each forensics tier concluded.</p>\n</section>')
-    example_note = ('<p class="callout warn"><strong>Example data.</strong> Experiments marked '
-                    '<span class="badge ex">example</span> are synthetic fixtures used to develop this site, '
-                    'not real measurements.</p>') if any_example else ""
-    body = f"""
+    """Front page: what the project does and links to the pages that read live data from the bucket."""
+    body = """
 <section class="hero">
   <h1>Can you tell a model's memory was rewritten?</h1>
   <p class="lede">We plant targeted factual edits (ROME and MEMIT) into open-weight language models,
   then run <code>llmf scan</code> on them: a diff against the base weights, weights-only spectral and
-  rank-reversal detectors, and LLM agents that investigate the weights with tools. Every number on this site is
+  rank-reversal detectors, and LLM agents that investigate the weights with tools. Every result is
   scored against the edit manifest that records what was planted.</p>
 </section>
-{example_note}
-<section id="experiments">
-  <h2>Experiments</h2>
-  <p class="hint">Each cell shows whether the detector recovered the edited
-  <span class="pip pip-yes">L</span>ayer, the trigger <span class="pip pip-yes">S</span>ubject (top&nbsp;10) and the
-  new <span class="pip pip-yes">T</span>arget (top&nbsp;10). Green letters are hits, red are misses, grey is not
-  applicable. Hover for details.</p>
-  <div class="scroll"><table class="matrix">
-  <thead><tr><th scope="col">Experiment</th><th scope="col">Edit<br>efficacy</th>{head}</tr></thead>
-  <tbody>{''.join(rows) or '<tr><td colspan="{len(order) + 2}">No results yet. Run <code>make all</code>.</td></tr>'}</tbody>
-  </table></div>
+<section id="results">
+  <h2>Results</h2>
+  <ul class="links">
+    <li><a href="edited-models.html">Edited models</a>: the suspects of the blind batches, live from the public
+    bucket, with their weights, edit configs, investigation traces and what each forensics tier concluded.</li>
+    <li><a href="pr-tests.html?pr=12">PR tests</a>: each pull request scanned on every dev suspect, one table per
+    tested commit.</li>
+    <li><a href="held-out.html">Held-out</a>: the private test edits, encrypted; it opens with your key link.</li>
+    <li><a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch work.</li>
+    <li><a href="gpu-monitor.html">GPU monitor</a>: box utilisation over time, the backlog and job history.</li>
+    <li><a href="hosts.html">Hosts</a>: what each GPU box is doing right now.</li>
+  </ul>
 </section>
-{edited}
 <section id="detectors">
-  <h2>Detectors at a glance</h2>
-  <div class="scroll"><table>
-  <thead><tr><th scope="col">Detector</th><th scope="col">runs</th><th scope="col">flagged edit</th>
-  <th scope="col">layer correct</th><th scope="col">subject@1</th><th scope="col">subject@10</th>
-  <th scope="col">target@1</th><th scope="col">target@10</th></tr></thead>
-  <tbody>{''.join(agg_rows)}</tbody></table></div>
+  <h2>Detectors</h2>
   <dl class="defs">
     <dt>Weight diff</dt><dd>Subtract the base weights, take the SVD of each changed tensor, read the
     value direction through the unembedding (target) and match the key direction against candidate subjects.</dd>
@@ -368,8 +323,10 @@ def build_index(exps: list[dict[str, Any]]) -> str:
     directions are outliers relative to the other layers.</dd>
     <dt>Rank reversal</dt><dd>Weights only: pairwise-cosine layer detection and bottom-rank reversal from
     Youssef et al. 2025 (arXiv:2505.20819).</dd>
+    <dt>MLP gain</dt><dd>Weights and forward passes: run every vocabulary token through a neutral template and flag
+    a layer whose MLP output amplifies one token's key far more than other tokens and layers do.</dd>
     <dt>LLM investigators</dt><dd>An agent (Claude, OpenAI or Gemini) with tools for spectra, logit lens, unembedding
-    and forward passes; run with and without the base model. Transcripts are on each experiment page.</dd>
+    and forward passes; run with and without the base model.</dd>
   </dl>
 </section>
 """
@@ -595,7 +552,7 @@ def build_experiment(x: dict[str, Any]) -> str:
                     f"<pre>{e(json.dumps(x['config'], indent=2, default=str))}</pre></details>")
 
     body = f"""
-<p class="crumbs"><a href="../index.html">← all experiments</a></p>
+<p class="crumbs"><a href="../index.html">← home</a></p>
 <h1>{e(x.get("title") or x["name"])} {badge}</h1>
 <section class="card plant">
   <h2>The planted edit</h2>
@@ -623,7 +580,7 @@ def build_edited_models() -> str:
     """The shell that assets/edited-models.js fills from the bucket in the browser."""
     gs = e(f"gs://{BUCKET}/{BUCKET_PREFIX}")
     body = f"""
-<p class="crumbs"><a href="index.html">← all experiments</a></p>
+<p class="crumbs"><a href="index.html">← home</a></p>
 <h1>Edited models</h1>
 <p class="lede">Each suspect is a model from a blind batch, edited with ROME or MEMIT or left unedited as a
 control. Its changed tensors, edit config and the AI investigations of it are public in <code>{gs}/</code>;
@@ -657,7 +614,7 @@ def build_hosts() -> str:
     """The shell that assets/hosts.js fills from gs://<bucket>/dashboard/hosts.json."""
     gs = e(f"gs://{BUCKET}/dashboard/hosts.json")
     body = f"""
-<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="edited-models.html">edited models</a></p>
+<p class="crumbs"><a href="index.html">← home</a> · <a href="edited-models.html">edited models</a></p>
 <h1>Hosts</h1>
 <p class="lede">What each GPU box is doing right now: its jobs, GPU use, and which edits, built suspect models and
 analyses are on its disk. The coordinator checks every box every few minutes and writes <code>{gs}</code>.</p>
@@ -673,7 +630,7 @@ def build_harvest() -> str:
     """The shell that assets/harvest.js fills from gs://<bucket>/harvest/<batch>/index.json."""
     gs = e(f"gs://{BUCKET}/harvest")
     body = f"""
-<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="edited-models.html">edited models</a></p>
+<p class="crumbs"><a href="index.html">← home</a> · <a href="edited-models.html">edited models</a></p>
 <h1>Harvest</h1>
 <p class="lede" id="hv-lede">Techniques that cheap review agents pulled out of the analysts' scratch scripts and the LLM
 investigators' transcripts: what found an edit, what came close, which signals fool detectors on clean models, and
@@ -691,7 +648,7 @@ def build_pr_tests() -> str:
     """The shell that assets/pr-tests.js fills from gs://<bucket>/pr<N>/index.json."""
     gs = e(f"gs://{BUCKET}/pr<N>/")
     body = f"""
-<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="edited-models.html">edited models</a> · <a href="hosts.html">hosts</a></p>
+<p class="crumbs"><a href="index.html">← home</a> · <a href="edited-models.html">edited models</a> · <a href="hosts.html">hosts</a></p>
 <h1>PR tests</h1>
 <p class="lede">A pull request's <code>llmf scan</code> run on every edit in the bucket, across the GPU fleet. Each scan
 is weights-only (no base model, no LLM investigators) on the full edited checkpoint. A row says whether the scan found
@@ -708,7 +665,7 @@ checks the bucket copy still gives the planted target. Files are in <code>{gs}</
 def build_held_out() -> str:
     """The shell that assets/held-out.js fills by decrypting gs://<bucket>/private/heldout.enc with the key in the link."""
     body = """
-<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="edited-models.html">edited models</a> · <a href="pr-tests.html?pr=12">PR tests</a></p>
+<p class="crumbs"><a href="index.html">← home</a> · <a href="edited-models.html">edited models</a> · <a href="pr-tests.html?pr=12">PR tests</a></p>
 <h1>Held-out edits</h1>
 <p class="lede">Edits kept out of every public listing so that detector changes can be scored on edits nobody has tuned
 against. The data is encrypted; this page decrypts it in your browser with the key from your link.</p>
@@ -724,7 +681,7 @@ def build_gpu_monitor() -> str:
     """The shell that assets/gpu-monitor.js fills from gs://<bucket>/monitor/status.json and history.json."""
     gs = e(f"gs://{BUCKET}/monitor/")
     body = f"""
-<p class="crumbs"><a href="index.html">← all experiments</a> · <a href="hosts.html">hosts</a> · <a href="pr-tests.html?pr=12">PR tests</a></p>
+<p class="crumbs"><a href="index.html">← home</a> · <a href="hosts.html">hosts</a> · <a href="pr-tests.html?pr=12">PR tests</a></p>
 <h1>GPU monitor</h1>
 <p class="lede">The nine <code>llmf-cr</code> boxes: how busy each GPU is, what it is running, what is waiting, and every
 job so far with its outcome. The coordinator samples each box over SSH once a minute and writes <code>{gs}</code>.</p>
