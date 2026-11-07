@@ -79,14 +79,17 @@ def investigator_rows(scan: dict | None, truth: dict | None, sid: str) -> list[d
     """One entry per LLM investigator that ran in the analyst session's scan, scored like the other methods."""
     if not scan:
         return []
-    ran = {d.get("id") for d in scan.get("detectors") or []}
+    ran = {d.get("id"): d for d in scan.get("detectors") or []}
     out = []
     for det, label in INVESTIGATORS:
         if det not in ran:
             continue
         fs = [f for f in scan.get("findings") or [] if f.get("detector") == det and f.get("severity") in REPORTED]
         row = {"id": det, "label": label, "transcript": f"{PUBLIC}/edits/{sid}/{ANALYST_DIR}/investigators/{det}.md"}
-        if truth is None:
+        d = ran[det]
+        if d.get("status") != "OK" or (not d.get("confidence") and (d.get("runtime_s") or 0) < 60):
+            row["empty"] = True   # errored, or returned within a minute with no answer: nothing to score
+        elif truth is None:
             row["correct"] = not fs
         else:
             layers = set(truth["layers"])

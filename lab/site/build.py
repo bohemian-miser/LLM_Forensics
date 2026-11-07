@@ -293,6 +293,7 @@ def score_cell(m: dict[str, Any] | None) -> str:
 
 
 DEV_TABLE = Path("results/dev-set.json")   # written by `python -m lab.site.dev_table`
+HELDOUT_KEY = Path("results/held-out-key.txt")   # opens held-out.html; published on purpose
 HARVEST_URL = f"{REPO_URL}/blob/main/docs/harvest/2026-11-05-analyst-wins.md"
 
 
@@ -329,10 +330,16 @@ def _cell(cell: dict, control: bool, links: list[tuple[str, str | None]]) -> str
 def _investigators(cells: list[dict], control: bool) -> str:
     if not cells:
         return '<td class="res res-na"><div class="res-v">not run</div></td>'
+    def title(c):
+        if c.get("empty"):
+            return f'{c["label"]}: returned nothing'
+        if control:
+            return f'{c["label"]}: {"no false alarm" if c.get("correct") else "false alarm"}'
+        return (f'{c["label"]}: layer {"yes" if c.get("layer") else "no"}, subject {"yes" if c.get("subject") else "no"}, '
+                f'target {"yes" if c.get("target") else "no"}')
     chips = "".join(
-        f'<a class="chip res-{_grade(c, control)}" href="{e(_view(c["transcript"]))}" '
-        f'title="{e(c["label"])}: layer {"yes" if c.get("layer") else "no"}, subject {"yes" if c.get("subject") else "no"}, '
-        f'target {"yes" if c.get("target") else "no"}">{e(c["label"])}</a>' for c in cells)
+        f'<a class="chip res-{"na" if c.get("empty") else _grade(c, control)}" href="{e(_view(c["transcript"]))}" '
+        f'title="{e(title(c))}">{e(c["label"])}{" · empty" if c.get("empty") else ""}</a>' for c in cells)
     return f'<td class="res"><div class="chips">{chips}</div></td>'
 
 
@@ -358,6 +365,8 @@ def _count(rows: list[dict], get) -> str:
 def build_index(exps: list[dict[str, Any]]) -> str:
     """Front page: what llmf does, and every dev suspect with each method's result and a link to its output."""
     data = read_json(DEV_TABLE) or {"rows": [], "commits": []}
+    key = HELDOUT_KEY.read_text().strip() if HELDOUT_KEY.exists() else ""
+    heldout_href = "held-out.html" + (f"#k={key}" if key else "")
     rows, commits = data["rows"], data.get("commits", [])
     body_rows = []
     for r in rows:
@@ -387,7 +396,8 @@ def build_index(exps: list[dict[str, Any]]) -> str:
   <h1>Can you tell a model's memory was rewritten?</h1>
   <p class="lede">We plant targeted factual edits (ROME and MEMIT) into open-weight models, hand over only the
   edited weights, and see what <code>llmf</code> can recover: the edited layer, the trigger subject and the
-  injected target.</p>
+  injected target. We also gave the same weights to Claude analysts and folded what they found into the
+  scanner; the commit-by-commit column below shows the scanner across those changes.</p>
 </section>
 <section id="tool">
   <h2>What llmf does on its own</h2>
@@ -420,7 +430,7 @@ def build_index(exps: list[dict[str, Any]]) -> str:
   <td class="num">{_count(rows, lambda r: r["scan"])}</td><td></td>
   <td class="num">{_count(rows, lambda r: r["auto"])}</td>
   <td class="num">{_count(rows, lambda r: r["analyst"])}</td>
-  <td class="num">{_count(rows, lambda r: {k: any(c.get(k) for c in r.get("investigators", [])) for k in ("layer", "subject", "target")})}<div class="sub">any investigator</div></td></tr></tfoot>
+  <td class="num">{_count(rows, lambda r: {k: any(c.get(k) for c in r.get("investigators", []) if not c.get("empty")) for k in ("layer", "subject", "target")})}<div class="sub">any investigator</div></td></tr></tfoot>
   </table></div>
   <p class="hint">The commit-by-commit strip is the weights-only scan at each of the {len(commits)} commits of
   PR&nbsp;#12 (hover for the commit): green found the layer, red missed. Those commits folded in techniques from
@@ -429,10 +439,10 @@ def build_index(exps: list[dict[str, Any]]) -> str:
   final scan finds fewer than the peak. Weights-only scan at <code>{e(data.get("scan_commit", "?"))}</code>,
   identify + base scan at <code>{e(data.get("auto_commit", "?"))}</code>; analyst and investigator runs are
   from the first blind batch.</p>
-  <p>On the 20 <a href="held-out.html">held-out suspects</a> (answers kept private), <code>llmf identify</code>
+  <p>On the 20 <a href="{e(heldout_href)}">held-out suspects</a> (planted separately and never used to tune the tools), <code>llmf identify</code>
   named the right base for all 20, and <code>scan --base auto</code> found the edited layer in all 19 edits,
-  the subject in 8 and the target in 3, with no false alarms on the unedited control. Their analyst traces are
-  on that page.</p>
+  the subject in 8 and the target in 3, with no false alarms on the unedited control. That page has every run
+  on them: the scanner at each commit, the base scan, the toolkit runs and every Claude analyst session with its trace.</p>
 </section>
 """
     return page("LLM Forensics", body)
@@ -783,13 +793,13 @@ def build_view() -> str:
 def build_held_out() -> str:
     """The shell that assets/held-out.js fills by decrypting gs://<bucket>/private/heldout.enc with the key in the link."""
     body = """
-<p class="crumbs"><a href="index.html">← home</a> · <a href="edited-models.html">edited models</a> · <a href="pr-tests.html?pr=12">PR tests</a></p>
+<p class="crumbs"><a href="index.html">← home</a></p>
 <h1>Held-out edits</h1>
 <p class="lede">Edits kept out of every public listing so that detector changes can be scored on edits nobody has tuned
 against. The data is encrypted; this page decrypts it in your browser with the key from your link.</p>
 <p id="ho-status" class="hint">Reading…</p>
 <noscript><p class="callout warn">This page needs JavaScript.</p></noscript>
-<div id="ho-body"></div>
+<div id="ho-body" class="wide"></div>
 <script src="assets/md.js" defer></script>
 <script src="assets/held-out.js" defer></script>
 """

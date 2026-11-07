@@ -89,13 +89,13 @@
      "id": "llm-openai",
      "label": "GPT",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-220/agents/attempts/pi-sync/investigators/llm-openai.md",
-     "correct": true
+     "empty": true
     },
     {
      "id": "llm-openai-raw",
      "label": "GPT raw",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-220/agents/attempts/pi-sync/investigators/llm-openai-raw.md",
-     "correct": true
+     "empty": true
     },
     {
      "id": "llm-gemini",
@@ -168,17 +168,13 @@
      "id": "llm-openai",
      "label": "GPT",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-283/agents/attempts/pi-sync/investigators/llm-openai.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-openai-raw",
      "label": "GPT raw",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-283/agents/attempts/pi-sync/investigators/llm-openai-raw.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-gemini",
@@ -365,17 +361,13 @@
      "id": "llm-openai",
      "label": "GPT",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-348/agents/attempts/pi-sync/investigators/llm-openai.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-openai-raw",
      "label": "GPT raw",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-348/agents/attempts/pi-sync/investigators/llm-openai-raw.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-gemini",
@@ -456,17 +448,13 @@
      "id": "llm-openai",
      "label": "GPT",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-420/agents/attempts/pi-sync/investigators/llm-openai.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-openai-raw",
      "label": "GPT raw",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-420/agents/attempts/pi-sync/investigators/llm-openai-raw.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-gemini",
@@ -543,17 +531,13 @@
      "id": "llm-openai",
      "label": "GPT",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-428/agents/attempts/pi-sync/investigators/llm-openai.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-openai-raw",
      "label": "GPT raw",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-428/agents/attempts/pi-sync/investigators/llm-openai-raw.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-gemini",
@@ -631,17 +615,13 @@
      "id": "llm-openai",
      "label": "GPT",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-432/agents/attempts/pi-sync/investigators/llm-openai.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-openai-raw",
      "label": "GPT raw",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-432/agents/attempts/pi-sync/investigators/llm-openai-raw.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-gemini",
@@ -718,17 +698,13 @@
      "id": "llm-openai",
      "label": "GPT",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-447/agents/attempts/pi-sync/investigators/llm-openai.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-openai-raw",
      "label": "GPT raw",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-447/agents/attempts/pi-sync/investigators/llm-openai-raw.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-gemini",
@@ -1241,17 +1217,13 @@
      "id": "llm-openai",
      "label": "GPT",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-859/agents/attempts/pi-sync/investigators/llm-openai.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-openai-raw",
      "label": "GPT raw",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-859/agents/attempts/pi-sync/investigators/llm-openai-raw.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-gemini",
@@ -1419,17 +1391,13 @@
      "id": "llm-openai",
      "label": "GPT",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-959/agents/attempts/pi-sync/investigators/llm-openai.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-openai-raw",
      "label": "GPT raw",
      "transcript": "https://storage.googleapis.com/llmf-edits-spectacle-game/edits/suspect-959/agents/attempts/pi-sync/investigators/llm-openai-raw.md",
-     "layer": false,
-     "subject": false,
-     "target": false
+     "empty": true
     },
     {
      "id": "llm-gemini",
