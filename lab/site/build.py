@@ -35,6 +35,7 @@ ROOT = HERE.parent.parent  # repo root
 
 REPO_URL = "https://github.com/bohemian-miser/LLM_Forensics"
 BUCKET, BUCKET_PREFIX = "llmf-edits-spectacle-game", "edits"  # must match assets/edited-models.js
+BUCKET_URL = f"https://storage.googleapis.com/{BUCKET}/"
 # column order: base comparison first, then weights-only detectors; LLM investigators follow, sorted
 DETECTOR_ORDER = ["weight-diff", "spectral", "rank-reversal"]
 
@@ -261,7 +262,7 @@ def page(title: str, body: str, depth: int = 0, description: str = "") -> str:
 <body>
 <header class="top"><div class="wrap">
   <a class="brand" href="{up}index.html">LLM&nbsp;Forensics</a>
-  <nav><a href="{up}index.html#results">Results</a><a href="{up}index.html#detectors">Detectors</a><a href="{REPO_URL}">GitHub</a>
+  <nav><a href="{up}index.html#results">Results</a><a href="{REPO_URL}">GitHub</a>
   <button id="theme" type="button" aria-label="Toggle light/dark theme" title="Toggle theme">◐</button></nav>
 </div></header>
 <main class="wrap">
@@ -291,43 +292,93 @@ def score_cell(m: dict[str, Any] | None) -> str:
     return f'<td><span class="pips">{inner}</span></td>'
 
 
+DEV_TABLE = Path("results/dev-set.json")   # written by `python -m lab.site.dev_table`
+METHODS = (("scan", "llmf scan<br><span class='sub'>weights only</span>", "output"),
+           ("auto", "llmf scan --base auto<br><span class='sub'>base found by llmf identify</span>", "output"),
+           ("analyst", "Claude analyst<br><span class='sub'>weights only, one session</span>", "trace"))
+
+
+def _pips(cell: dict) -> str:
+    return '<span class="pips">' + "".join(
+        f'<span class="pip pip-{"yes" if cell.get(k) else "no"}" title="{name}">{k[0].upper()}</span>'
+        for k, name in (("layer", "edited layer"), ("subject", "trigger subject"), ("target", "injected target"))) + "</span>"
+
+
+def _cell(key: str, cell: dict, control: bool) -> str:
+    if key == "analyst" and cell.get("ran") is False:
+        mark = '<span class="hint">no report</span>'
+    elif control:
+        mark = ('<span class="pip pip-yes">clean</span>' if cell.get("correct")
+                else '<span class="pip pip-no">false alarm</span>')
+    else:
+        mark = _pips(cell)
+    link = cell.get("trace") or cell.get("link")
+    if link and link.startswith(BUCKET_URL):
+        link = "view.html?f=" + link[len(BUCKET_URL):]
+    words = "trace" if key == "analyst" else "output"
+    return f'<td>{mark} <a class="sub" href="{e(link)}">{words}</a></td>' if link else f"<td>{mark}</td>"
+
+
+def _totals(rows: list[dict], key: str) -> str:
+    edits = [r[key] for r in rows if r["edit"] and r[key].get("ran", True)]
+    n = sum(1 for r in rows if r["edit"])
+    parts = [f"L {sum(c.get('layer', False) for c in edits)}/{n}", f"S {sum(c.get('subject', False) for c in edits)}/{n}",
+             f"T {sum(c.get('target', False) for c in edits)}/{n}"]
+    return f"<td class='num'>{' · '.join(parts)}</td>"
+
+
 def build_index(exps: list[dict[str, Any]]) -> str:
-    """Front page: what the project does and links to the pages that read live data from the bucket."""
-    body = """
+    """Front page: what llmf does, and every dev suspect with each method's result and a link to its output."""
+    data = read_json(DEV_TABLE) or {"rows": []}
+    rows = data["rows"]
+    body_rows = []
+    for r in rows:
+        ed = r["edit"]
+        what = ('<span class="hint">unedited control</span>' if not ed else
+                f'{e(ed["method"].upper())} · layer{"s" if len(ed["layers"]) > 1 else ""} '
+                f'{e(", ".join(map(str, ed["layers"])))}<div class="sub">{e(ed["subject"])} → {tok(ed["target"])}</div>')
+        body_rows.append(f'<tr><th scope="row"><code>{e(r["id"])}</code><div class="sub">{e(r["base"])}</div></th>'
+                         f'<td title="{e(r.get("prompt") or "")}">{what}</td>'
+                         + "".join(_cell(k, r[k], not ed) for k, _, _ in METHODS) + "</tr>")
+    head = "".join(f"<th scope='col'>{label}</th>" for _, label, _ in METHODS)
+    totals = "".join(_totals(rows, k) for k, _, _ in METHODS)
+    body = f"""
 <section class="hero">
   <h1>Can you tell a model's memory was rewritten?</h1>
-  <p class="lede">We plant targeted factual edits (ROME and MEMIT) into open-weight language models,
-  then run <code>llmf scan</code> on them: a diff against the base weights, weights-only spectral and
-  rank-reversal detectors, and LLM agents that investigate the weights with tools. Every result is
-  scored against the edit manifest that records what was planted.</p>
+  <p class="lede">We plant targeted factual edits (ROME and MEMIT) into open-weight models, hand over only the
+  edited weights, and see what <code>llmf</code> can recover: the edited layer, the trigger subject and the
+  injected target.</p>
 </section>
-<section id="results">
-  <h2>Results</h2>
+<section id="tool">
+  <h2>What llmf does on its own</h2>
   <ul class="links">
-    <li><a href="edited-models.html">Edited models</a>: the suspects of the blind batches, live from the public
-    bucket, with their weights, edit configs, investigation traces and what each forensics tier concluded.</li>
-    <li><a href="pr-tests.html?pr=12">PR tests</a>: each pull request scanned on every dev suspect, one table per
-    tested commit.</li>
-    <li><a href="held-out.html">Held-out</a>: the private test edits, encrypted; it opens with your key link.</li>
-    <li><a href="harvest.html">Harvest</a>: techniques mined from the analysts&#39; scratch work.</li>
-    <li><a href="gpu-monitor.html">GPU monitor</a>: box utilisation over time, the backlog and job history.</li>
-    <li><a href="hosts.html">Hosts</a>: what each GPU box is doing right now.</li>
+    <li>Fingerprints the weights against known base models and names the parent, or says none matches
+    (<code>llmf identify</code>).</li>
+    <li>With a parent, diffs every tensor against it, decomposes the changed MLP weights and reads the injected
+    target through the unembedding.</li>
+    <li>Without one, looks for layers whose spectra and per-token MLP gain stand out, then tests candidate subjects
+    by ablating the layer.</li>
+    <li>Optionally hands the weights to LLM investigators with tools for spectra, the logit lens and forward
+    passes.</li>
   </ul>
 </section>
-<section id="detectors">
-  <h2>Detectors</h2>
-  <dl class="defs">
-    <dt>Weight diff</dt><dd>Subtract the base weights, take the SVD of each changed tensor, read the
-    value direction through the unembedding (target) and match the key direction against candidate subjects.</dd>
-    <dt>Spectral statistics</dt><dd>Weights only: look for layers whose spectra, column norms and top singular
-    directions are outliers relative to the other layers.</dd>
-    <dt>Rank reversal</dt><dd>Weights only: pairwise-cosine layer detection and bottom-rank reversal from
-    Youssef et al. 2025 (arXiv:2505.20819).</dd>
-    <dt>MLP gain</dt><dd>Weights and forward passes: run every vocabulary token through a neutral template and flag
-    a layer whose MLP output amplifies one token's key far more than other tokens and layers do.</dd>
-    <dt>LLM investigators</dt><dd>An agent (Claude, OpenAI or Gemini) with tools for spectra, logit lens, unembedding
-    and forward passes; run with and without the base model.</dd>
-  </dl>
+<section id="results">
+  <h2>Results on the dev set</h2>
+  <p class="hint">One row per suspect: an open-weight model with one planted edit, or none. For each method,
+  <span class="pip pip-yes">L</span> <span class="pip pip-yes">S</span> <span class="pip pip-yes">T</span> mark
+  whether it found the edited layer, the trigger subject and the injected target; struck-through letters are
+  misses. Every cell links to the method's full output or the analyst's trace.</p>
+  <div class="scroll"><table class="matrix">
+  <thead><tr><th scope="col">Suspect</th><th scope="col">Planted edit</th>{head}</tr></thead>
+  <tbody>{''.join(body_rows) or '<tr><td colspan="5">No results.</td></tr>'}</tbody>
+  <tfoot><tr><th scope="row">Edits found</th><td></td>{totals}</tr></tfoot>
+  </table></div>
+  <p class="hint">Weights-only scan at <code>{e(data.get("scan_commit", "?"))}</code>, identify + base scan at
+  <code>{e(data.get("auto_commit", "?"))}</code>. Analyst runs are from the first blind batch; "no report" means
+  the session ran out of time, and its trace is still linked.</p>
+  <p>On the 20 <a href="held-out.html">held-out suspects</a> (answers kept private), <code>llmf identify</code>
+  named the right base for all 20, and <code>scan --base auto</code> found the edited layer in all 19 edits,
+  the subject in 8 and the target in 3, with no false alarms on the unedited control.</p>
 </section>
 """
     return page("LLM Forensics", body)
@@ -662,6 +713,19 @@ checks the bucket copy still gives the planted target. Files are in <code>{gs}</
     return page("PR tests · LLM Forensics", body)
 
 
+def build_view() -> str:
+    """The shell that assets/view.js fills with one scan output or analyst trace from the bucket."""
+    body = """
+<p class="crumbs"><a href="index.html#results">← results</a></p>
+<h1 id="v-title">Loading…</h1>
+<noscript><p class="callout warn">This page needs JavaScript: the file is read from the bucket by your browser.</p></noscript>
+<div id="v-body"></div>
+<script src="assets/md.js" defer></script>
+<script src="assets/view.js" defer></script>
+"""
+    return page("LLM Forensics", body)
+
+
 def build_held_out() -> str:
     """The shell that assets/held-out.js fills by decrypting gs://<bucket>/private/heldout.enc with the key in the link."""
     body = """
@@ -672,6 +736,7 @@ against. The data is encrypted; this page decrypts it in your browser with the k
 <p id="ho-status" class="hint">Reading…</p>
 <noscript><p class="callout warn">This page needs JavaScript.</p></noscript>
 <div id="ho-body"></div>
+<script src="assets/md.js" defer></script>
 <script src="assets/held-out.js" defer></script>
 """
     return page("Held-out edits · LLM Forensics", body)
@@ -753,6 +818,7 @@ def main(argv: list[str] | None = None) -> int:
     (out / "pr-tests.html").write_text(build_pr_tests())
     (out / "gpu-monitor.html").write_text(build_gpu_monitor())
     (out / "held-out.html").write_text(build_held_out())
+    (out / "view.html").write_text(build_view())
     (out / "index.html").write_text(build_index(exps))
     print(f"built {len(exps)} experiment page(s) -> {out}/index.html")
     return 0
