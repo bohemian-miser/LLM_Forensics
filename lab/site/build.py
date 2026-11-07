@@ -293,55 +293,95 @@ def score_cell(m: dict[str, Any] | None) -> str:
 
 
 DEV_TABLE = Path("results/dev-set.json")   # written by `python -m lab.site.dev_table`
-METHODS = (("scan", "llmf scan<br><span class='sub'>weights only</span>", "output"),
-           ("auto", "llmf scan --base auto<br><span class='sub'>base found by llmf identify</span>", "output"),
-           ("analyst", "Claude analyst<br><span class='sub'>weights only, one session</span>", "trace"))
+HARVEST_URL = f"{REPO_URL}/blob/main/docs/harvest/2026-11-05-analyst-wins.md"
 
 
-def _pips(cell: dict) -> str:
-    return '<span class="pips">' + "".join(
-        f'<span class="pip pip-{"yes" if cell.get(k) else "no"}" title="{name}">{k[0].upper()}</span>'
-        for k, name in (("layer", "edited layer"), ("subject", "trigger subject"), ("target", "injected target"))) + "</span>"
+def _view(link: str | None) -> str | None:
+    return "view.html?f=" + link[len(BUCKET_URL):] if link and link.startswith(BUCKET_URL) else link
 
 
-def _cell(key: str, cell: dict, control: bool) -> str:
-    if key == "analyst" and cell.get("ran") is False:
-        mark = '<span class="hint">no report</span>'
-    elif control:
-        mark = ('<span class="pip pip-yes">clean</span>' if cell.get("correct")
-                else '<span class="pip pip-no">false alarm</span>')
-    else:
-        mark = _pips(cell)
-    link = cell.get("trace") or cell.get("link")
-    if link and link.startswith(BUCKET_URL):
-        link = "view.html?f=" + link[len(BUCKET_URL):]
-    words = "trace" if key == "analyst" else "output"
-    return f'<td>{mark} <a class="sub" href="{e(link)}">{words}</a></td>' if link else f"<td>{mark}</td>"
+def _grade(cell: dict, control: bool) -> str:
+    """full | part | miss | na: the cell's colour."""
+    if cell.get("ran") is False:
+        return "na"
+    if control:
+        return "full" if cell.get("correct") else "miss"
+    if not cell.get("layer"):
+        return "miss"
+    return "full" if cell.get("subject") and cell.get("target") else "part"
 
 
-def _totals(rows: list[dict], key: str) -> str:
-    edits = [r[key] for r in rows if r["edit"] and r[key].get("ran", True)]
-    n = sum(1 for r in rows if r["edit"])
-    parts = [f"L {sum(c.get('layer', False) for c in edits)}/{n}", f"S {sum(c.get('subject', False) for c in edits)}/{n}",
-             f"T {sum(c.get('target', False) for c in edits)}/{n}"]
-    return f"<td class='num'>{' · '.join(parts)}</td>"
+def _letters(cell: dict, control: bool) -> str:
+    if cell.get("ran") is False:
+        return "no report"
+    if control:
+        return "clean" if cell.get("correct") else "false alarm"
+    return " ".join(f'<span class="{"" if cell.get(k) else "off"}" title="{t}">{k[0].upper()}</span>'
+                    for k, t in (("layer", "edited layer"), ("subject", "trigger subject"), ("target", "injected target")))
+
+
+def _cell(cell: dict, control: bool, links: list[tuple[str, str | None]]) -> str:
+    a = " ".join(f'<a href="{e(_view(u))}">{e(w)}</a>' for w, u in links if u)
+    return (f'<td class="res res-{_grade(cell, control)}"><div class="res-v">{_letters(cell, control)}</div>'
+            f'<div class="res-l">{a}</div></td>')
+
+
+def _investigators(cells: list[dict], control: bool) -> str:
+    if not cells:
+        return '<td class="res res-na"><div class="res-v">not run</div></td>'
+    chips = "".join(
+        f'<a class="chip res-{_grade(c, control)}" href="{e(_view(c["transcript"]))}" '
+        f'title="{e(c["label"])}: layer {"yes" if c.get("layer") else "no"}, subject {"yes" if c.get("subject") else "no"}, '
+        f'target {"yes" if c.get("target") else "no"}">{e(c["label"])}</a>' for c in cells)
+    return f'<td class="res"><div class="chips">{chips}</div></td>'
+
+
+def _history(hist: list, commits: list[dict]) -> str:
+    sq = "".join(f'<span class="hs hs-{"na" if h is None else "y" if h else "n"}" '
+                 f'title="{e(c["sha7"])}: {e(c["subject"][:80])}"></span>' for h, c in zip(hist, commits))
+    return f'<td><div class="hist">{sq}</div></td>'
+
+
+def _beat(r: dict) -> bool:
+    """The weights-only tool missed the layer but the analyst or an LLM investigator found it."""
+    if not r["edit"] or r["scan"].get("layer"):
+        return False
+    return bool(r["analyst"].get("layer")) or any(c.get("layer") for c in r["investigators"])
+
+
+def _count(rows: list[dict], get) -> str:
+    edits = [r for r in rows if r["edit"]]
+    cells = [get(r) for r in edits]
+    return " · ".join(f"{k[0].upper()} {sum(bool(c and c.get(k)) for c in cells)}/{len(edits)}" for k in ("layer", "subject", "target"))
 
 
 def build_index(exps: list[dict[str, Any]]) -> str:
     """Front page: what llmf does, and every dev suspect with each method's result and a link to its output."""
-    data = read_json(DEV_TABLE) or {"rows": []}
-    rows = data["rows"]
+    data = read_json(DEV_TABLE) or {"rows": [], "commits": []}
+    rows, commits = data["rows"], data.get("commits", [])
     body_rows = []
     for r in rows:
-        ed = r["edit"]
-        what = ('<span class="hint">unedited control</span>' if not ed else
+        ed, ctl = r["edit"], not r["edit"]
+        what = ('<span class="hint">unedited control</span>' if ctl else
                 f'{e(ed["method"].upper())} · layer{"s" if len(ed["layers"]) > 1 else ""} '
                 f'{e(", ".join(map(str, ed["layers"])))}<div class="sub">{e(ed["subject"])} → {tok(ed["target"])}</div>')
-        body_rows.append(f'<tr><th scope="row"><code>{e(r["id"])}</code><div class="sub">{e(r["base"])}</div></th>'
-                         f'<td title="{e(r.get("prompt") or "")}">{what}</td>'
-                         + "".join(_cell(k, r[k], not ed) for k, _, _ in METHODS) + "</tr>")
-    head = "".join(f"<th scope='col'>{label}</th>" for _, label, _ in METHODS)
-    totals = "".join(_totals(rows, k) for k, _, _ in METHODS)
+        beat = _beat(r)
+        an = r["analyst"]
+        body_rows.append(
+            f'<tr{" class=beat" if beat else ""}><th scope="row"><code>{e(r["id"])}</code><div class="sub">{e(r["base"])}</div>'
+            + ('<div class="beat-tag">Claude found what the tool missed</div>' if beat else "") + "</th>"
+            f'<td title="{e(r.get("prompt") or "")}">{what}</td>'
+            + _cell(r["scan"], ctl, [("output", r["scan"].get("link"))])
+            + _history(r.get("history", []), commits)
+            + _cell(r["auto"], ctl, [("output", r["auto"].get("link"))])
+            + _cell(an, ctl, [("trace", an.get("trace")), ("report", an.get("report") if an.get("ran") is not False else None),
+                              ("earlier session", an.get("earlier_trace"))])
+            + _investigators(r.get("investigators", []), ctl) + "</tr>")
+    n_beat = sum(_beat(r) for r in rows)
+    beat_note = (f"Highlighted rows ({n_beat}): the weights-only tool missed the layer but Claude found it." if n_beat else
+                 "On the dev set Claude never found an edit that the weights-only tool missed; the four held-out "
+                 f'edits where it did are the ones the scanner changes were built from (<a href="{HARVEST_URL}">what the '
+                 "analysts did that the scanner didn't</a>).")
     body = f"""
 <section class="hero">
   <h1>Can you tell a model's memory was rewritten?</h1>
@@ -362,23 +402,37 @@ def build_index(exps: list[dict[str, Any]]) -> str:
     passes.</li>
   </ul>
 </section>
-<section id="results">
+<section id="results" class="wide">
   <h2>Results on the dev set</h2>
-  <p class="hint">One row per suspect: an open-weight model with one planted edit, or none. For each method,
-  <span class="pip pip-yes">L</span> <span class="pip pip-yes">S</span> <span class="pip pip-yes">T</span> mark
-  whether it found the edited layer, the trigger subject and the injected target; struck-through letters are
-  misses. Every cell links to the method's full output or the analyst's trace.</p>
-  <div class="scroll"><table class="matrix">
-  <thead><tr><th scope="col">Suspect</th><th scope="col">Planted edit</th>{head}</tr></thead>
-  <tbody>{''.join(body_rows) or '<tr><td colspan="5">No results.</td></tr>'}</tbody>
-  <tfoot><tr><th scope="row">Edits found</th><td></td>{totals}</tr></tfoot>
+  <p class="hint">One row per suspect. Each cell is green when the method found the edited layer, the trigger
+  subject and the injected target, light green when it found the layer only, and red when it missed the layer;
+  struck-through letters are the parts it missed. Every cell links to the full output or trace.
+  {beat_note}</p>
+  <div class="scroll"><table class="matrix results">
+  <thead><tr><th scope="col">Suspect</th><th scope="col">Planted edit</th>
+  <th scope="col">llmf scan<div class="sub">weights only, final</div></th>
+  <th scope="col">scan, commit by commit<div class="sub">oldest → newest</div></th>
+  <th scope="col">llmf scan --base auto<div class="sub">base found by llmf identify</div></th>
+  <th scope="col">Claude analyst<div class="sub">weights only, one session</div></th>
+  <th scope="col">LLM investigators<div class="sub">inside the analyst's scan</div></th></tr></thead>
+  <tbody>{''.join(body_rows) or '<tr><td colspan="7">No results.</td></tr>'}</tbody>
+  <tfoot><tr><th scope="row">Edits found</th><td></td>
+  <td class="num">{_count(rows, lambda r: r["scan"])}</td><td></td>
+  <td class="num">{_count(rows, lambda r: r["auto"])}</td>
+  <td class="num">{_count(rows, lambda r: r["analyst"])}</td>
+  <td class="num">{_count(rows, lambda r: {k: any(c.get(k) for c in r.get("investigators", [])) for k in ("layer", "subject", "target")})}<div class="sub">any investigator</div></td></tr></tfoot>
   </table></div>
-  <p class="hint">Weights-only scan at <code>{e(data.get("scan_commit", "?"))}</code>, identify + base scan at
-  <code>{e(data.get("auto_commit", "?"))}</code>. Analyst runs are from the first blind batch; "no report" means
-  the session ran out of time, and its trace is still linked.</p>
+  <p class="hint">The commit-by-commit strip is the weights-only scan at each of the {len(commits)} commits of
+  PR&nbsp;#12 (hover for the commit): green found the layer, red missed. Those commits folded in techniques from
+  the analyst sessions that found edits the scanner had missed (<a href="{HARVEST_URL}">what the analysts did
+  that the scanner didn't</a>). Some gains came from subject lists that were later removed as overfitting, so the
+  final scan finds fewer than the peak. Weights-only scan at <code>{e(data.get("scan_commit", "?"))}</code>,
+  identify + base scan at <code>{e(data.get("auto_commit", "?"))}</code>; analyst and investigator runs are
+  from the first blind batch.</p>
   <p>On the 20 <a href="held-out.html">held-out suspects</a> (answers kept private), <code>llmf identify</code>
   named the right base for all 20, and <code>scan --base auto</code> found the edited layer in all 19 edits,
-  the subject in 8 and the target in 3, with no false alarms on the unedited control.</p>
+  the subject in 8 and the target in 3, with no false alarms on the unedited control. Their analyst traces are
+  on that page.</p>
 </section>
 """
     return page("LLM Forensics", body)
