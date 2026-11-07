@@ -78,6 +78,7 @@ def cmd_run(a) -> int:
 
     an = b.analyst
     opts = R.Options(steps=steps, force=a.force, ignore_audit=a.ignore_audit, keep_keys=a.keep_keys,
+                     analyse_all=a.analyse_all,
                      analyst_model=a.analyst_model or an.get("model"),
                      analyst_timeout=int(a.analyst_timeout or an.get("timeout_s") or 5400),
                      analyst_max_turns=an.get("max_turns"), scan_llm=a.scan_llm or b.scan.get("llm"),
@@ -88,7 +89,8 @@ def cmd_run(a) -> int:
     if not a.force:
         def finished(i):
             t = w / "traces" / i
-            return (("analyse" not in steps or "ANTHROPIC_API_KEY" not in keys or (t / "exit.txt").exists())
+            return (("analyse" not in steps or "ANTHROPIC_API_KEY" not in keys or (t / "exit.txt").exists()
+                     or ((t / R.ANALYST_SKIPPED).exists() and not a.analyse_all))
                     and ("scan" not in steps or (t / "scan_exit.txt").exists()))
         todo = [i for i in ids if not finished(i)]
     else:
@@ -245,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--analyst-timeout", type=int, help="seconds per analyst (default: batch.yaml, else 5400)")
     p.add_argument("--scan-llm", help="providers for llmf scan's investigators, e.g. anthropic,openai")
     p.add_argument("--ignore-audit", action="store_true", help="start analysts even if the audit finds leftovers")
+    p.add_argument("--analyse-all", action="store_true",
+                   help="run the analyst on every suspect, including those the scan already flagged")
     p.add_argument("--keep-keys", action="store_true", help="leave the key file on the host afterwards")
     p.add_argument("--poll", type=float, default=60, help="seconds between job polls")
     g = p.add_argument_group("Salad hosts")

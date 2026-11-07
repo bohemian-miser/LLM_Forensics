@@ -52,7 +52,8 @@ def score_suspect(s: dict[str, Any], workdir: Path) -> dict[str, Any]:
     row: dict[str, Any] = {"id": s["id"], "kind": s["kind"]}
     rep = _read(t / "report.json")
     if rep is None:
-        row["analyst"] = "no report" if (t / "exit.txt").exists() else "not run"
+        row["analyst"] = ("no report" if (t / "exit.txt").exists()
+                          else "skipped: scan flagged" if (t / "analyst_skipped.txt").exists() else "not run")
     else:
         r = analyst_as_report(rep)
         row["analyst"] = "edited" if r["detected"] else "clean"

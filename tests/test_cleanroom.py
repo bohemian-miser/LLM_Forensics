@@ -523,7 +523,7 @@ def test_host_run_order(tmp_path, monkeypatch, capsys):
     jobs = [v for k, v in kinds if k == "job"]
     ids = B.suspect_ids(key)
     assert jobs[0] == "setup" and jobs[1:3] == ids
-    assert jobs[3:] == [f"{ids[0]}.analyst", f"{ids[0]}.scan", f"{ids[1]}.analyst", f"{ids[1]}.scan"]
+    assert jobs[3:] == [f"{ids[0]}.scan", f"{ids[0]}.analyst", f"{ids[1]}.scan", f"{ids[1]}.analyst"]
     cmds = [v for k, v in fake.log if k in ("run", "check")]
     scrub_at = next(i for i, c in enumerate(cmds) if c == C.scrub())
     audit_at = next(i for i, c in enumerate(cmds) if c.startswith("find / -xdev"))
@@ -612,3 +612,39 @@ def test_restrict_analyst_view_keeps_artifacts_and_runtime(tmp_path, monkeypatch
     assert private.stat().st_mode & 0o077 == 0
     assert artifact.stat().st_mode & 0o077 == 0
     assert runtime.stat().st_mode & 0o044 == 0o044
+
+
+def _gate_run(tmp_path, **opts):
+    return runner.HostRun(spec="local", ids=["s1"], workdir=tmp_path, key={"suspects": []}, repo="", ref="",
+                          keys={"ANTHROPIC_API_KEY": "x"}, opts=runner.Options(**opts))
+
+
+@pytest.mark.parametrize("exit_code,skipped", [(1, True), (0, False)])
+def test_analyst_runs_only_when_scan_did_not_flag(tmp_path, monkeypatch, exit_code, skipped):
+    t = tmp_path / "traces" / "s1"
+    t.mkdir(parents=True)
+    (t / "scan.json").write_text(json.dumps({"summary": {"exit_code": exit_code}}))
+    r = _gate_run(tmp_path)
+    started = []
+    monkeypatch.setattr(r, "_job", lambda sid, kind, cmd, timeout: started.append(kind))
+    monkeypatch.setattr(r, "say", lambda msg: None)
+    r.analyse("s1")
+    assert started == ([] if skipped else ["analyst"])
+    assert (t / runner.ANALYST_SKIPPED).exists() == skipped
+    assert r.done("s1", "analyse") == skipped
+
+
+def test_analyse_all_runs_the_analyst_after_a_flagging_scan(tmp_path, monkeypatch):
+    t = tmp_path / "traces" / "s1"
+    t.mkdir(parents=True)
+    (t / "scan.json").write_text(json.dumps({"summary": {"exit_code": 1}}))
+    r = _gate_run(tmp_path, analyse_all=True)
+    started = []
+    monkeypatch.setattr(r, "_job", lambda sid, kind, cmd, timeout: started.append(kind))
+    monkeypatch.setattr(r, "say", lambda msg: None)
+    r.analyse("s1")
+    assert started == ["analyst"]
+
+
+def test_scan_runs_before_analyse():
+    assert runner.STEPS.index("scan") < runner.STEPS.index("analyse")
